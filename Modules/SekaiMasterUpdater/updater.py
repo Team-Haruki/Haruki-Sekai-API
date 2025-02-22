@@ -10,7 +10,7 @@ from aiohttp import ClientSession, ClientResponse
 from ..SekaiClient.model import SekaiServerRegion, SekaiServerInfo
 from ..SekaiClient.manager import SekaiClientManager
 
-from Modules.log_format import LOG_FORMAT, FIELD_STYLE
+from log_format import LOG_FORMAT, FIELD_STYLE
 
 logger = logging.getLogger(__name__)
 coloredlogs.install(level='DEBUG', logger=logger, fmt=LOG_FORMAT, field_styles=FIELD_STYLE)
