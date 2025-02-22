@@ -9,7 +9,7 @@ from typing import Dict, Tuple, List, Optional, Union
 from aiohttp import ClientSession, ClientResponse, ClientProxyConnectionError
 from tenacity import retry, stop_after_attempt, wait_fixed, retry_if_not_exception_type
 
-from ..log_format import LOG_FORMAT, FIELD_STYLE
+from log_format import LOG_FORMAT, FIELD_STYLE
 from .cryptor import SekaiCryptor
 from .nuverse import nuverse_master_restorer
 from .helper import SekaiCookieHelper, SekaiVersionHelper

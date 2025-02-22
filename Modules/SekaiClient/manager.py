@@ -6,7 +6,7 @@ import ujson as json
 from pathlib import Path
 from typing import Dict, Tuple, List, Union, Optional
 
-from ..log_format import LOG_FORMAT, FIELD_STYLE
+from log_format import LOG_FORMAT, FIELD_STYLE
 from .client import SekaiClient
 from .helper import SekaiCookieHelper, SekaiVersionHelper
 from .exceptions import UpgradeRequiredError, UnderMaintenanceError, CookieExpiredError
