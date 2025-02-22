@@ -17,4 +17,4 @@ An unofficial API proxy project for `Project Sekai`
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
-Copyright (c) 2025 Team Haruki
+Copyright ©2025 Haruki Dev Team
