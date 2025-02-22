@@ -1,0 +1,12 @@
+Quart~=0.19.9
+aiofiles~=23.2.1
+coloredlogs~=15.0.1
+ujson~=5.10.0
+Hypercorn~=0.16.0
+APScheduler~=3.10.4
+pydantic~=2.10.6
+aiohttp~=3.11.12
+tenacity~=9.0.0
+msgpack~=1.0.8
+cryptography~=44.0.1
+pygit2~=1.17.0
