@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Dict, List, Union, Optional
 from aiohttp import ClientSession, ClientResponse
 
-from ..SekaiClient.model import SekaiServerRegion, SekaiServerInfo
+from ..SekaiClient.model import SekaiServerRegion, SekaiServerInfo, SekaiApiHttpStatus
 from ..SekaiClient.manager import SekaiClientManager
 
 from log_format import LOG_FORMAT, FIELD_STYLE
@@ -65,7 +65,13 @@ class SekaiMasterUpdater:
         }
         async with ClientSession() as session:
             async with session.request(**options) as response:
-                return response
+                if response.status == SekaiApiHttpStatus.OK:
+                    return response
+                elif response.status == SekaiApiHttpStatus.CONFLICT:
+                    await asyncio.sleep(60)
+                    await self.call_asset_updater(server, data)
+                else:
+                    return None
 
     # Check update
     async def check_update(self, server: SekaiServerRegion, manager: SekaiClientManager) -> Optional[Dict]:
@@ -90,8 +96,7 @@ class SekaiMasterUpdater:
             _update_asset = True
 
         if _update_asset:
-            # await self.call_asset_updater(server, current_server_version)
-            pass
+            await self.call_asset_updater(server, current_server_version)
         if _update_master:
             await self.update_master(server, manager)
         if _update_asset or _update_master:
