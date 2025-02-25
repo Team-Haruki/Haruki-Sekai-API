@@ -1,4 +1,5 @@
 import asyncio
+import traceback
 
 from typing import Tuple, Union
 from quart import Blueprint, Response, jsonify, request
@@ -34,5 +35,6 @@ async def _call_api(api_type, server, sub_path) -> Union[Tuple[Response, int], R
             return Response(response, status, content_type='image/jpeg')
         else:
             return jsonify({'error': 'Invalid API type'}), 400
-    except Exception:
-        return jsonify({'error': 'Internal Server Error'}), 500
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({'error': 'Internal Server Error', 'repr': f'{repr(e)}'}), 500

@@ -18,7 +18,7 @@ coloredlogs.install(level='DEBUG', logger=logger, fmt=LOG_FORMAT, field_styles=F
 
 class SekaiClientManager:
     def __init__(self, server_info: SekaiServerInfo, accounts_dir: Union[Path, str],
-                 version_file_path: Union[Path, str]) -> None:
+                 version_file_path: Union[Path, str], proxies: Optional[List] = None) -> None:
         # Server configs
         self.server: SekaiServerRegion = SekaiServerRegion(server_info.server)
         self.server_info: SekaiServerInfo = server_info
@@ -28,6 +28,8 @@ class SekaiClientManager:
         # Account configs
         self.accounts_dir: Union[Path, str] = accounts_dir
         self.clients: List[SekaiClient] = []
+        # Proxies config
+        self.proxies = proxies
 
     # Generate an account pool
     async def _parse_accounts(self) -> List[Union[SekaiAccountCP, SekaiAccountNuverse]]:
@@ -75,7 +77,7 @@ class SekaiClientManager:
         _accounts = await  self._parse_accounts()
         self.clients.extend([
             SekaiClient(self.server_info, _account, self.server_info.aes_key, self.server_info.aes_iv,
-                        self.cookie_helper, self.version_helper) for _account in _accounts
+                        self.cookie_helper, self.version_helper, self.proxies) for _account in _accounts
         ])
         # Init clients
         client_init_tasks = [client.init() for client in self.clients]
