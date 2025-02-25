@@ -11,7 +11,7 @@ from configs import (SEKAI_SERVERS, ACCOUNTS_DIRS, VERSION_SAVE_DIRS, MASTER_SAV
 _servers = {server: server_info for server, server_info in SEKAI_SERVERS.items() if server_info.enabled}
 managers = {
     server: SekaiClientManager(server_info, Path(ACCOUNTS_DIRS.get(server)),
-                               Path(VERSION_SAVE_DIRS.get(server)) / 'current_version.json')
+                               Path(VERSION_SAVE_DIRS.get(server)) / 'current_version.json', PROXIES)
     for server, server_info in _servers.items()
 }
 
