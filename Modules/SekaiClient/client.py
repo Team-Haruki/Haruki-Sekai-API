@@ -63,7 +63,7 @@ class SekaiClient:
         self.headers["assetVersion"] = self.version_helper.asset_version
 
     # Init client
-    async def init(self):
+    async def init(self) -> None:
         await self.parse_cookies()
         await self.parse_version()
         self.session = ClientSession()
@@ -84,11 +84,11 @@ class SekaiClient:
         else:
             if response.status == SekaiApiHttpStatus.SERVER_ERROR:
                 raise UnknownSekaiClientException(response.status, await response.read())
-            if response.status == SekaiApiHttpStatus.SESSION_ERROR and response.content_type == 'text/html':  # Japanese Server Only
+            if response.status == SekaiApiHttpStatus.SESSION_ERROR and response.content_type == 'text/xml':  # Japanese Server Only
                 raise CookieExpiredError
 
     # Handle common exception retries
-    async def handle_api_exceptions(self, proxy, last_exception=None):
+    async def handle_api_exceptions(self, proxy, last_exception=None) -> Optional[Exception]:
         if isinstance(last_exception, ClientProxyConnectionError):
             logger.warning(f"Failed to connect proxy {proxy}, switching proxy and retrying...")
         elif isinstance(last_exception, SessionError):
