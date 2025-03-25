@@ -87,34 +87,12 @@ class SekaiClient:
             if response.status == SekaiApiHttpStatus.SESSION_ERROR and response.content_type == 'text/xml':  # Japanese Server Only
                 raise CookieExpiredError
 
-    # Handle common exception retries
-    async def handle_api_exceptions(self, proxy, last_exception=None) -> Optional[Exception]:
-        if isinstance(last_exception, ClientProxyConnectionError):
-            logger.warning(f"Failed to connect proxy {proxy}, switching proxy and retrying...")
-        elif isinstance(last_exception, SessionError):
-            logger.warning(
-                f'{self.server.value.upper()} server client #{self.user_id} session expired, re-logging in...')
-            await self.login()
-        elif isinstance(last_exception, UpgradeRequiredError):
-            logger.warning(f'{self.server.value.upper()} server app version might be upgraded')
-            raise last_exception
-        elif isinstance(last_exception, CookieExpiredError):
-            logger.warning('JP server clients\' cookies expired, re-parsing cookies...')
-            await self.parse_cookies()
-        elif isinstance(last_exception, asyncio.TimeoutError):
-            logger.warning(f'{self.server.value.upper()} server client #{self.user_id} request timed out, retrying...')
-        else:
-            traceback.print_exc()
-            logger.error(f"An error occurred: server = {self.server.value.upper()}, exception = {repr(last_exception)}")
-
-        # Retry the last exception if needed
-        if isinstance(last_exception, (SessionError, CookieExpiredError, UpgradeRequiredError)):
-            raise last_exception
-        return last_exception
-
     # Call sekai server API
-    @retry(stop=stop_after_attempt(4), wait=wait_fixed(1),
-           retry=retry_if_not_exception_type((UpgradeRequiredError, CookieExpiredError, UnderMaintenanceError)))
+    @retry(
+        stop=stop_after_attempt(4),
+        wait=wait_fixed(1),
+        retry=retry_if_not_exception_type((UpgradeRequiredError, CookieExpiredError, UnderMaintenanceError))
+    )
     async def call_api(self, path: str, method: str = 'GET', data: Optional[Union[bytes, Dict, List]] = None,
                        params: Optional[Dict] = None) -> Optional[Tuple[Dict, int]]:
         # Reserved exception variable
@@ -144,11 +122,33 @@ class SekaiClient:
                     if 'X-Session-Token' in response.headers:
                         self.headers['X-Session-Token'] = response.headers['X-Session-Token']
                     return await self._response(response)
+            except ClientProxyConnectionError as e:
+                logger.warning(f"Failed to connect proxy {proxy}, switching proxy and retrying...")
+                last_exception = e
+                continue
+            except SessionError:
+                logger.warning(
+                    f'{self.server.value.upper()} server client #{self.user_id} session expired, re-logging in...')
+                await self.login()
+                raise SessionError
+            except CookieExpiredError:
+                logger.warning('JP server clients\' cookies expired, re-parsing cookies...')
+                await self.parse_cookies()
+                raise CookieExpiredError
+            except asyncio.TimeoutError:
+                logger.warning(
+                    f'{self.server.value.upper()} server client #{self.user_id} request timed out, retrying...')
+                raise asyncio.TimeoutError
+            except UpgradeRequiredError:
+                logger.warning(f'{self.server.value.upper()} server app version might be upgraded')
+                raise UpgradeRequiredError
+            except UnderMaintenanceError:
+                logger.warning(f'{self.server.value.upper()} server is under maintenance')
+                raise UnderMaintenanceError
             except Exception as e:
-                last_exception = await self.handle_api_exceptions(proxy, e)
-                if last_exception is None:
-                    continue  # Retry if no critical exception (continue to retry for unknown cases)
-                raise last_exception  # If a critical exception, raise it and stop retrying
+                traceback.print_exc()
+                logger.error(
+                    f"An error occurred: server = {self.server.value.upper()}, exception = {repr(e)}")
 
         logger.warning("Failed to use all proxies, retrying...")
         if last_exception:
