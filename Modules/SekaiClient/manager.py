@@ -28,6 +28,7 @@ class SekaiClientManager:
         # Account configs
         self.accounts_dir: Union[Path, str] = accounts_dir
         self.clients: List[SekaiClient] = []
+        self.client_no: int = 0
         # Proxies config
         self.proxies = proxies
 
@@ -87,51 +88,56 @@ class SekaiClientManager:
         login_tasks = [client.login() for client in self.clients]
         await asyncio.gather(*login_tasks)
 
+    # Get a client
+    async def get_client(self) -> Optional[SekaiClient]:
+        if self.client_no == len(self.clients):
+            self.client_no = 0
+            return self.clients[self.client_no]
+        else:
+            self.client_no += 1
+            return self.clients[self.client_no - 1]
+
     # Get login data
     async def get_login_data(self) -> Optional[Dict]:
-        for client in self.clients:
-            if not client.lock.locked():
-                async with client.lock:
-                    return await client.login()
-            else:
-                continue
+        client = await self.get_client()
+        if not client.lock.locked():
+            async with client.lock:
+                return await client.login()
 
     # Download master data
     async def download_master(self) -> Optional[Dict]:
-        for client in self.clients:
-            if not client.lock.locked():
-                async with client.lock:
-                    return await client.download_master()
+        client = await self.get_client()
+        if not client.lock.locked():
+            async with client.lock:
+                return await client.download_master()
 
     # Call game API
     async def api_get(self, path: str, params: Optional[Dict] = None) -> Optional[Tuple[Dict, int]]:
-        for client in self.clients:
-            if not client.lock.locked():
-                async with client.lock:
-                    try:
-                        return await client.get(path, params=params)
-                    except CookieExpiredError:
-                        logger.warning(f"{self.server.value.upper()} Server cookies expired, re-parsing...")
-                        await self._parse_cookies()
-                        continue
-                    except UpgradeRequiredError:
-                        logger.warning(f"{self.server.value.upper()} Server upgrade required, re-parsing...")
-                        await self._parse_version()
-                        continue
-                    except UnderMaintenanceError:
-                        logger.warning(f"{self.server.value.upper()} Server is under maintenance.")
-                        error_response = {
-                            'result': 'failed',
-                            'message': 'JP Game server is under maintenance.'
-                        }
-                        return error_response, 503
-                    except Exception as e:
-                        logger.warning(f"Failed to call {self.server.value.upper()} Server API: {repr(e)}")
-                        error_response = {
-                            'result': 'failed',
-                            'message': repr(e)
-                        }
-                        return error_response, 500
+        client = await self.get_client()
+        if not client.lock.locked():
+            async with client.lock:
+                try:
+                    return await client.get(path, params=params)
+                except CookieExpiredError:
+                    logger.warning(f"{self.server.value.upper()} Server cookies expired, re-parsing...")
+                    await self._parse_cookies()
+                except UpgradeRequiredError:
+                    logger.warning(f"{self.server.value.upper()} Server upgrade required, re-parsing...")
+                    await self._parse_version()
+                except UnderMaintenanceError:
+                    logger.warning(f"{self.server.value.upper()} Server is under maintenance.")
+                    error_response = {
+                        'result': 'failed',
+                        'message': 'JP Game server is under maintenance.'
+                    }
+                    return error_response, 503
+                except Exception as e:
+                    logger.warning(f"Failed to call {self.server.value.upper()} Server API: {repr(e)}")
+                    error_response = {
+                        'result': 'failed',
+                        'message': repr(e)
+                    }
+                    return error_response, 500
         else:
             error_response = {
                 'result': 'failed',
@@ -140,9 +146,9 @@ class SekaiClientManager:
             return error_response, 500
 
     async def image_get(self, path: str) -> Optional[Tuple[Union[bytes, str], int]]:
-        for client in self.clients:
-            if not client.lock.locked():
-                return await client.get_image(path)
+        client = await self.get_client()
+        if not client.lock.locked():
+            return await client.get_image(path)
 
     async def shutdown(self) -> None:
         tasks = [client.close() for client in self.clients]

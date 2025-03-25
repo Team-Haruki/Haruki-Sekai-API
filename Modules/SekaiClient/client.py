@@ -4,6 +4,7 @@ import logging
 import traceback
 import coloredlogs
 from uuid import uuid4
+from copy import deepcopy
 from urllib.parse import urlparse
 from typing import Dict, Tuple, List, Optional, Union
 from aiohttp import ClientSession, ClientResponse, ClientProxyConnectionError
@@ -31,7 +32,7 @@ class SekaiClient:
         self.api_url = server_info.api_url
         self.nuverse_master_data_url = server_info.nuverse_master_data_url
         self.require_cookies = server_info.require_cookies
-        self.headers = server_info.headers
+        self.headers = deepcopy(server_info.headers)
         self.cryptor = SekaiCryptor(key, iv)
         # Account configs
         self.account = account
@@ -118,7 +119,7 @@ class SekaiClient:
         # Try to request Game API
         for proxy in self.proxies:
             try:
-                async with self.session.request(**options) as response:
+                async with self.session.request(**options, proxy=proxy) as response:
                     if 'X-Session-Token' in response.headers:
                         self.headers['X-Session-Token'] = response.headers['X-Session-Token']
                     return await self._response(response)
