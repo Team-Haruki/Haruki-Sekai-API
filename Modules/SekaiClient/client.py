@@ -150,6 +150,7 @@ class SekaiClient:
                 traceback.print_exc()
                 logger.error(
                     f"An error occurred: server = {self.server.value.upper()}, exception = {repr(e)}")
+                last_exception = e
 
         logger.warning("Failed to use all proxies, retrying...")
         if last_exception:
