@@ -1,6 +1,6 @@
 import asyncio
 import traceback
-
+from pathlib import Path
 from typing import Tuple, Union
 from quart import Blueprint, Response, jsonify, request
 
@@ -8,6 +8,10 @@ from Modules.SekaiClient.model import SekaiServerRegion
 from core import managers
 
 api = Blueprint('api_proxy', __name__)
+if (Path(__file__).parent / 'nuverse.py').exists():
+    from nuverse import nvapi
+
+    api.register_blueprint(nvapi)
 
 
 @api.before_app_serving

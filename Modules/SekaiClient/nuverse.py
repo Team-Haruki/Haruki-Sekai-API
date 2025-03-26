@@ -550,13 +550,15 @@ structures = {
         [
             "costs",
             [
-                "cost",
-                (
-                    "resourceId",
-                    "resourceType",
-                    "resourceLevel",
-                    "quantity"
-                )
+                [
+                    "cost",
+                    (
+                        "resourceId",
+                        "resourceType",
+                        "resourceLevel",
+                        "quantity"
+                    )
+                ]
             ]
         ],
         "startAt",
