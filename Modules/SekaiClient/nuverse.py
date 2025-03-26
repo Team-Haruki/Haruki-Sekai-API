@@ -27,203 +27,509 @@ structures = {
         "sentence",
     ],
     "bondsHonors": [
-        "id", "seq", "bondsGroupId", "gameCharacterUnitId1",
-        "gameCharacterUnitId2", "honorRarity", "name", "description",
-        ["levels", ["id", "bondsHonorId", "level",
-                    "description"]], "configurableUnitVirtualSinger"
+        "id",
+        "seq",
+        "bondsGroupId",
+        "gameCharacterUnitId1",
+        "gameCharacterUnitId2",
+        "honorRarity",
+        "name",
+        "description",
+        [
+            "levels",
+            [
+                "id",
+                "bondsHonorId",
+                "level",
+                "description"
+            ]
+        ],
+        "configurableUnitVirtualSinger"
     ],
-    "cardCostume3ds": ["cardId", "costume3dId"],
+    "cardCostume3ds": [
+        "cardId",
+        "costume3dId"
+    ],
     "cardEpisodes": [
-        "id", "cardId", "title", "scenarioId", "releaseConditionId",
-        "power1BonusFixed", "power2BonusFixed", "power3BonusFixed",
-        ["costs", ["resourceId", "resourceType", "resourceLevel",
-                   "quantity"]], "cardEpisodePartType"
+        "id",
+        "cardId",
+        "title",
+        "scenarioId",
+        "releaseConditionId",
+        "power1BonusFixed",
+        "power2BonusFixed",
+        "power3BonusFixed",
+        [
+            "costs",
+            [
+                "resourceId",
+                "resourceType",
+                "resourceLevel",
+                "quantity"
+            ]
+        ],
+        "cardEpisodePartType"
     ],
     "cards": [
-        "id", "seq", "characterId", "cardRarityType",
-        "specialTrainingPower1BonusFixed", "specialTrainingPower2BonusFixed",
-        "specialTrainingPower3BonusFixed", "attr", "supportUnit", "skillId",
-        "cardSkillName", "prefix", "assetbundleName", "gachaPhrase",
-        "archiveDisplayType", "archivePublishedAt", "cardParameters",
+        "id",
+        "seq",
+        "characterId",
+        "cardRarityType",
+        "specialTrainingPower1BonusFixed",
+        "specialTrainingPower2BonusFixed",
+        "specialTrainingPower3BonusFixed",
+        "attr",
+        "supportUnit",
+        "skillId",
+        "cardSkillName",
+        "prefix",
+        "assetbundleName",
+        "gachaPhrase",
+        "archiveDisplayType",
+        "archivePublishedAt",
+        "cardParameters",
         [
             "specialTrainingCosts",
             [
-                "cardId", "seq",
+                "cardId",
+                "seq",
                 [
                     "cost",
-                    ("resourceId", "resourceType", "resourceLevel", "quantity")
+                    (
+                        "resourceId",
+                        "resourceType",
+                        "resourceLevel",
+                        "quantity"
+                    )
                 ]
             ]
-        ], ["masterLessonAchieveResources", ["masterRank",
-                                             "resources"]], "releaseAt"
+        ],
+        [
+            "masterLessonAchieveResources",
+            [
+                "masterRank",
+                "resources"
+            ]
+        ],
+        "releaseAt"
     ],
-    "challengeLiveHighScoreRewards":
-        ["id", "characterId", "highScore", "resourceBoxId"],
-    "challengeLiveStages": ["characterId", "rank", "nextStageChallengePoint"],
+    "challengeLiveHighScoreRewards": [
+        "id",
+        "characterId",
+        "highScore",
+        "resourceBoxId"
+    ],
+    "challengeLiveStages": [
+        "characterId",
+        "rank",
+        "nextStageChallengePoint"
+    ],
     "character3ds": [
-        "id", "characterId", "unit", "headCostume3dId", "hairCostume3dId",
+        "id",
+        "characterId",
+        "unit",
+        "headCostume3dId",
+        "hairCostume3dId",
         "bodyCostume3dId"
     ],
     "characterArchiveVoices": [
-        "id", "groupId", "gameCharacterId", "unit",
-        "characterArchiveVoiceType", "displayPhrase", "displayPhrase2",
-        "characterArchiveVoiceTagId", "externalId", "assetName", "isNextGrade",
+        "id",
+        "groupId",
+        "gameCharacterId",
+        "unit",
+        "characterArchiveVoiceType",
+        "displayPhrase",
+        "displayPhrase2",
+        "characterArchiveVoiceTagId",
+        "externalId",
+        "assetName",
+        "isNextGrade",
         "displayStartAt"
     ],
     "characterRanks": [
-        "id", "characterId", "characterRank", "power1BonusRate",
-        "power2BonusRate", "power3BonusRate", "rewardResourceBoxIds",
-        ["characterRankAchieveResources", ["resources"]]
+        "id",
+        "characterId",
+        "characterRank",
+        "power1BonusRate",
+        "power2BonusRate",
+        "power3BonusRate",
+        "rewardResourceBoxIds",
+        [
+            "characterRankAchieveResources",
+            [
+                "resources"
+            ]
+        ]
     ],
     "cheerfulCarnivalPartyNames": [
-        "id", "partyName", "gameCharacterUnitId1", "gameCharacterUnitId2",
-        "gameCharacterUnitId3", "gameCharacterUnitId4", "gameCharacterUnitId5"
+        "id",
+        "partyName",
+        "gameCharacterUnitId1",
+        "gameCharacterUnitId2",
+        "gameCharacterUnitId3",
+        "gameCharacterUnitId4",
+        "gameCharacterUnitId5"
     ],
-    "episodeCharacters":
-        ["id", "seq", "character2dId", "storyType", "episodeId"],
-    "eventDeckBonuses":
-        ["id", "eventId", "gameCharacterUnitId", "cardAttr", "bonusRate"],
+    "episodeCharacters": [
+        "id",
+        "seq",
+        "character2dId",
+        "storyType",
+        "episodeId"
+    ],
+    "eventDeckBonuses": [
+        "id",
+        "eventId",
+        "gameCharacterUnitId",
+        "cardAttr",
+        "bonusRate"
+    ],
     "eventExchangeSummaries": [
-        "id", "eventId", "startAt", "endAt",
+        "id",
+        "eventId",
+        "startAt",
+        "endAt",
         [
             "eventExchanges",
             [
-                "id", "eventExchangeSummaryId", "unknown1", "seq",
-                "resourceBoxId", "exchangeLimit",
-                ["eventExchangeCost", ("resourceQuantity")]
+                "id",
+                "eventExchangeSummaryId",
+                "gameCharacterId",
+                "seq",
+                "resourceBoxId",
+                "exchangeLimit",
+                [
+                    "eventExchangeCost",
+                    (
+                        "resourceQuantity"
+                    )
+                ]
             ]
         ]
     ],
     "events": [
-        "id", "eventType", "name", "assetbundleName", "bgmAssetbundleName",
-        "eventPointAssetbundleName", "eventOnlyComponentDisplayStartAt",
-        "startAt", "aggregateAt", "rankingAnnounceAt", "distributionStartAt",
-        "eventOnlyComponentDisplayEndAt", "closedAt", "virtualLiveId", "unit",
+        "id",
+        "eventType",
+        "name",
+        "assetbundleName",
+        "bgmAssetbundleName",
+        "eventPointAssetbundleName",
+        "eventOnlyComponentDisplayStartAt",
+        "startAt",
+        "aggregateAt",
+        "rankingAnnounceAt",
+        "distributionStartAt",
+        "eventOnlyComponentDisplayEndAt",
+        "closedAt",
+        "virtualLiveId",
+        "unit",
         [
             "eventRankingRewardRanges",
-            ["fromRank", "toRank", ["eventRankingRewards", ["resourceBoxId"]]]
+            [
+                "fromRank",
+                "toRank",
+                [
+                    "eventRankingRewards",
+                    [
+                        "resourceBoxId"
+                    ]
+                ]
+            ]
         ]
     ],
     "eventStories": [
-        "id", "eventId", "outline", "bannerGameCharacterUnitId",
+        "id",
+        "eventId",
+        "outline",
+        "bannerGameCharacterUnitId",
         "assetbundleName",
         [
             "eventStoryEpisodes",
             [
-                "id", "eventStoryId", "unknown1", "episodeNo", "title",
-                "assetbundleName", "scenarioId", "releaseConditionId",
-                ["episodeRewards", ["unknown1", "unknown2", "resourceBoxId"]]
+                "id",
+                "eventStoryId",
+                "gameCharacterId",
+                "episodeNo",
+                "title",
+                "assetbundleName",
+                "scenarioId",
+                "releaseConditionId",
+                [
+                    "episodeRewards",
+                    [
+                        "startAt",
+                        "endAt",
+                        "resourceBoxId"
+                    ]
+                ]
             ]
         ]
     ],
     "gachaCeilExchangeSummaries": [
-        "id", "seq", "assetbundleName", "startAt", "endAt",
+        "id",
+        "seq",
+        "assetbundleName",
+        "startAt",
+        "endAt",
         [
             "gachaCeilExchanges",
             [
-                "id", "gachaCeilExchangeSummaryId", "seq", "resourceBoxId",
-                "exchangeLimit", "gachaCeilExchangeLabelType",
+                "id",
+                "gachaCeilExchangeSummaryId",
+                "seq",
+                "resourceBoxId",
+                "exchangeLimit",
+                "gachaCeilExchangeLabelType",
                 "substituteLimit",
                 [
                     "gachaCeilExchangeCost",
-                    ("quantity", "resourceType", "resourceId")
+                    (
+                        "quantity",
+                        "resourceType",
+                        "resourceId"
+                    )
                 ],
                 [
                     "gachaCeilExchangeSubstituteCosts",
-                    ["id", "resourceType", "resourceId", "substituteQuantity"]
+                    [
+                        "id",
+                        "resourceType",
+                        "resourceId",
+                        "substituteQuantity"
+                    ]
                 ]
             ]
         ]
     ],
     "gachas": [
-        "id", "gachaType", "name", "seq", "assetbundleName", "startAt",
-        "endAt", "isShowPeriod", "spinLimit", "gachaCeilItemId",
-        "wishSelectCount", "wishFixedSelectCount", "wishLimitedSelectCount",
-        "gachaBonusId", "drawableGachaHour",
-        ["gachaCardRarityRates", ["cardRarityType", "lotteryType", "rate"]],
+        "id",
+        "gachaType",
+        "name",
+        "seq",
+        "assetbundleName",
+        "startAt",
+        "endAt",
+        "isShowPeriod",
+        "spinLimit",
+        "gachaCeilItemId",
+        "wishSelectCount",
+        "wishFixedSelectCount",
+        "wishLimitedSelectCount",
+        "gachaBonusId",
+        "drawableGachaHour",
+        [
+            "gachaCardRarityRates",
+            [
+                "cardRarityType",
+                "lotteryType",
+                "rate"
+            ]
+        ],
         [
             "gachaDetails",
             [
-                "id", "gachaId", "cardId", "weight", "fixedBonusWeight",
-                "isWish", "gachaDetailWishType"
+                "id",
+                "gachaId",
+                "cardId",
+                "weight",
+                "fixedBonusWeight",
+                "isWish",
+                "gachaDetailWishType"
             ]
         ],
         [
             "gachaBehaviors",
             [
-                "id", "gachaId", "gachaBehaviorType", "costResourceType",
-                "unknown", "costResourceQuantity", "spinCount", "executeLimit",
-                "gachaExtraId", "groupId", "priority", "resourceCategory",
+                "id",
+                "gachaId",
+                "gachaBehaviorType",
+                "costResourceType",
+                "unknown",
+                "costResourceQuantity",
+                "spinCount",
+                "executeLimit",
+                "gachaExtraId",
+                "groupId",
+                "priority",
+                "resourceCategory",
                 "gachaSpinnableType"
             ]
-        ], ["gachaPickups", ["gachaId", "cardId"]],
-        ["gachaInformation", ("gachaId", "summary", "description")]
+        ],
+        [
+            "gachaPickups",
+            [
+                "gachaId",
+                "cardId"
+            ]
+        ],
+        [
+            "gachaInformation",
+            (
+                "gachaId",
+                "summary",
+                "description"
+            )
+        ]
     ],
     "honors": [
-        "id", "seq", "groupId", "honorRarity", "name", "assetbundleName",
-        "honorTypeId", "honorMissionType", "startAt",
+        "id",
+        "seq",
+        "groupId",
+        "honorRarity",
+        "name",
+        "assetbundleName",
+        "honorTypeId",
+        "honorMissionType",
+        "startAt",
         [
             "levels",
             [
-                "level", "bonus", "description", "startAt", "assetbundleName",
+                "level",
+                "bonus",
+                "description",
+                "startAt",
+                "assetbundleName",
                 "honorRarity"
             ]
         ]
     ],
     "liveMissions": [
-        "id", "liveMissionPeriodId", "liveMissionType", "requirement",
-        ["rewards", ["resourceBoxId"]]
+        "id",
+        "liveMissionPeriodId",
+        "liveMissionType",
+        "requirement",
+        [
+            "rewards",
+            [
+                "resourceBoxId"
+            ]
+        ]
     ],
-    "masterLessonRewards": ["cardId", "masterRank", "resourceBoxId", "id"],
+    "masterLessonRewards": [
+        "cardId",
+        "masterRank",
+        "resourceBoxId",
+        "id"
+    ],
     "materialExchangeSummaries": [
-        "id", "seq", "exchangeCategory", "materialExchangeType", "name",
-        "assetbundleName", "startAt", "endAt", "notificationRemainHour",
+        "id",
+        "seq",
+        "exchangeCategory",
+        "materialExchangeType",
+        "name",
+        "assetbundleName",
+        "startAt",
+        "endAt",
+        "notificationRemainHour",
         [
             "materialExchanges",
             [
-                "id", "materialExchangeSummaryId", "seq", "displayName",
-                "isDisplayQuantity", "thumbnailAssetbundleName",
-                "resourceBoxId", "refreshCycle", "exchangeLimit", "startAt",
-                "unknown",
+                "id",
+                "materialExchangeSummaryId",
+                "seq",
+                "displayName",
+                "isDisplayQuantity",
+                "thumbnailAssetbundleName",
+                "resourceBoxId",
+                "refreshCycle",
+                "exchangeLimit",
+                "startAt",
+                "endAt",
                 [
                     "costs",
                     [
-                        "materialExchangeId", "costGroupId", "seq",
-                        "resourceId", "quantity"
+                        "materialExchangeId",
+                        "costGroupId",
+                        "seq",
+                        "resourceId",
+                        "quantity"
                     ]
                 ]
             ]
         ]
     ],
     "musicDifficulties": [
-        "id", "musicId", "musicDifficulty", "playLevel", "releaseConditionId",
+        "id",
+        "musicId",
+        "musicDifficulty",
+        "playLevel",
+        "releaseConditionId",
         "totalNoteCount"
     ],
     "musics": [
-        "id", "seq", "releaseConditionId",
-        ["categories", ["musicCategoryName"]], "title", "pronunciation",
-        "creatorArtistId", "lyricist", "composer", "arranger", "dancerCount",
-        "selfDancerPosition", "assetbundleName", "publishedAt", "releasedAt",
-        "fillerSec", "info", "musicCollaborationId", "isNewlyWrittenMusic",
+        "id",
+        "seq",
+        "releaseConditionId",
+        [
+            "categories",
+            [
+                "musicCategoryName",
+                "startAt"
+            ]
+        ],
+        "title",
+        "pronunciation",
+        "creatorArtistId",
+        "lyricist",
+        "composer",
+        "arranger",
+        "dancerCount",
+        "selfDancerPosition",
+        "assetbundleName",
+        "publishedAt",
+        "releasedAt",
+        "fillerSec",
+        [
+            "infos",
+            [
+                "creator",
+                "title",
+                "lyricist",
+                "composer",
+                "arranger"
+            ]
+        ],
+        "musicCollaborationId",
+        "isNewlyWrittenMusic",
         "isFullLength"
     ],
-    "musicTags": ["musicId", "musicTag"],
+    "musicTags": [
+        "musicId",
+        "musicTag"
+    ],
     "musicVocals": [
-        "id", "musicId", "musicVocalType", "seq", "releaseConditionId",
+        "id",
+        "musicId",
+        "musicVocalType",
+        "seq",
+        "releaseConditionId",
         "caption",
         [
             "characters",
             [
-                "id", "musicId", "musicVocalId", "characterType",
-                "characterId", "seq"
+                "id",
+                "musicId",
+                "musicVocalId",
+                "characterType",
+                "characterId",
+                "seq"
             ]
-        ], "assetbundleName", "specialSeasonId", "archiveDisplayType",
+        ],
+        "assetbundleName",
+        "specialSeasonId",
+        "archiveDisplayType",
         "archivePublishedAt"
     ],
-    "ngWords": ["word"],
+    "ngWords": [
+        "word"
+    ],
     "releaseConditions": [
-        "id", "sentence", "releaseConditionType", "releaseConditionTypeId",
-        "releaseConditionTypeId2", "releaseConditionTypeLevel",
+        "id",
+        "sentence",
+        "releaseConditionType",
+        "releaseConditionTypeId",
+        "releaseConditionTypeId2",
+        "releaseConditionTypeLevel",
         "releaseConditionTypeQuantity"
     ],
     "returnMissions": [
@@ -233,42 +539,96 @@ structures = {
         "returnMissionType",
         "requirement",
         "sentence",
-        "resourceBoxId",
+        "resourceBoxId"
     ],
     "shopItems": [
-        "id", "shopId", "seq", "releaseConditionId", "resourceBoxId",
+        "id",
+        "shopId",
+        "seq",
+        "releaseConditionId",
+        "resourceBoxId",
         [
             "costs",
             [
                 "cost",
-                ("resourceId", "resourceType", "resourceLevel", "quantity")
+                (
+                    "resourceId",
+                    "resourceType",
+                    "resourceLevel",
+                    "quantity"
+                )
             ]
-        ], "startAt"
+        ],
+        "startAt",
+        "endAt"
     ],
     "stamps": [
-        "id", "stampType", "seq", "name", "assetbundleName",
-        "balloonAssetbundleName", "characterId1", "characterId2", "", "", "",
-        "gameCharacterUnitId", "archiveDisplayType", "archivePublishedAt",
+        "id",
+        "stampType",
+        "seq",
+        "name",
+        "assetbundleName",
+        "balloonAssetbundleName",
+        "characterId1",
+        "characterId2",
+        "characterId3",
+        "characterId4",
+        "characterId5",
+        "gameCharacterUnitId",
+        "archiveDisplayType",
+        "archivePublishedAt",
         "description"
     ],
-    "topics": ["id", "topicType", "topicTypeId", "releaseConditionId"],
+    "topics": [
+        "id",
+        "topicType",
+        "topicTypeId",
+        "releaseConditionId"
+    ],
     "virtualItems": [
-        "id", "virtualItemCategory", "seq", "priority", "name",
-        "assetbundleName", "costVirtualCoin", "costJewel",
-        "effectAssetbundleName", "effectExpressionType", "unknown",
-        "gameCharacterUnitId", "unit"
+        "id",
+        "virtualItemCategory",
+        "seq",
+        "priority",
+        "name",
+        "assetbundleName",
+        "costVirtualCoin",
+        "costJewel",
+        "effectAssetbundleName",
+        "effectExpressionType",
+        "virtualItemLabelType",
+        "gameCharacterUnitId",
+        "unit"
     ],
     "virtualLives": [
-        "id", "virtualLiveType", "virtualLivePlatform", "seq", "name",
-        "assetbundleName", "screenMvMusicVocalId", "startAt", "endAt",
-        "rankingAnnounceAt", "",
+        "id",
+        "virtualLiveType",
+        "virtualLivePlatform",
+        "seq",
+        "name",
+        "assetbundleName",
+        "screenMvMusicVocalId",
+        "startAt",
+        "endAt",
+        "rankingAnnounceAt",
+        "archiveReleaseConditionId",
         [
             "virtualLiveSetlists",
             [
-                "id", "seq", "virtualLiveSetlistType", "assetbundleName",
-                "virtualLiveStageId", "musicVocalId", "character3dId1",
-                "character3dId2", "character3dId3", "character3dId4",
-                "character3dId5", "character3dId6", "virtualLiveId", "musicId"
+                "id",
+                "seq",
+                "virtualLiveSetlistType",
+                "assetbundleName",
+                "virtualLiveStageId",
+                "musicVocalId",
+                "character3dId1",
+                "character3dId2",
+                "character3dId3",
+                "character3dId4",
+                "character3dId5",
+                "character3dId6",
+                "virtualLiveId",
+                "musicId"
             ]
         ],
         [
@@ -278,28 +638,58 @@ structures = {
                 "virtualLiveId",
                 "dayOfWeek",
                 "startTime",
-                "endTime",
+                "endTime"
             ]
         ],
         [
             "virtualLiveSchedules",
             [
-                "id", "virtualLiveId", "seq", "startAt", "endAt",
+                "id",
+                "virtualLiveId",
+                "seq",
+                "startAt",
+                "endAt",
                 "noticeGroupId"
             ]
-        ], ["virtualLiveCharacters", ["gameCharacterUnitId"]],
-        ["virtualLiveRewards", ["virtualLiveType", "resourceBoxId"]],
+        ],
+        [
+            "virtualLiveCharacters",
+            [
+                "gameCharacterUnitId"
+            ]
+        ],
+        [
+            "virtualLiveRewards",
+            [
+                "virtualLiveType",
+                "resourceBoxId"
+            ]
+        ],
         [
             "virtualLiveWaitingRoom",
-            ("id", "lobbyAssetbundleName", "startAt", "endAt")
+            (
+                "id",
+                "lobbyAssetbundleName",
+                "startAt",
+                "endAt"
+            )
         ],
         [
             "virtualItems",
             [
-                "id", "virtualItemCategory", "seq", "priority", "name",
-                "assetbundleName", "costVirtualCoin", "costJewel",
-                "effectAssetbundleName", "effectExpressionType", "unknown",
-                "gameCharacterUnitId", "unit"
+                "id",
+                "virtualItemCategory",
+                "seq",
+                "priority",
+                "name",
+                "assetbundleName",
+                "costVirtualCoin",
+                "costJewel",
+                "effectAssetbundleName",
+                "effectExpressionType",
+                "virtualItemLabelType",
+                "gameCharacterUnitId",
+                "unit"
             ]
         ],
         [
@@ -308,7 +698,7 @@ structures = {
                 "id",
                 "virtualLiveId",
                 "virtualLiveStageStatus",
-                "appealText",
+                "appealText"
             ]
         ],
         [
@@ -316,15 +706,138 @@ structures = {
             [
                 "id",
                 "virtualLiveId",
-                "backgroundMusicId",
+                "backgroundMusicId"
             ]
         ],
         [
             "virtualLiveInformation",
-            ("virtualLiveId", "summary", "description")
+            (
+                "virtualLiveId",
+                "summary",
+                "description"
+            )
         ]
     ],
-    "wordings": ["wordingKey", "value"]
+    "wordings": [
+        "wordingKey",
+        "value"
+    ],
+    "sekaiEchoStories": [
+        "id",
+        "groupId",
+        "storyType",
+        "eventId",
+        "honorGroupId",
+        "gameCharacterId",
+        "characterEventSeq",
+        "musicId",
+        "stampId",
+        "startAt",
+        "unit",
+        "assetBundleName"
+    ],
+    "sekaiEchoStoryGroups": [
+        "groupId",
+        "groupName"
+    ],
+    "sekaiEchoUnitCharacters": [
+        "gameCharacterId",
+        "unit",
+        "seq",
+        "assetBundleName",
+    ],
+    "sekaiEchoUnitAbs": [
+        "unit",
+        "seq",
+        "assetBundleName",
+        "pvAssetBundleName",
+        "picAssetBundleName",
+    ],
+    "sekaiEchoMissions": [
+        "id",
+        "sekaiEchoMissionType",
+        "seq",
+        "sentence",
+        "requirement",
+        [
+            "rewards",
+            [
+                "resourceBoxId"
+            ]
+        ],
+    ],
+    "sekaiEchoCardMissions": [
+        "cardGroup",
+        "sekaiEchoCardMissionType",
+        "seq",
+        "sentence",
+        "keyMission",
+        "resourceBoxId",
+    ],
+    "sekaiEchoHonors": [
+        "eventId",
+        "sekaiLevel",
+        "honorId"
+    ],
+    "sekaiEchoHonorMissions": [
+        "sekaiLevel",
+        "sekaiEchoHonorMissionType",
+        "seq",
+        "requirement",
+        "sentence"
+    ],
+    "sekaiEchoPointExchanges": [
+        "resourceType",
+        "resourceId",
+        "quantity",
+        "echoPoint"
+    ],
+    "shiningExchanges": [
+        "id",
+        "shiningExchangeType",
+        "seq",
+        "resourceBoxId",
+        "cost",
+        "refreshCycle",
+        "exchangeLimit",
+        "startAt",
+        "endAt"
+    ],
+    "billingShopItems": [
+        "id",
+        "seq",
+        "billingShopItemType",
+        "billingProductGroupId",
+        "name",
+        "description",
+        "assetBundleName",
+        "resourceBoxId",
+        "bonusResourceBoxId",
+        "startAt",
+        "endAt",
+        "billableLimitType",
+        "billableLimitValue",
+        "billableLimitResetIntervalType",
+        "billableLimitResetIntervalValue",
+        "label",
+        "purchaseOption",
+        "saleType"
+    ],
+    "ongoingMissions": [
+        "id",
+        "seq",
+        "ongoingMissionType",
+        "requirement",
+        "sentence",
+        [
+            "rewards",
+            [
+                "resourceBoxId"
+            ]
+        ],
+        "startAt",
+        "endAt"
+    ]
 }
 
 
