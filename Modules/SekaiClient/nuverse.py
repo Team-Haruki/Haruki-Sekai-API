@@ -876,9 +876,46 @@ def restore_dict(array_data: list, key_structure: list):
     return result
 
 
+def restore_compact_data(data: dict) -> list:
+    """
+    Original Author: TWY
+    convert compact data to original data structure
+    :param data: dict
+    :return: result: list
+    """
+    enum = data.get("__ENUM__", {})
+    column_labels = []
+    columns = []
+    for column in data:
+        if column == "__ENUM__":
+            continue
+        column_labels.append(column)
+        if column in enum:
+            columns.append([(None if i is None else enum[column][i]) for i in data[column]])
+        else:
+            columns.append(data[column])
+    num_entries = min(len(column) for column in columns)
+    result = []
+    for i in range(num_entries):
+        result.append({
+            key: column[i]
+            for key, column in zip(column_labels, columns)})
+    return result
+
+
 def nuverse_master_restorer(master_data: dict) -> dict:
+    restored_compact_master = {}
+
     for key, value in master_data.items():
         try:
+            if key.startswith("compact"):
+                data = restore_compact_data(value)
+                new_key_original = key[len("compact"):]
+                prefix = new_key_original[0].lower()
+                suffix = new_key_original[1:]
+                new_key = prefix + suffix
+                restored_compact_master[new_key] = data
+                continue
             id_key = None
             if key == "eventCards":
                 id_key = "cardId"
@@ -891,4 +928,5 @@ def nuverse_master_restorer(master_data: dict) -> dict:
         except Exception as e:
             raise e
 
-    return master_data
+    restored_compact_master.update(master_data)
+    return restored_compact_master
