@@ -482,8 +482,8 @@ structures = {
         [
             "infos",
             [
-                "creator",
                 "title",
+                "creator",
                 "lyricist",
                 "composer",
                 "arranger"
@@ -786,7 +786,7 @@ structures = {
         "sekaiEchoHonorMissionType",
         "seq",
         "requirement",
-        "sentence"
+        "sentence",
     ],
     "sekaiEchoPointExchanges": [
         "resourceType",
@@ -806,24 +806,24 @@ structures = {
         "endAt"
     ],
     "billingShopItems": [
-        "id",
-        "seq",
-        "billingShopItemType",
-        "billingProductGroupId",
-        "name",
-        "description",
-        "assetBundleName",
-        "resourceBoxId",
-        "bonusResourceBoxId",
-        "startAt",
-        "endAt",
-        "billableLimitType",
-        "billableLimitValue",
-        "billableLimitResetIntervalType",
-        "billableLimitResetIntervalValue",
-        "label",
-        "purchaseOption",
-        "saleType"
+        'id',
+        'seq',
+        'billingShopItemType',
+        'billingProductGroupId',
+        'saleType',
+        'name',
+        'description',
+        'billableLimitType',
+        'billableLimitValue',
+        'billableLimitResetIntervalType',
+        'billableLimitResetIntervalValue',
+        'assetbundleName',
+        'resourceBoxId',
+        'bonusResourceBoxId',
+        'label',
+        'startAt',
+        'endAt',
+        'purchaseOption'
     ],
     "ongoingMissions": [
         "id",
