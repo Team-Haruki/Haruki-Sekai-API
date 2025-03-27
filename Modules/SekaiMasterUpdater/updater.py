@@ -79,25 +79,35 @@ class SekaiMasterUpdater:
 
         version_file = Path(self.version_dirs.get(server)) / 'current_version.json'
         current_version = await self.load_file(version_file)
+        current_server_version = await manager.get_login_data()
         current_data_version = current_version.get('dataVersion')
         current_asset_version = current_version.get('assetVersion')
-        current_server_version = await manager.get_login_data()
         current_server_data_version = current_server_version.get('dataVersion')
         current_server_asset_version = current_server_version.get('assetVersion')
         current_server_asset_hash = current_server_version.get('assetHash', None)
-        if await self.compare_version(current_server_data_version, current_data_version):
-            logger.critical(
-                f'{server.value.upper()} server found new master data version: {current_server_data_version}')
-            _update_master = True
-        if await self.compare_version(current_server_asset_version, current_asset_version):
-            logger.critical(
-                f'{server.value.upper()} server found new asset version: {current_server_data_version}')
-            _update_asset = True
+
+        if server in [SekaiServerRegion.JP, SekaiServerRegion.EN]:
+            if await self.compare_version(current_server_data_version, current_data_version):
+                logger.critical(
+                    f'{server.value.upper()} server found new master data version: {current_server_data_version}')
+                _update_master = True
+            if await self.compare_version(current_server_asset_version, current_asset_version):
+                logger.critical(
+                    f'{server.value.upper()} server found new asset version: {current_server_data_version}')
+                _update_asset = True
+        else:
+            current_cdn_version = current_version.get('cdnVersion')
+            current_server_version = current_server_version.get('cdnVersion')
+            if int(current_cdn_version) < int(current_server_version):
+                logger.critical(f'{server.value.upper()} server found new cdn version: {current_cdn_version}')
+                _update_master = True
+                _update_asset = True
 
         if _update_asset:
             await self.call_asset_updater(server, current_server_version)
         if _update_master:
             await self.update_master(server, manager)
+
         if _update_asset or _update_master:
             current_version['dataVersion'] = current_server_data_version
             current_version['assetVersion'] = current_server_asset_version
