@@ -58,10 +58,10 @@ class SekaiClient:
     async def parse_version(self) -> None:
         await self.version_helper.get_app_version()
         await asyncio.sleep(1)
-        self.headers["appVersion"] = self.version_helper.app_version
-        self.headers["appHash"] = self.version_helper.app_hash
-        self.headers["dataVersion"] = self.version_helper.data_version
-        self.headers["assetVersion"] = self.version_helper.asset_version
+        self.headers["X-App-Version"] = self.version_helper.app_version
+        self.headers["X-App-Hash"] = self.version_helper.app_hash
+        self.headers["X-Data-Version"] = self.version_helper.data_version
+        self.headers["X-Asset-Version"] = self.version_helper.asset_version
 
     # Init client
     async def init(self) -> None:
