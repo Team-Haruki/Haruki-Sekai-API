@@ -208,6 +208,8 @@ class SekaiClient:
                             self.user_id = data.get('userRegistration').get('userId')
                         logger.info(f'{self.server.value.upper()} server account #{self.user_id} logged in.')
                         return data
+                    elif response.status == SekaiApiHttpStatus.UNDER_MAINTENANCE:
+                        raise UnderMaintenanceError
                     else:
                         logger.warning(
                             f'{self.server.value} account login failed with status {response.status},'

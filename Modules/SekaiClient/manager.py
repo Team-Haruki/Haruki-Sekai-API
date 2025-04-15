@@ -5,6 +5,7 @@ import coloredlogs
 import ujson as json
 from pathlib import Path
 from typing import Dict, Tuple, List, Union, Optional
+from tenacity import retry, stop_after_attempt, wait_fixed, retry_if_exception_type
 
 from Modules.log_format import LOG_FORMAT, FIELD_STYLE
 from .client import SekaiClient
@@ -85,8 +86,11 @@ class SekaiClientManager:
         await asyncio.gather(*client_init_tasks)
 
         # Login
-        login_tasks = [client.login() for client in self.clients]
-        await asyncio.gather(*login_tasks)
+        try:
+            login_tasks = [client.login() for client in self.clients]
+            await asyncio.gather(*login_tasks)
+        except Exception as e:
+            logger.error(f"Error while initializing Sekai client: {e}")
 
     # Get a client
     async def get_client(self) -> Optional[SekaiClient]:
@@ -112,6 +116,11 @@ class SekaiClientManager:
                 return await client.download_master()
 
     # Call game API
+    @retry(
+        stop=stop_after_attempt(4),
+        wait=wait_fixed(1),
+        retry=retry_if_exception_type((UpgradeRequiredError, CookieExpiredError))
+    )
     async def api_get(self, path: str, params: Optional[Dict] = None) -> Optional[Tuple[Dict, int]]:
         client = await self.get_client()
         if not client.lock.locked():
@@ -128,7 +137,7 @@ class SekaiClientManager:
                     logger.warning(f"{self.server.value.upper()} Server is under maintenance.")
                     error_response = {
                         'result': 'failed',
-                        'message': 'JP Game server is under maintenance.'
+                        'message': f'{self.server.value.upper()} Game server is under maintenance.'
                     }
                     return error_response, 503
                 except Exception as e:
