@@ -141,8 +141,13 @@ class SekaiClient:
                     f'{self.server.value.upper()} server client #{self.user_id} request timed out, retrying...')
                 raise asyncio.TimeoutError
             except UpgradeRequiredError:
-                logger.warning(f'{self.server.value.upper()} server app version might be upgraded')
-                raise UpgradeRequiredError
+                if self.server in [SekaiServerRegion.JP, SekaiServerRegion.EN]:
+                    logger.warning(f'{self.server.value.upper()} server app version might be upgraded')
+                    raise UpgradeRequiredError
+                else:
+                    logger.warning(f'{self.server.value.upper()} server detected new data, re-logging in...')
+                    await self.login()
+                    raise SessionError
             except UnderMaintenanceError:
                 logger.warning(f'{self.server.value.upper()} server is under maintenance')
                 raise UnderMaintenanceError
