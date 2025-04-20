@@ -43,3 +43,8 @@ class SekaiApiHttpStatus(IntEnum):
     GAME_UPGRADE = 426
     SERVER_ERROR = 500
     UNDER_MAINTENANCE = 503
+
+
+class HarukiAssetUpdaterInfo(BaseModel):
+    url: str
+    authorization: Optional[str] = None

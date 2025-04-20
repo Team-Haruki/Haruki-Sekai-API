@@ -5,7 +5,7 @@ from Modules.SekaiClient.manager import SekaiClientManager
 from Modules.SekaiMasterUpdater.updater import SekaiMasterUpdater
 from Modules.SekaiMasterUpdater.git import GitUpdater
 
-from configs import (SEKAI_SERVERS, ACCOUNTS_DIRS, VERSION_SAVE_DIRS, MASTER_SAVE_DIRS, ASSET_UPDATER_URL,
+from configs import (SEKAI_SERVERS, ACCOUNTS_DIRS, VERSION_SAVE_DIRS, MASTER_SAVE_DIRS, ASSET_UPDATER_SERVERS,
                      ENABLE_GIT_PUSH, GIT_USER, GIT_EMAIL, GIT_PASS, REPOS, PROXIES)
 
 _servers = {server: server_info for server, server_info in SEKAI_SERVERS.items() if server_info.enabled}
@@ -15,7 +15,7 @@ managers = {
     for server, server_info in _servers.items()
 }
 
-updater = SekaiMasterUpdater(_servers, managers, MASTER_SAVE_DIRS, VERSION_SAVE_DIRS, ASSET_UPDATER_URL)
+updater = SekaiMasterUpdater(_servers, managers, MASTER_SAVE_DIRS, VERSION_SAVE_DIRS, ASSET_UPDATER_SERVERS)
 
 if ENABLE_GIT_PUSH:
     git_updater = GitUpdater(GIT_USER, GIT_EMAIL, GIT_PASS, PROXIES)
