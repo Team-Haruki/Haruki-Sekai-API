@@ -1,6 +1,6 @@
 import pygit2
 from pathlib import Path
-from Modules.SekaiClient.model import SekaiServerRegion, SekaiServerInfo
+from Modules.SekaiClient.model import SekaiServerRegion, SekaiServerInfo, HarukiAssetUpdaterInfo
 
 HOST = '0.0.0.0'
 PORT = 9999
@@ -93,6 +93,7 @@ FIELD_STYLE = {
     'name': {'color': 'magenta'},
     'message': {'color': 144, 'bright': False}
 }
-
 # External asset updater URL
-ASSET_UPDATER_URL = 'http://127.0.0.1:12345'
+ASSET_UPDATER_SERVERS = [
+    HarukiAssetUpdaterInfo(url='http://127.0.0.1:12345')
+]

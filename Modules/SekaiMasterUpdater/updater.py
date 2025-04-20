@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Dict, List, Union, Optional
 from aiohttp import ClientSession, ClientResponse
 
-from ..SekaiClient.model import SekaiServerRegion, SekaiServerInfo, SekaiApiHttpStatus
+from ..SekaiClient.model import SekaiServerRegion, SekaiServerInfo, SekaiApiHttpStatus, HarukiAssetUpdaterInfo
 from ..SekaiClient.manager import SekaiClientManager
 from ..log_format import LOG_FORMAT, FIELD_STYLE
 
@@ -19,12 +19,13 @@ class SekaiMasterUpdater:
     def __init__(self, servers: Dict[SekaiServerRegion, SekaiServerInfo],
                  managers: Dict[SekaiServerRegion, SekaiClientManager],
                  master_dirs: Dict[SekaiServerRegion, Union[Path, str]],
-                 version_dirs: Dict[SekaiServerRegion, Union[Path, str]], asset_updater_url: str) -> None:
+                 version_dirs: Dict[SekaiServerRegion, Union[Path, str]],
+                 asset_updater_servers: List[HarukiAssetUpdaterInfo]) -> None:
         self.servers = servers
         self.managers = managers
         self.master_dirs = master_dirs
         self.version_dirs = version_dirs
-        self.asset_updater_url = asset_updater_url
+        self.asset_updater_servers = asset_updater_servers
 
     @staticmethod
     async def compare_version(new_version, current_version) -> bool:
@@ -50,27 +51,33 @@ class SekaiMasterUpdater:
             await file.write(json.dumps(data, indent=4, ensure_ascii=False))
 
     # Call Haruki Sekai Asset Updater
-    async def call_asset_updater(self, server: SekaiServerRegion, data: Dict) -> Optional[ClientResponse]:
-        body = {
-            'server': server.value,
-            'assetVersion': data.get('assetVersion'),
-            'assetHash': data.get('assetHash', None)
-        }
-        options = {
-            'url': f'{self.asset_updater_url}/update_asset',
-            'method': 'POST',
-            'data': body,
-            'headers': {'User-Agent': 'Haruki Sekai API/v2.0.0'}
-        }
+    async def _call_asset_updater(self, options: Dict) -> Optional[ClientResponse]:
         async with ClientSession() as session:
             async with session.request(**options) as response:
                 if response.status == SekaiApiHttpStatus.OK:
                     return response
                 elif response.status == SekaiApiHttpStatus.CONFLICT:
                     await asyncio.sleep(60)
-                    await self.call_asset_updater(server, data)
+                    await self._call_asset_updater(options)
                 else:
                     return None
+
+    async def asset_updater(self, server: SekaiServerRegion, data: Dict):
+        body = {
+            'server': server.value,
+            'assetVersion': data.get('assetVersion'),
+            'assetHash': data.get('assetHash', None)
+        }
+        for updater in self.asset_updater_servers:
+            options = {
+                'url': f'{updater.url}/update_asset',
+                'method': 'POST',
+                'data': body,
+                'headers': {'User-Agent': 'Haruki Sekai API/v2.1.0'}
+            }
+            if updater.authorization:
+                options['headers']['Authorization'] = f'Bearer {updater.authorization}'
+            asyncio.create_task(self._call_asset_updater(options))
 
     # Check update
     async def check_update(self, server: SekaiServerRegion, manager: SekaiClientManager) -> Optional[Dict]:
@@ -104,7 +111,7 @@ class SekaiMasterUpdater:
                 _update_asset = True
 
         if _update_asset:
-            await self.call_asset_updater(server, current_server_version)
+            await self.asset_updater(server, current_server_version)
         if _update_master:
             await self.update_master(server, manager)
 
