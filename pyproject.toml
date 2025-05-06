@@ -1,0 +1,19 @@
+[project]
+name = "Haruki-Sekai-API"
+version = "2.1.0"
+description = "Add your description here"
+requires-python = ">=3.11"
+dependencies = [
+    "aiofiles~=23.2.1",
+    "aiohttp~=3.11.12",
+    "apscheduler~=3.10.4",
+    "coloredlogs~=15.0.1",
+    "cryptography~=44.0.1",
+    "hypercorn~=0.16.0",
+    "msgpack~=1.0.8",
+    "pydantic~=2.10.6",
+    "pygit2~=1.17.0",
+    "quart~=0.19.9",
+    "tenacity~=9.0.0",
+    "ujson~=5.10.0",
+]
