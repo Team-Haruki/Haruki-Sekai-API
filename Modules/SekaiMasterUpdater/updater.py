@@ -72,7 +72,7 @@ class SekaiMasterUpdater:
             options = {
                 'url': f'{updater.url}/update_asset',
                 'method': 'POST',
-                'data': body,
+                'json': body,
                 'headers': {'User-Agent': 'Haruki Sekai API/v2.1.0'}
             }
             if updater.authorization:
@@ -104,9 +104,9 @@ class SekaiMasterUpdater:
                 _update_asset = True
         else:
             current_cdn_version = current_version.get('cdnVersion')
-            current_server_version = current_server_version.get('cdnVersion')
-            if int(current_cdn_version) < int(current_server_version):
-                logger.critical(f'{server.value.upper()} server found new cdn version: {current_cdn_version}')
+            current_server_cdn_version = current_server_version.get('cdnVersion')
+            if int(current_cdn_version) < int(current_server_cdn_version):
+                logger.critical(f'{server.value.upper()} server found new cdn version: {current_server_cdn_version}')
                 _update_master = True
                 _update_asset = True
 
