@@ -4,14 +4,15 @@ An unofficial API proxy project for `Project Sekai`
 
 ## How to use
 
++ Install [uv](https://github.com/astral-sh/uv) at first
 + Install dependencies if you are using `Windows`:  
-  `pip install -r requirements.txt`
+  `uv sync`
 + Install dependencies if you are using `macOS/Linux`:  
-  `pip3 install -r requirements.txt`  
-  `pip3 install uvloop`
+  `uv sync`  
+  `uv add uvloop`
 + Copy `configs.example.py` as a new file `configs.py`, then configure it.
 + Create directory `Data`, and put some data in it.
-+ Run it with command `python main.py` or `python3 main.py`
++ Run it with command `uv run python main.py`
 
 ## License
 
