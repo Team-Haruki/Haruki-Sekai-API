@@ -29,12 +29,12 @@ async def _shutdown() -> None:
 
 async def run() -> None:
     config = Config()
-    config.bind = [f'{HOST}:{PORT}']
+    config.bind = [f"{HOST}:{PORT}"]
     await serve(app, config)
 
 
-if __name__ == '__main__':
-    if platform.system() == 'Windows':
+if __name__ == "__main__":
+    if platform.system() == "Windows":
         asyncio.run(run())
     else:
         import uvloop

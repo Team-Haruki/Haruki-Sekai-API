@@ -25,4 +25,4 @@ class SekaiCryptor:
         cipher = Cipher(algorithms.AES(self._aes_key), modes.CBC(self._aes_iv), backend=default_backend())
         decryptor = cipher.decryptor()
         decrypted = decryptor.update(content) + decryptor.finalize()
-        return msgpack.unpackb(decrypted[:-decrypted[-1]], strict_map_key=False)
+        return msgpack.unpackb(decrypted[: -decrypted[-1]], strict_map_key=False)

@@ -14,18 +14,24 @@ from .exceptions import UpgradeRequiredError, UnderMaintenanceError, CookieExpir
 from .model import SekaiServerInfo, SekaiAccountCP, SekaiAccountNuverse, SekaiServerRegion
 
 logger = logging.getLogger(__name__)
-coloredlogs.install(level='DEBUG', logger=logger, fmt=LOG_FORMAT, field_styles=FIELD_STYLE)
+coloredlogs.install(level="DEBUG", logger=logger, fmt=LOG_FORMAT, field_styles=FIELD_STYLE)
 
 
 class SekaiClientManager:
-    def __init__(self, server_info: SekaiServerInfo, accounts_dir: Union[Path, str],
-                 version_file_path: Union[Path, str], proxies: Optional[List] = None) -> None:
+    def __init__(
+        self,
+        server_info: SekaiServerInfo,
+        accounts_dir: Union[Path, str],
+        version_file_path: Union[Path, str],
+        proxies: Optional[List] = None,
+    ) -> None:
         # Server configs
         self.server: SekaiServerRegion = SekaiServerRegion(server_info.server)
         self.server_info: SekaiServerInfo = server_info
         self.version_helper: SekaiVersionHelper = SekaiVersionHelper(version_file_path)
-        self.cookie_helper: Union[
-            SekaiCookieHelper, None] = SekaiCookieHelper() if self.server == SekaiServerRegion.JP else None
+        self.cookie_helper: Union[SekaiCookieHelper, None] = (
+            SekaiCookieHelper() if self.server == SekaiServerRegion.JP else None
+        )
         # Account configs
         self.accounts_dir: Union[Path, str] = accounts_dir
         self.clients: List[SekaiClient] = []
@@ -36,8 +42,8 @@ class SekaiClientManager:
     # Generate an account pool
     async def _parse_accounts(self) -> List[Union[SekaiAccountCP, SekaiAccountNuverse]]:
         accounts = []
-        for json_file in Path(self.accounts_dir).rglob('*.json'):
-            async with aiofiles.open(json_file, mode='r', encoding='utf-8') as f:
+        for json_file in Path(self.accounts_dir).rglob("*.json"):
+            async with aiofiles.open(json_file, mode="r", encoding="utf-8") as f:
                 try:
                     data = json.loads(await f.read())
                 except json.JSONDecodeError as e:
@@ -76,11 +82,21 @@ class SekaiClientManager:
     # Init manager
     async def init(self) -> None:
         # Create clients list
-        _accounts = await  self._parse_accounts()
-        self.clients.extend([
-            SekaiClient(self.server_info, _account, self.server_info.aes_key, self.server_info.aes_iv,
-                        self.cookie_helper, self.version_helper, self.proxies) for _account in _accounts
-        ])
+        _accounts = await self._parse_accounts()
+        self.clients.extend(
+            [
+                SekaiClient(
+                    self.server_info,
+                    _account,
+                    self.server_info.aes_key,
+                    self.server_info.aes_iv,
+                    self.cookie_helper,
+                    self.version_helper,
+                    self.proxies,
+                )
+                for _account in _accounts
+            ]
+        )
         # Init clients
         client_init_tasks = [client.init() for client in self.clients]
         await asyncio.gather(*client_init_tasks)
@@ -119,7 +135,7 @@ class SekaiClientManager:
     @retry(
         stop=stop_after_attempt(4),
         wait=wait_fixed(1),
-        retry=retry_if_exception_type((UpgradeRequiredError, CookieExpiredError))
+        retry=retry_if_exception_type((UpgradeRequiredError, CookieExpiredError)),
     )
     async def api_get(self, path: str, params: Optional[Dict] = None) -> Optional[Tuple[Dict, int]]:
         client = await self.get_client()
@@ -136,22 +152,16 @@ class SekaiClientManager:
                 except UnderMaintenanceError:
                     logger.warning(f"{self.server.value.upper()} Server is under maintenance.")
                     error_response = {
-                        'result': 'failed',
-                        'message': f'{self.server.value.upper()} Game server is under maintenance.'
+                        "result": "failed",
+                        "message": f"{self.server.value.upper()} Game server is under maintenance.",
                     }
                     return error_response, 503
                 except Exception as e:
                     logger.warning(f"Failed to call {self.server.value.upper()} Server API: {repr(e)}")
-                    error_response = {
-                        'result': 'failed',
-                        'message': repr(e)
-                    }
+                    error_response = {"result": "failed", "message": repr(e)}
                     return error_response, 500
         else:
-            error_response = {
-                'result': 'failed',
-                'message': 'No client is available, please try again later.'
-            }
+            error_response = {"result": "failed", "message": "No client is available, please try again later."}
             return error_response, 500
 
     async def image_get(self, path: str) -> Optional[Tuple[Union[bytes, str], int]]:

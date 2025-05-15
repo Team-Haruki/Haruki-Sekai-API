@@ -20,11 +20,12 @@ class SekaiCookieHelper:
                     "Connection": "keep-alive",
                     "Accept-Language": "zh-CN,zh-Hans;q=0.9",
                     "Accept-Encoding": "gzip, deflate, br",
-                    "X-Unity-Version": "2022.3.21f1"
+                    "X-Unity-Version": "2022.3.21f1",
                 }
                 async with ClientSession() as session:
-                    async with session.post(url="https://issue.sekai.colorfulpalette.org/api/signature",
-                                            headers=headers) as response:
+                    async with session.post(
+                        url="https://issue.sekai.colorfulpalette.org/api/signature", headers=headers
+                    ) as response:
                         if response.status == 200:
                             self.cookies = response.headers.get("Set-Cookie")
 
