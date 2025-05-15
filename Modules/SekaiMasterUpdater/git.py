@@ -4,7 +4,7 @@ import coloredlogs
 from Modules.log_format import LOG_FORMAT, FIELD_STYLE
 
 logger = logging.getLogger(__name__)
-coloredlogs.install(level='DEBUG', logger=logger, fmt=LOG_FORMAT, field_styles=FIELD_STYLE)
+coloredlogs.install(level="DEBUG", logger=logger, fmt=LOG_FORMAT, field_styles=FIELD_STYLE)
 
 
 class GitUpdater:
@@ -24,7 +24,7 @@ class GitUpdater:
                 committer = author
                 tree = repo.index.write_tree()
                 message = f"master data version {data_version}"
-                ref = f'refs/heads/main'
+                ref = f"refs/heads/main"
 
                 if repo.head_is_unborn:
                     parents = []
@@ -33,12 +33,12 @@ class GitUpdater:
 
                 oid = repo.create_commit(ref, author, committer, message, tree, parents)
 
-                remote = repo.remotes['origin']
+                remote = repo.remotes["origin"]
                 credentials = pygit2.UserPass(self.user, self.password)
                 callbacks = pygit2.RemoteCallbacks(credentials=credentials)
-                remote.push([f'+{ref}:{ref}'], callbacks=callbacks, proxy=self.proxy)
-                logger.info(f'Pushed to remote repository.')
+                remote.push([f"+{ref}:{ref}"], callbacks=callbacks, proxy=self.proxy)
+                logger.info(f"Pushed to remote repository.")
             else:
-                logger.info('No changes to commit.')
+                logger.info("No changes to commit.")
         except Exception as e:
-            logger.error(f'Git occurred error while pushing to remote: {repr(e)}')
+            logger.error(f"Git occurred error while pushing to remote: {repr(e)}")

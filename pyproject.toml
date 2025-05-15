@@ -1,6 +1,6 @@
 [project]
 name = "Haruki-Sekai-API"
-version = "2.1.0"
+version = "2.1.1"
 description = "An unofficial API proxy project for Project Sekai"
 requires-python = ">=3.11"
 dependencies = [
@@ -14,6 +14,51 @@ dependencies = [
     "pydantic~=2.10.6",
     "pygit2~=1.17.0",
     "quart~=0.19.9",
+    "ruff>=0.11.9",
     "tenacity~=9.0.0",
     "ujson~=5.10.0",
 ]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.format]
+line-ending = "lf"
+
+[tool.ruff.lint]
+select = [
+    "F", # Pyflakes
+    "W", # pycodestyle warnings
+    "E", # pycodestyle errors
+    "I", # isort
+    "UP", # pyupgrade
+    "ASYNC", # flake8-async
+    "C4", # flake8-comprehensions
+    "T10", # flake8-debugger
+    "T20", # flake8-print
+    "PYI", # flake8-pyi
+    "PT", # flake8-pytest-style
+    "Q", # flake8-quotes
+    "TID", # flake8-tidy-imports
+    "RUF", # Ruff-specific rules
+]
+ignore = [
+    "E402", # module-import-not-at-top-of-file
+    "UP037", # quoted-annotation
+    "RUF001", # ambiguous-unicode-character-string
+    "RUF002", # ambiguous-unicode-character-docstring
+    "RUF003", # ambiguous-unicode-character-comment
+]
+
+[tool.ruff.lint.isort]
+force-sort-within-sections = true
+known-first-party = ["nonebot", "tests/*"]
+extra-standard-library = ["typing_extensions"]
+
+[tool.ruff.lint.flake8-pytest-style]
+fixture-parentheses = false
+mark-parentheses = false
+
+[tool.ruff.lint.pyupgrade]
+keep-runtime-typing = true

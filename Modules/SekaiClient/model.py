@@ -27,11 +27,11 @@ class SekaiAccountNuverse(BaseModel):
 
 
 class SekaiServerRegion(Enum):
-    JP = 'jp'
-    EN = 'en'
-    TW = 'tw'
-    KR = 'kr'
-    CN = 'cn'
+    JP = "jp"
+    EN = "en"
+    TW = "tw"
+    KR = "kr"
+    CN = "cn"
 
 
 class SekaiApiHttpStatus(IntEnum):

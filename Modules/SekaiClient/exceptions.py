@@ -1,5 +1,6 @@
 class SekaiClientException(Exception):
     """Sekai Client Base Exception"""
+
     pass
 
 
@@ -14,7 +15,7 @@ class SessionError(SekaiClientException):
     """Account session error, you should re-login the account."""
 
     def __init__(self):
-        super().__init__('Account session error')
+        super().__init__("Account session error")
 
 
 class CookieExpiredError(SekaiClientException):

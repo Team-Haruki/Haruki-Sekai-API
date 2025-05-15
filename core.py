@@ -5,13 +5,28 @@ from Modules.SekaiClient.manager import SekaiClientManager
 from Modules.SekaiMasterUpdater.updater import SekaiMasterUpdater
 from Modules.SekaiMasterUpdater.git import GitUpdater
 
-from configs import (SEKAI_SERVERS, ACCOUNTS_DIRS, VERSION_SAVE_DIRS, MASTER_SAVE_DIRS, ASSET_UPDATER_SERVERS,
-                     ENABLE_GIT_PUSH, GIT_USER, GIT_EMAIL, GIT_PASS, REPOS, PROXIES)
+from configs import (
+    SEKAI_SERVERS,
+    ACCOUNTS_DIRS,
+    VERSION_SAVE_DIRS,
+    MASTER_SAVE_DIRS,
+    ASSET_UPDATER_SERVERS,
+    ENABLE_GIT_PUSH,
+    GIT_USER,
+    GIT_EMAIL,
+    GIT_PASS,
+    REPOS,
+    PROXIES,
+)
 
 _servers = {server: server_info for server, server_info in SEKAI_SERVERS.items() if server_info.enabled}
 managers = {
-    server: SekaiClientManager(server_info, Path(ACCOUNTS_DIRS.get(server)),
-                               Path(VERSION_SAVE_DIRS.get(server)) / 'current_version.json', PROXIES)
+    server: SekaiClientManager(
+        server_info,
+        Path(ACCOUNTS_DIRS.get(server)),
+        Path(VERSION_SAVE_DIRS.get(server)) / "current_version.json",
+        PROXIES,
+    )
     for server, server_info in _servers.items()
 }
 
@@ -27,6 +42,8 @@ async def check_update() -> None:
     result = await updater.check_update_coroutine()
     if git_updater:
         if result:
-            tasks = [asyncio.to_thread(git_updater.push_remote, REPOS.get(server), data_version) for
-                     server, data_version in result.items()]
+            tasks = [
+                asyncio.to_thread(git_updater.push_remote, REPOS.get(server), data_version)
+                for server, data_version in result.items()
+            ]
             await asyncio.gather(*tasks)
