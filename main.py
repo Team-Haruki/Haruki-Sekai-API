@@ -8,7 +8,7 @@ from apscheduler.triggers.cron import CronTrigger
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from configs import HOST, PORT
-from core import check_update
+from core import check_master_update, check_app_update
 from api import api
 
 app = Quart(__name__)
@@ -18,7 +18,8 @@ scheduler = AsyncIOScheduler()
 
 @app.before_serving
 async def _init() -> None:
-    scheduler.add_job(check_update, CronTrigger(second=7))
+    scheduler.add_job(check_master_update, CronTrigger(second=7))
+    scheduler.add_job(check_app_update, CronTrigger(second=30, minute="*/5"))
     scheduler.start()
 
 

@@ -1,18 +1,17 @@
 import asyncio
-import logging
 import aiofiles
-import coloredlogs
 import ujson as json
 from pathlib import Path
+from aiopath import AsyncPath
 from typing import Dict, List, Union, Optional
 from aiohttp import ClientSession, ClientResponse
 
-from ..SekaiClient.model import SekaiServerRegion, SekaiServerInfo, SekaiApiHttpStatus, HarukiAssetUpdaterInfo
+from .compare import compare_version
+from ..logger import AsyncLogger
 from ..SekaiClient.manager import SekaiClientManager
-from ..log_format import LOG_FORMAT, FIELD_STYLE
+from ..SekaiClient.model import SekaiServerRegion, SekaiServerInfo, SekaiApiHttpStatus, HarukiAssetUpdaterInfo
 
-logger = logging.getLogger(__name__)
-coloredlogs.install(level="DEBUG", logger=logger, fmt=LOG_FORMAT, field_styles=FIELD_STYLE)
+logger = AsyncLogger(__name__, level="DEBUG")
 
 
 class SekaiMasterUpdater:
@@ -31,25 +30,12 @@ class SekaiMasterUpdater:
         self.asset_updater_servers = asset_updater_servers
 
     @staticmethod
-    async def compare_version(new_version, current_version) -> bool:
-        _new_version_parts = new_version.split(".")
-        _current_version_parts = current_version.split(".")
-
-        for i in range(len(_new_version_parts)):
-            if int(_new_version_parts[i]) > int(_current_version_parts[i]):
-                return True
-            elif int(_new_version_parts[i]) < int(_current_version_parts[i]):
-                return False
-
-        return False
-
-    @staticmethod
-    async def load_file(file_path) -> Union[Dict, List]:
+    async def load_file(file_path: Union[AsyncPath, Path, str]) -> Union[Dict, List]:
         async with aiofiles.open(file_path, "r", encoding="utf-8") as file:
             return json.loads(await file.read())
 
     @staticmethod
-    async def save_file(file_path, data) -> None:
+    async def save_file(file_path: Union[AsyncPath, Path, str], data: Union[Dict, List]) -> None:
         async with aiofiles.open(file_path, "w", encoding="utf-8") as file:
             await file.write(json.dumps(data, indent=4, ensure_ascii=False))
 
@@ -62,6 +48,7 @@ class SekaiMasterUpdater:
                 elif response.status == SekaiApiHttpStatus.CONFLICT:
                     await asyncio.sleep(60)
                     await self._call_asset_updater(options)
+                    return None
                 else:
                     return None
 
@@ -76,7 +63,7 @@ class SekaiMasterUpdater:
                 "url": f"{updater.url}/update_asset",
                 "method": "POST",
                 "json": body,
-                "headers": {"User-Agent": "Haruki Sekai API/v2.1.0"},
+                "headers": {"User-Agent": "Haruki Sekai API/v3.0.0"},
             }
             if updater.authorization:
                 options["headers"]["Authorization"] = f"Bearer {updater.authorization}"
@@ -87,7 +74,7 @@ class SekaiMasterUpdater:
         _update_master = False
         _update_asset = False
 
-        version_file = Path(self.version_dirs.get(server)) / "current_version.json"
+        version_file = AsyncPath(self.version_dirs.get(server)) / "current_version.json"
         current_version = await self.load_file(version_file)
         current_server_version = await manager.get_login_data()
         current_data_version = current_version.get("dataVersion")
@@ -97,19 +84,23 @@ class SekaiMasterUpdater:
         current_server_asset_hash = current_server_version.get("assetHash", None)
 
         if server in [SekaiServerRegion.JP, SekaiServerRegion.EN]:
-            if await self.compare_version(current_server_data_version, current_data_version):
-                logger.critical(
+            if await asyncio.to_thread(compare_version, current_server_data_version, current_data_version):
+                await logger.critical(
                     f"{server.value.upper()} server found new master data version: {current_server_data_version}"
                 )
                 _update_master = True
-            if await self.compare_version(current_server_asset_version, current_asset_version):
-                logger.critical(f"{server.value.upper()} server found new asset version: {current_server_data_version}")
+            if await asyncio.to_thread(compare_version, current_server_asset_version, current_asset_version):
+                await logger.critical(
+                    f"{server.value.upper()} server found new asset version: {current_server_data_version}"
+                )
                 _update_asset = True
         else:
             current_cdn_version = current_version.get("cdnVersion")
             current_server_cdn_version = current_server_version.get("cdnVersion")
             if int(current_cdn_version) < int(current_server_cdn_version):
-                logger.critical(f"{server.value.upper()} server found new cdn version: {current_server_cdn_version}")
+                await logger.critical(
+                    f"{server.value.upper()} server found new cdn version: {current_server_cdn_version}"
+                )
                 _update_master = True
                 _update_asset = True
 
@@ -126,12 +117,14 @@ class SekaiMasterUpdater:
                 current_version["cdnVersion"] = current_server_version.get("cdnVersion")
             await self.save_file(version_file, current_version)
             await self.save_file(
-                Path(self.version_dirs.get(server)) / f"{current_server_data_version}.json", current_version
+                AsyncPath(self.version_dirs.get(server)) / f"{current_server_data_version}.json", current_version
             )
             return {server: current_server_data_version}
+        return None
 
     # Check update coroutine
-    async def check_update_coroutine(self) -> Optional[Dict]:
+    async def check_update_concurrently(self) -> Optional[Dict]:
+        await logger.start()
         result_dict = {}
         tasks = [self.check_update(server, manager) for server, manager in self.managers.items()]
         results = await asyncio.gather(*tasks)
@@ -140,18 +133,20 @@ class SekaiMasterUpdater:
         )
         if result_dict:
             return result_dict
+        await logger.stop()
+        return None
 
     async def _save_split_master_data(self, server: SekaiServerRegion, master: Dict) -> None:
-        logger.info(
+        await logger.info(
             f"Saving {server.value.upper()} server split master data...",
         )
-        _master_dir = Path(self.master_dirs.get(server))
+        _master_dir = AsyncPath(self.master_dirs.get(server))
         tasks = [self.save_file(_master_dir / f"{key}.json", value) for key, value in master.items()]
         await asyncio.gather(*tasks)
-        logger.info(f"Saved {server.value.upper()} server split master data.")
+        await logger.info(f"Saved {server.value.upper()} server split master data.")
 
     async def update_master(self, server: SekaiServerRegion, manager: SekaiClientManager) -> None:
-        logger.info(f"Downloading {server.value.upper()} new master data...")
+        await logger.info(f"Downloading {server.value.upper()} new master data...")
         master_data = await manager.download_master()
-        logger.info(f"Downloaded {server.value.upper()} new master data.")
+        await logger.info(f"Downloaded {server.value.upper()} new master data.")
         await self._save_split_master_data(server, master_data)

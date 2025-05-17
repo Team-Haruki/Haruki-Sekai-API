@@ -1,5 +1,6 @@
 import pygit2
 import logging
+import traceback
 import coloredlogs
 from Modules.log_format import LOG_FORMAT, FIELD_STYLE
 
@@ -41,4 +42,5 @@ class GitUpdater:
             else:
                 logger.info("No changes to commit.")
         except Exception as e:
+            traceback.print_exc()
             logger.error(f"Git occurred error while pushing to remote: {repr(e)}")

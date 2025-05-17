@@ -1,6 +1,12 @@
 import pygit2
 from pathlib import Path
-from Modules.SekaiClient.model import SekaiServerRegion, SekaiServerInfo, HarukiAssetUpdaterInfo
+from Modules.SekaiClient.model import (
+    SekaiServerRegion,
+    SekaiServerInfo,
+    HarukiAssetUpdaterInfo,
+    HarukiAppHashSource,
+    HarukiAppHashSourceType,
+)
 
 HOST = "0.0.0.0"
 PORT = 9999
@@ -58,6 +64,10 @@ SEKAI_SERVERS = {
         aes_iv=b"",
     ),
 }
+SEKAI_APPHASH_SOURCES = [
+    HarukiAppHashSource(type_=HarukiAppHashSourceType.FILE, dir=Path("dir/to/source")),
+    HarukiAppHashSource(type_=HarukiAppHashSourceType.URL, url="https://source.com/apphash/"),
+]
 
 # Master data Git repositories configuration
 ENABLE_GIT_PUSH = False  # Set to True if you need to update the Git master repository. Keep it False if not needed.

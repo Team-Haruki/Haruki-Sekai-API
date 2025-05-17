@@ -3,6 +3,7 @@ import aiofiles
 import ujson as json
 from typing import Union
 from pathlib import Path
+from aiopath import AsyncPath
 from aiohttp import ClientSession
 
 
@@ -31,7 +32,7 @@ class SekaiCookieHelper:
 
 
 class SekaiVersionHelper:
-    def __init__(self, version_file_path: Union[Path, str]) -> None:
+    def __init__(self, version_file_path: Union[AsyncPath, Path, str]) -> None:
         self.version_file_path = version_file_path
         self.app_version = None
         self.app_hash = None

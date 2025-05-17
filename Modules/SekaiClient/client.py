@@ -1,8 +1,6 @@
-import asyncio
 import copy
-import logging
+import asyncio
 import traceback
-import coloredlogs
 from uuid import uuid4
 from copy import deepcopy
 from urllib.parse import urlparse
@@ -10,7 +8,7 @@ from typing import Dict, Tuple, List, Optional, Union
 from aiohttp import ClientSession, ClientResponse, ClientProxyConnectionError
 from tenacity import retry, stop_after_attempt, wait_fixed, retry_if_not_exception_type
 
-from Modules.log_format import LOG_FORMAT, FIELD_STYLE
+from ..logger import AsyncLogger
 from .cryptor import SekaiCryptor
 from .nuverse import nuverse_master_restorer
 from .helper import SekaiCookieHelper, SekaiVersionHelper
@@ -23,8 +21,7 @@ from .exceptions import (
 )
 from .model import SekaiServerInfo, SekaiAccountCP, SekaiAccountNuverse, SekaiServerRegion, SekaiApiHttpStatus
 
-logger = logging.getLogger(__name__)
-coloredlogs.install(level="DEBUG", logger=logger, fmt=LOG_FORMAT, field_styles=FIELD_STYLE)
+logger = AsyncLogger(__name__, level="DEBUG")
 
 
 class SekaiClient:
@@ -64,6 +61,7 @@ class SekaiClient:
             await self.cookie_helper.get_cookies()
             await asyncio.sleep(1)
             self.headers["Cookie"] = self.cookie_helper.cookies
+            return None
 
     # Parse version data
     async def parse_version(self) -> None:
@@ -76,6 +74,7 @@ class SekaiClient:
 
     # Init client
     async def init(self) -> None:
+        await logger.start()
         await self.parse_cookies()
         await self.parse_version()
         self.session = ClientSession()
@@ -97,6 +96,7 @@ class SekaiClient:
                 raise UpgradeRequiredError
             elif response.status == SekaiApiHttpStatus.UNDER_MAINTENANCE:
                 raise UnderMaintenanceError
+            return None
         else:
             if response.status == SekaiApiHttpStatus.SERVER_ERROR:
                 raise UnknownSekaiClientException(response.status, await response.read())
@@ -104,6 +104,7 @@ class SekaiClient:
                 response.status == SekaiApiHttpStatus.SESSION_ERROR and response.content_type == "text/xml"
             ):  # Japanese Server Only
                 raise CookieExpiredError
+            return None
 
     # Call sekai server API
     @retry(
@@ -128,7 +129,7 @@ class SekaiClient:
             new_path = f"/api/user/{self.user_id}{sub_path}"
         else:
             new_path = f"/api{path}"
-        logger.info(f"{self.server.value.upper()} server account #{self.user_id} {method} {new_path}")
+        await logger.info(f"{self.server.value.upper()} server account #{self.user_id} {method} {new_path}")
         url = f"{self.api_url}{new_path}"
         options = {
             "url": url,
@@ -146,43 +147,44 @@ class SekaiClient:
                         self.headers["X-Session-Token"] = response.headers["X-Session-Token"]
                     return await self._response(response)
             except ClientProxyConnectionError as e:
-                logger.warning(f"Failed to connect proxy {proxy}, switching proxy and retrying...")
+                await logger.warning(f"Failed to connect proxy {proxy}, switching proxy and retrying...")
                 last_exception = e
                 continue
             except SessionError:
-                logger.warning(
+                await logger.warning(
                     f"{self.server.value.upper()} server client #{self.user_id} session expired, re-logging in..."
                 )
                 await self.login()
                 raise SessionError
             except CookieExpiredError:
-                logger.warning("JP server clients' cookies expired, re-parsing cookies...")
+                await logger.warning("JP server clients' cookies expired, re-parsing cookies...")
                 await self.parse_cookies()
                 raise CookieExpiredError
             except asyncio.TimeoutError:
-                logger.warning(
+                await logger.warning(
                     f"{self.server.value.upper()} server client #{self.user_id} request timed out, retrying..."
                 )
                 raise asyncio.TimeoutError
             except UpgradeRequiredError:
                 if self.server in [SekaiServerRegion.JP, SekaiServerRegion.EN]:
-                    logger.warning(f"{self.server.value.upper()} server app version might be upgraded")
+                    await logger.warning(f"{self.server.value.upper()} server app version might be upgraded")
                     raise UpgradeRequiredError
                 else:
-                    logger.warning(f"{self.server.value.upper()} server detected new data, re-logging in...")
+                    await logger.warning(f"{self.server.value.upper()} server detected new data, re-logging in...")
                     await self.login()
                     raise SessionError
             except UnderMaintenanceError:
-                logger.warning(f"{self.server.value.upper()} server is under maintenance")
+                await logger.warning(f"{self.server.value.upper()} server is under maintenance")
                 raise UnderMaintenanceError
             except Exception as e:
                 traceback.print_exc()
-                logger.error(f"An error occurred: server = {self.server.value.upper()}, exception = {repr(e)}")
+                await logger.error(f"An error occurred: server = {self.server.value.upper()}, exception = {repr(e)}")
                 last_exception = e
 
-        logger.warning("Failed to use all proxies, retrying...")
+        await logger.warning("Failed to use all proxies, retrying...")
         if last_exception:
             raise last_exception
+        return None
 
     # (Japanese Serve Only) Get MySekai image
     async def get_image(self, path: str) -> Optional[Tuple[Union[bytes, str], int]]:
@@ -195,7 +197,7 @@ class SekaiClient:
                     else:
                         return "Error", response.status
             except ClientProxyConnectionError:
-                logger.warning(f"Failed to connect proxy {proxy}, switching proxy and retrying...")
+                await logger.warning(f"Failed to connect proxy {proxy}, switching proxy and retrying...")
                 continue
         else:
             return "Error", SekaiApiHttpStatus.SERVER_ERROR
@@ -220,12 +222,12 @@ class SekaiClient:
             "timeout": 20,
         }
 
-        # Try to login
+        # Try to log in
         for proxy in self.proxies:
             try:
                 async with self.session.request(**options, proxy=proxy) as response:
                     if response.status == SekaiApiHttpStatus.GAME_UPGRADE:
-                        logger.warning(f"{self.server.value.upper()} server app version might be upgraded")
+                        await logger.warning(f"{self.server.value.upper()} server app version might be upgraded")
                         raise UpgradeRequiredError
                     elif response.status == SekaiApiHttpStatus.OK:
                         data = await self.cryptor.unpack(await response.read())
@@ -234,20 +236,22 @@ class SekaiClient:
                         self.headers["X-Asset-Version"] = data.get("assetVersion")
                         if isinstance(self.account, SekaiAccountNuverse):
                             self.user_id = data.get("userRegistration").get("userId")
-                        logger.info(f"{self.server.value.upper()} server account #{self.user_id} logged in.")
+                        await logger.info(f"{self.server.value.upper()} server account #{self.user_id} logged in.")
                         return data
                     elif response.status == SekaiApiHttpStatus.UNDER_MAINTENANCE:
                         raise UnderMaintenanceError
                     else:
-                        logger.warning(
+                        await logger.warning(
                             f"{self.server.value} account login failed with status {response.status},"
                             f" {await self.cryptor.unpack(await response.read())}"
                         )
+                        return None
             except UpgradeRequiredError:
                 raise UpgradeRequiredError
             except Exception as e:
-                logger.error(f"An error occurred: server = {self.server.value.upper()}, exception = {repr(e)}")
+                await logger.error(f"An error occurred: server = {self.server.value.upper()}, exception = {repr(e)}")
                 raise e
+        return None
 
     # Download master data
     async def download_master(self) -> Dict:
@@ -265,7 +269,7 @@ class SekaiClient:
                         data = await self.cryptor.unpack(await response.read())
                         return await asyncio.to_thread(nuverse_master_restorer, data)
                 except ClientProxyConnectionError:
-                    logger.warning(f"Failed to connect proxy {proxy}, switching proxy and retrying...")
+                    await logger.warning(f"Failed to connect proxy {proxy}, switching proxy and retrying...")
         else:
             _split_master = login_data.get("suiteMasterSplitPath")
             for _path in _split_master:
@@ -280,9 +284,10 @@ class SekaiClient:
         try:
             return await self.call_api(path, params=params)
         except Exception as e:
-            logger.error(f"An error occurred: {repr(e)}")
+            await logger.error(f"An error occurred: {repr(e)}")
             raise e
 
     # Shutdown client
     async def close(self) -> None:
+        await logger.stop()
         await self.session.close()
