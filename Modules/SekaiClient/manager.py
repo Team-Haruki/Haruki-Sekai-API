@@ -1,20 +1,17 @@
 import asyncio
-import logging
 import aiofiles
-import coloredlogs
 import ujson as json
 from pathlib import Path
 from typing import Dict, Tuple, List, Union, Optional
 from tenacity import retry, stop_after_attempt, wait_fixed, retry_if_exception_type
 
-from Modules.log_format import LOG_FORMAT, FIELD_STYLE
+from ..logger import AsyncLogger
 from .client import SekaiClient
 from .helper import SekaiCookieHelper, SekaiVersionHelper
 from .exceptions import UpgradeRequiredError, UnderMaintenanceError, CookieExpiredError
 from .model import SekaiServerInfo, SekaiAccountCP, SekaiAccountNuverse, SekaiServerRegion
 
-logger = logging.getLogger(__name__)
-coloredlogs.install(level="DEBUG", logger=logger, fmt=LOG_FORMAT, field_styles=FIELD_STYLE)
+logger = AsyncLogger(__name__, level="DEBUG")
 
 
 class SekaiClientManager:
@@ -47,7 +44,7 @@ class SekaiClientManager:
                 try:
                     data = json.loads(await f.read())
                 except json.JSONDecodeError as e:
-                    logger.warning(f"Error decoding JSON in file {json_file}: {e}")
+                    await logger.warning(f"Error decoding JSON in file {json_file}: {e}")
                     continue
                 if isinstance(data, dict):
                     if self.server in [SekaiServerRegion.JP, SekaiServerRegion.EN]:
@@ -63,7 +60,7 @@ class SekaiClientManager:
                             account = SekaiAccountNuverse(**_account)
                         accounts.append(account)
                 else:
-                    logger.warning(f"Unexpected data type in file {json_file}: {type(data)}")
+                    await logger.warning(f"Unexpected data type in file {json_file}: {type(data)}")
                     continue
 
         return accounts
@@ -81,6 +78,7 @@ class SekaiClientManager:
 
     # Init manager
     async def init(self) -> None:
+        await logger.start()
         # Create clients list
         _accounts = await self._parse_accounts()
         self.clients.extend(
@@ -106,7 +104,7 @@ class SekaiClientManager:
             login_tasks = [client.login() for client in self.clients]
             await asyncio.gather(*login_tasks)
         except Exception as e:
-            logger.error(f"Error while initializing Sekai client: {e}")
+            await logger.error(f"Error while initializing Sekai client: {e}")
 
     # Get a client
     async def get_client(self) -> Optional[SekaiClient]:
@@ -123,6 +121,7 @@ class SekaiClientManager:
         if not client.lock.locked():
             async with client.lock:
                 return await client.login()
+        return None
 
     # Download master data
     async def download_master(self) -> Optional[Dict]:
@@ -130,6 +129,7 @@ class SekaiClientManager:
         if not client.lock.locked():
             async with client.lock:
                 return await client.download_master()
+        return None
 
     # Call game API
     @retry(
@@ -144,20 +144,20 @@ class SekaiClientManager:
                 try:
                     return await client.get(path, params=params)
                 except CookieExpiredError:
-                    logger.warning(f"{self.server.value.upper()} Server cookies expired, re-parsing...")
+                    await logger.warning(f"{self.server.value.upper()} Server cookies expired, re-parsing...")
                     await self._parse_cookies()
                 except UpgradeRequiredError:
-                    logger.warning(f"{self.server.value.upper()} Server upgrade required, re-parsing...")
+                    await logger.warning(f"{self.server.value.upper()} Server upgrade required, re-parsing...")
                     await self._parse_version()
                 except UnderMaintenanceError:
-                    logger.warning(f"{self.server.value.upper()} Server is under maintenance.")
+                    await logger.warning(f"{self.server.value.upper()} Server is under maintenance.")
                     error_response = {
                         "result": "failed",
                         "message": f"{self.server.value.upper()} Game server is under maintenance.",
                     }
                     return error_response, 503
                 except Exception as e:
-                    logger.warning(f"Failed to call {self.server.value.upper()} Server API: {repr(e)}")
+                    await logger.warning(f"Failed to call {self.server.value.upper()} Server API: {repr(e)}")
                     error_response = {"result": "failed", "message": repr(e)}
                     return error_response, 500
         else:
@@ -168,7 +168,9 @@ class SekaiClientManager:
         client = await self.get_client()
         if not client.lock.locked():
             return await client.get_image(path)
+        return None
 
     async def shutdown(self) -> None:
         tasks = [client.close() for client in self.clients]
         await asyncio.gather(*tasks)
+        await logger.stop()

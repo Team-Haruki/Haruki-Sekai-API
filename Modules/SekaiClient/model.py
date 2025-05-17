@@ -1,6 +1,7 @@
-from typing import Optional
+from pathlib import Path
+from typing import Optional, Union
 from enum import Enum, IntEnum
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 
 class SekaiServerInfo(BaseModel):
@@ -48,3 +49,21 @@ class SekaiApiHttpStatus(IntEnum):
 class HarukiAssetUpdaterInfo(BaseModel):
     url: str
     authorization: Optional[str] = None
+
+
+class HarukiAppHashSourceType(Enum):
+    FILE = "file"
+    URL = "url"
+
+
+class HarukiAppHashSource(BaseModel):
+    type_: HarukiAppHashSourceType = HarukiAppHashSourceType.FILE
+    dir: Optional[Union[Path, str]] = None
+    url: Optional[str] = None
+
+
+class HarukiAppInfo(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    appVersion: str
+    appHash: str

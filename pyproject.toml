@@ -1,11 +1,12 @@
 [project]
 name = "Haruki-Sekai-API"
-version = "2.1.1"
+version = "3.0.0"
 description = "An unofficial API proxy project for Project Sekai"
 requires-python = ">=3.11"
 dependencies = [
     "aiofiles~=23.2.1",
     "aiohttp~=3.11.12",
+    "aiopath>=0.6.11",
     "apscheduler~=3.10.4",
     "coloredlogs~=15.0.1",
     "cryptography~=44.0.1",
