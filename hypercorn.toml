@@ -1,0 +1,6 @@
+bind = ["127.0.0.1:9999"]
+loglevel = "info"
+access_log_format = "%(h)s %(r)s %(s)s %(b)s %(M)s"
+keep_alive_timeout = 10
+workers = 1
+# worker_class = "uvloop" # High asyncio event loop performance suggestion.

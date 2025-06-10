@@ -1,6 +1,6 @@
+import orjson
 import asyncio
 import aiofiles
-import ujson as json
 from pathlib import Path
 from typing import Dict, Tuple, List, Union, Optional
 from tenacity import retry, stop_after_attempt, wait_fixed, retry_if_exception_type
@@ -26,7 +26,7 @@ class SekaiClientManager:
         self.server: SekaiServerRegion = SekaiServerRegion(server_info.server)
         self.server_info: SekaiServerInfo = server_info
         self.version_helper: SekaiVersionHelper = SekaiVersionHelper(version_file_path)
-        self.cookie_helper: Union[SekaiCookieHelper, None] = (
+        self.cookie_helper: Optional[SekaiCookieHelper] = (
             SekaiCookieHelper() if self.server == SekaiServerRegion.JP else None
         )
         # Account configs
@@ -42,8 +42,8 @@ class SekaiClientManager:
         for json_file in Path(self.accounts_dir).rglob("*.json"):
             async with aiofiles.open(json_file, mode="r", encoding="utf-8") as f:
                 try:
-                    data = json.loads(await f.read())
-                except json.JSONDecodeError as e:
+                    data = orjson.loads(await f.read())
+                except orjson.JSONDecodeError as e:
                     await logger.warning(f"Error decoding JSON in file {json_file}: {e}")
                     continue
                 if isinstance(data, dict):

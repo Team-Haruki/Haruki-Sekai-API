@@ -1,6 +1,6 @@
+import orjson
 import asyncio
 import aiofiles
-import ujson as json
 from typing import Union
 from pathlib import Path
 from aiopath import AsyncPath
@@ -44,7 +44,7 @@ class SekaiVersionHelper:
         if not self.lock.locked():
             async with self.lock:
                 async with aiofiles.open(self.version_file_path, "r", encoding="utf-8") as f:
-                    data = json.loads(await f.read())
+                    data = orjson.loads(await f.read())
                     self.app_version = data["appVersion"]
                     self.app_hash = data["appHash"]
                     self.data_version = data["dataVersion"]

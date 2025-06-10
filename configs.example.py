@@ -8,8 +8,11 @@ from Modules.SekaiClient.model import (
     HarukiAppHashSourceType,
 )
 
-HOST = "0.0.0.0"
-PORT = 9999
+JWT_SECRET = "SECRET_STRING"
+DATABASE_URL = "sqlite+aiosqlite:///./test.db"
+REDIS_HOST = "localhost"
+REDIS_PORT = 6379
+REDIS_PASSWORD = None
 WORK_DIR = Path(__file__).parent  # Configure it if you need
 PROXIES = ["http://127.0.0.1:7890"]  # Configure proxies here
 
