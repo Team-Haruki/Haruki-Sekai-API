@@ -26,7 +26,7 @@ class SekaiCryptor:
         padded = self._pad(packed)
         return encryptor.update(padded) + encryptor.finalize()
 
-    def _decrypt(self, content: bytes) -> Dict:
+    def _decrypt(self, content: bytes) -> Union[Dict, List]:
         cipher = Cipher(algorithms.AES(self._aes_key), modes.CBC(self._aes_iv), backend=default_backend())
         decryptor = cipher.decryptor()
         decrypted = decryptor.update(content) + decryptor.finalize()

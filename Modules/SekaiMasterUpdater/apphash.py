@@ -1,5 +1,5 @@
+import orjson
 import asyncio
-import ujson as json
 from pathlib import Path
 from aiopath import AsyncPath
 from aiohttp import ClientSession
@@ -37,8 +37,8 @@ class AppHashUpdater(object):
                 if await path.exists():
                     try:
                         data = await path.read_text(encoding="utf-8")
-                        return await asyncio.to_thread(lambda: HarukiAppInfo(**json.loads(data)))
-                    except (json.JSONDecodeError, ValidationError):
+                        return await asyncio.to_thread(lambda: HarukiAppInfo(**orjson.loads(data)))
+                    except (orjson.JSONDecodeError, ValidationError):
                         return None
                 return None
             case HarukiAppHashSourceType.URL:
@@ -68,8 +68,8 @@ class AppHashUpdater(object):
         path = AsyncPath(self._server_version_dirs.get(server)) / "current_version.json"
         try:
             data = await path.read_text(encoding="utf-8")
-            return await asyncio.to_thread(lambda: HarukiAppInfo(**json.loads(data)))
-        except (OSError, json.JSONDecodeError, ValidationError):
+            return await asyncio.to_thread(lambda: HarukiAppInfo(**orjson.loads(data)))
+        except (OSError, orjson.JSONDecodeError, ValidationError):
             return None
 
     async def save_new_app_hash(self, server: SekaiServerRegion, app: HarukiAppInfo) -> bool:
@@ -77,13 +77,13 @@ class AppHashUpdater(object):
             path = AsyncPath(self._server_version_dirs.get(server)) / "current_version.json"
             try:
                 raw = await path.read_text(encoding="utf-8")
-                data = await asyncio.to_thread(json.loads, raw)
+                data = await asyncio.to_thread(orjson.loads, raw)
             except Exception:
                 data = {}
             data["appVersion"] = app.appVersion
             data["appHash"] = app.appHash
-            json_str = await asyncio.to_thread(json.dumps, data, ensure_ascii=False, indent=4)
-            await path.write_text(json_str, encoding="utf-8")
+            json_bytes = await asyncio.to_thread(orjson.dumps, data, option=orjson.OPT_INDENT_2)
+            await path.write_bytes(json_bytes)
             return True
         except Exception:
             return False

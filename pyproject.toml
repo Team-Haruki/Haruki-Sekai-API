@@ -1,6 +1,6 @@
 [project]
 name = "Haruki-Sekai-API"
-version = "3.0.0"
+version = "4.0.0"
 description = "An unofficial API proxy project for Project Sekai"
 requires-python = ">=3.11"
 dependencies = [
@@ -10,14 +10,17 @@ dependencies = [
     "apscheduler~=3.10.4",
     "coloredlogs~=15.0.1",
     "cryptography~=44.0.1",
+    "fastapi>=0.115.12",
     "hypercorn~=0.16.0",
     "msgpack~=1.0.8",
+    "orjson>=3.10.18",
     "pydantic~=2.10.6",
     "pygit2~=1.17.0",
-    "quart~=0.19.9",
+    "pyjwt>=2.10.1",
+    "redis>=6.2.0",
     "ruff>=0.11.9",
+    "sqlalchemy>=2.0.41",
     "tenacity~=9.0.0",
-    "ujson~=5.10.0",
 ]
 
 [tool.ruff]

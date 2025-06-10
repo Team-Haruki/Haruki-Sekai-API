@@ -1,6 +1,6 @@
+import orjson
 import asyncio
 import aiofiles
-import ujson as json
 from pathlib import Path
 from aiopath import AsyncPath
 from typing import Dict, List, Union, Optional
@@ -32,12 +32,12 @@ class SekaiMasterUpdater:
     @staticmethod
     async def load_file(file_path: Union[AsyncPath, Path, str]) -> Union[Dict, List]:
         async with aiofiles.open(file_path, "r", encoding="utf-8") as file:
-            return json.loads(await file.read())
+            return orjson.loads(await file.read())
 
     @staticmethod
     async def save_file(file_path: Union[AsyncPath, Path, str], data: Union[Dict, List]) -> None:
-        async with aiofiles.open(file_path, "w", encoding="utf-8") as file:
-            await file.write(json.dumps(data, indent=4, ensure_ascii=False))
+        async with aiofiles.open(file_path, "wb") as file:
+            await file.write(orjson.dumps(data, option=orjson.OPT_INDENT_2))
 
     # Call Haruki Sekai Asset Updater
     async def _call_asset_updater(self, options: Dict) -> Optional[ClientResponse]:

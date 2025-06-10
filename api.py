@@ -5,7 +5,7 @@ from typing import Tuple, Union
 from quart import Blueprint, Response, jsonify, request
 
 from Modules.SekaiClient.model import SekaiServerRegion
-from core import managers
+from utils import managers
 
 api = Blueprint("api_proxy", __name__)
 if (Path(__file__).parent / "nuverse.py").exists():

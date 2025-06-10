@@ -2,10 +2,16 @@ import pygit2
 import logging
 import traceback
 import coloredlogs
-from Modules.log_format import LOG_FORMAT, FIELD_STYLE
 
+log_format = "[%(asctime)s][%(levelname)s][%(name)s] %(message)s"
+field_style = {
+    "asctime": {"color": "green"},
+    "levelname": {"color": "blue", "bold": True},
+    "name": {"color": "magenta"},
+    "message": {"color": 144, "bright": False},
+}
 logger = logging.getLogger(__name__)
-coloredlogs.install(level="DEBUG", logger=logger, fmt=LOG_FORMAT, field_styles=FIELD_STYLE)
+coloredlogs.install(level="DEBUG", logger=logger, fmt=log_format, field_styles=field_style)
 
 
 class GitUpdater:
