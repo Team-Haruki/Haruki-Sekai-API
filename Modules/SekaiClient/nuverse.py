@@ -6,7 +6,6 @@ structures = {
         "isNextGrade",
         "scenarioId",
         "scriptId",
-        # "specialSeasonId",
         "characterIds",
         "archiveDisplayType",
         "archivePublishedAt",
@@ -111,7 +110,10 @@ structures = {
                 "resources"
             ]
         ],
-        "releaseAt"
+        "releaseAt",
+        "specialTrainingSkillId",
+        "specialTrainingSkillName",
+        "cardSupplyId"
     ],
     "challengeLiveHighScoreRewards": [
         "id",
@@ -130,7 +132,10 @@ structures = {
         "unit",
         "headCostume3dId",
         "hairCostume3dId",
-        "bodyCostume3dId"
+        "bodyCostume3dId",
+        "lookAtLimitX",
+        "lookAtLimitY",
+        "name"
     ],
     "characterArchiveVoices": [
         "id",
@@ -299,7 +304,8 @@ structures = {
                     ]
                 ]
             ]
-        ]
+        ],
+        "gachaCeilItemId"
     ],
     "gachas": [
         "id",
@@ -344,7 +350,7 @@ structures = {
                 "gachaId",
                 "gachaBehaviorType",
                 "costResourceType",
-                "unknown",
+                "costResourceId",
                 "costResourceQuantity",
                 "spinCount",
                 "executeLimit",
@@ -369,7 +375,10 @@ structures = {
                 "summary",
                 "description"
             )
-        ]
+        ],
+        "dailySpinLimit",
+        "gachaBonusItemReceivableRewardGroupId",
+        "gachaFreebieGroupId"
     ],
     "honors": [
         "id",
@@ -446,7 +455,11 @@ structures = {
                     ]
                 ]
             ]
-        ]
+        ],
+        "materialExchangeDisplayResourceGroupId",
+        "materialExchangeDisplayResourceGroups",
+        "materialExchangeFreebieGroupJson",
+        "materialExchangeFreebies"
     ],
     "musicDifficulties": [
         "id",
@@ -651,13 +664,15 @@ structures = {
                 "seq",
                 "startAt",
                 "endAt",
-                "noticeGroupId"
+                "noticeGroupId",
+                "isAfterEvent"
             ]
         ],
         [
             "virtualLiveCharacters",
             [
-                "gameCharacterUnitId"
+                "gameCharacterUnitId",
+                "virtualLivePerformanceType"
             ]
         ],
         [
@@ -827,10 +842,10 @@ structures = {
     ],
     "ongoingMissions": [
         "id",
-        "seq",
         "ongoingMissionType",
-        "requirement",
+        "seq",
         "sentence",
+        "requirement",
         [
             "rewards",
             [
@@ -853,7 +868,6 @@ def restore_dict(array_data: list, key_structure: list):
     :return: result:  dict
     """
     result = {}
-
     for i, key in enumerate(key_structure):
         if isinstance(key, str):
             # if key is string, then assign the value to the key
