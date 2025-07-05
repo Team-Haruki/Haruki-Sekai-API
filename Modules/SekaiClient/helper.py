@@ -5,6 +5,7 @@ from typing import Union
 from pathlib import Path
 from aiopath import AsyncPath
 from aiohttp import ClientSession
+from tenacity import retry, stop_after_attempt, wait_fixed
 
 
 class SekaiCookieHelper:
@@ -12,7 +13,8 @@ class SekaiCookieHelper:
         self.cookies = None
         self.lock = asyncio.Lock()
 
-    async def get_cookies(self) -> None:
+    @retry(stop=stop_after_attempt(4), wait=wait_fixed(1))
+    async def get_cookies(self, proxy: str = None) -> None:
         if not self.lock.locked():
             async with self.lock:
                 headers = {
@@ -25,10 +27,12 @@ class SekaiCookieHelper:
                 }
                 async with ClientSession() as session:
                     async with session.post(
-                        url="https://issue.sekai.colorfulpalette.org/api/signature", headers=headers
+                        url="https://issue.sekai.colorfulpalette.org/api/signature", headers=headers, proxy=proxy
                     ) as response:
                         if response.status == 200:
                             self.cookies = response.headers.get("Set-Cookie")
+                        else:
+                            raise Exception()
 
 
 class SekaiVersionHelper:

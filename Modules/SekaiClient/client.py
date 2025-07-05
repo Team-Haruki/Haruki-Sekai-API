@@ -58,7 +58,7 @@ class SekaiClient:
         if self.server != SekaiServerRegion.JP:
             return None
         else:
-            await self.cookie_helper.get_cookies()
+            await self.cookie_helper.get_cookies(proxy=self.proxies[0])
             await asyncio.sleep(1)
             self.headers["Cookie"] = self.cookie_helper.cookies
             return None

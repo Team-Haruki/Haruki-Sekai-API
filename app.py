@@ -38,7 +38,11 @@ async def echo():
     return {}
 
 
-@app.get("/{api_type}/{server}/{sub_path:path}", response_model=None, dependencies=[Depends(validate_user_token(async_session))])
+@app.get(
+    "/{api_type}/{server}/{sub_path:path}",
+    response_model=None,
+    dependencies=[Depends(validate_user_token(async_session))],
+)
 async def call_api(api_request: APIRequest = Depends(get_api_request)) -> Union[ORJSONResponse, StarletteResponse]:
     try:
         if api_request.api_type == APIType.api:
