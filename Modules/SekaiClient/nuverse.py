@@ -869,6 +869,23 @@ structures = {
                 "billingShopItemId"
             ]
         ]
+    ],
+    "costume3dFittings": [
+        "billingShopItemId",
+        "characterId",
+        "hairCostume3dId"
+    ],
+    "costume3dModelDefaultHairs": [
+        "id",
+        "headCostume3dId",
+        "hairCostume3dId",
+        "unit"
+    ],
+    "costume3dModelNotAvailablePatterns": [
+        "id",
+        "headCostume3dId",
+        "hairCostume3dId",
+        "unit"
     ]
 }
 
