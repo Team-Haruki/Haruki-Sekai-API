@@ -854,6 +854,21 @@ structures = {
         ],
         "startAt",
         "endAt"
+    ],
+    "jewelShowDialogues": [
+        "id",
+        "seq",
+        "name",
+        "assetBundleName",
+        "startAt",
+        "endAt",
+        [
+            "behaviors",
+            [
+                "seq",
+                "billingShopItemId"
+            ]
+        ]
     ]
 }
 
