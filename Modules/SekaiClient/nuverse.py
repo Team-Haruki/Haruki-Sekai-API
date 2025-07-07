@@ -206,7 +206,7 @@ structures = {
                 [
                     "eventExchangeCost",
                     (
-                        "resourceQuantity"
+                        "resourceQuantity",
                     )
                 ]
             ]

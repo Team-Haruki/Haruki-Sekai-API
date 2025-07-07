@@ -1,6 +1,6 @@
 [project]
 name = "Haruki-Sekai-API"
-version = "4.1.0"
+version = "4.1.1"
 description = "An unofficial API proxy project for Project Sekai"
 requires-python = ">=3.11"
 dependencies = [
