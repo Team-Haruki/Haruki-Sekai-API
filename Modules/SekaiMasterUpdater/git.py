@@ -1,4 +1,4 @@
-import pygit2
+import git
 import logging
 import traceback
 import coloredlogs
@@ -21,32 +21,39 @@ class GitUpdater:
         self.password = password
         self.proxy = proxies[0] if proxies else None
 
-    def push_remote(self, repo: pygit2.Repository, data_version: str) -> None:
+    def push_remote(self, repo: git.Repo, data_version: str) -> None:
         try:
-            repo.index.add_all()
-            repo.index.write()
-            diff = repo.diff(repo.head.target, repo.index.write_tree())
-            if diff.stats.insertions + diff.stats.deletions > 0:
-                author = pygit2.Signature(self.user, self.email)
-                committer = author
-                tree = repo.index.write_tree()
+            repo.git.add(A=True)
+            diff = repo.index.diff("HEAD") if repo.head.is_valid() else repo.index.diff(None)
+            if diff:
+                author = git.Actor("Haruki Sekai Master Update Bot", "no-reply@seiunx.com")
+                committer = git.Actor(self.user, self.email)
                 message = f"master data version {data_version}"
-                ref = f"refs/heads/main"
+                commit = repo.index.commit(message, author=author, committer=committer)
+                branch = repo.active_branch.name
+                remote = repo.remote("origin")
+                original_url = remote.url
 
-                if repo.head_is_unborn:
-                    parents = []
+                if original_url.startswith("http://"):
+                    url = original_url[len("http://"):]
+                    scheme = "http://"
+                elif original_url.startswith("https://"):
+                    url = original_url[len("https://"):]
+                    scheme = "https://"
                 else:
-                    parents = [repo.head.target]
+                    url = original_url
+                    scheme = ""
+                if "@" in url:
+                    url = url.split("@", 1)[1]
 
-                oid = repo.create_commit(ref, author, committer, message, tree, parents)
-
-                remote = repo.remotes["origin"]
-                credentials = pygit2.UserPass(self.user, self.password)
-                callbacks = pygit2.RemoteCallbacks(credentials=credentials)
-                remote.push([f"+{ref}:{ref}"], callbacks=callbacks, proxy=self.proxy)
+                auth_url = f"{scheme}{self.user}:{self.password}@{url}"
+                remote.set_url(auth_url)
+                env = {"https_proxy": self.proxy, "http_proxy": self.proxy} if self.proxy else None
+                remote.push(refspec=f"{branch}:{branch}", env=env)
+                remote.set_url(original_url)
                 logger.info(f"Pushed to remote repository.")
             else:
-                logger.info("No changes to commit.")
+                logger.info("No diffs to commit.")
         except Exception as e:
             traceback.print_exc()
             logger.error(f"Git occurred error while pushing to remote: {repr(e)}")
