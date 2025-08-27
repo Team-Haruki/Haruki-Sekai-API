@@ -1,6 +1,6 @@
 [project]
 name = "Haruki-Sekai-API"
-version = "4.2.1"
+version = "4.3.0"
 description = "An unofficial API proxy project for Project Sekai"
 requires-python = ">=3.12"
 dependencies = [
@@ -11,11 +11,11 @@ dependencies = [
     "coloredlogs>=15.0.1",
     "cryptography>=45.0.6",
     "fastapi>=0.116.1",
+    "gitpython>=3.1.45",
     "hypercorn>=0.17.3",
     "msgpack>=1.1.1",
     "orjson>=3.11.2",
     "pydantic>=2.11.7",
-    "pygit2>=1.18.2",
     "pyjwt>=2.10.1",
     "redis>=6.4.0",
     "ruff>=0.12.10",
@@ -57,7 +57,7 @@ ignore = [
 
 [tool.ruff.lint.isort]
 force-sort-within-sections = true
-known-first-party = ["nonebot", "tests/*"]
+known-first-party = ["tests/*"]
 extra-standard-library = ["typing_extensions"]
 
 [tool.ruff.lint.flake8-pytest-style]

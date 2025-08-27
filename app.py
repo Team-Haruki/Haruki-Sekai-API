@@ -13,6 +13,7 @@ from Modules.SekaiClient.model import SekaiServerRegion
 from Modules.API.utils import APIRequest, get_api_request
 from utils import check_master_update, check_app_update, scheduler, managers, engine, async_session, validate_user_token
 
+from nuverse import nvapi
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
@@ -31,7 +32,7 @@ async def lifespan(_app: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan, default_response_class=ORJSONResponse, docs_url=None, redoc_url=None, openapi_url=None)
-
+app.include_router(nvapi)
 
 @app.get("/echo")
 async def echo():

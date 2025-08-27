@@ -1,4 +1,4 @@
-import pygit2
+import git
 from pathlib import Path
 from Modules.SekaiClient.model import (
     SekaiServerRegion,
@@ -77,7 +77,7 @@ ENABLE_GIT_PUSH = False  # Set to True if you need to update the Git master repo
 GIT_USER = "<NAME>"  # Git user name
 GIT_EMAIL = "<EMAIL>"  # Git user email
 GIT_PASS = "<PAT>"  # GitHub Personal Access Token (PAT)
-REPOS = {server: pygit2.Repository(Path(master_dir).parent) for server, master_dir in MASTER_SAVE_DIRS.items()}
+REPOS = {server: git.Repo(Path(master_dir).parent) for server, master_dir in MASTER_SAVE_DIRS.items()}
 
 # Logger configuration
 LOG_FORMAT = "[%(asctime)s][%(levelname)s][%(name)s] %(message)s"

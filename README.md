@@ -14,9 +14,9 @@
    ```bash
    uv sync
    ```
-4. (Optional) If you plan to use MySQL via aiomysql, install:
+4. (Optional) If you plan to use MySQL via asyncmy, install:
    ```bash
-   uv add aiomysql
+   uv add asyncmy
    ```
 5. (Optional) If you plan to use SQLite via aiosqlite, install:
    ```bash
