@@ -6,14 +6,15 @@ import (
 	"encoding/hex"
 	"errors"
 	"haruki-sekai-api/config"
+	"haruki-sekai-api/utils"
 
 	"github.com/vgorin/cryptogo/pad"
 	"github.com/vmihailenco/msgpack/v5"
 )
 
-func getCipher(server SekaiRegion, encrypt bool) (cipher.BlockMode, error) {
+func getCipher(server utils.SekaiRegion, encrypt bool) (cipher.BlockMode, error) {
 	var key, iv []byte
-	if server == SekaiRegionEN {
+	if server == utils.SekaiRegionEN {
 		key, _ = hex.DecodeString(config.Cfg.SekaiClient.ENServerAESKey)
 		iv, _ = hex.DecodeString(config.Cfg.SekaiClient.ENServerAESIV)
 	} else {
@@ -32,7 +33,7 @@ func getCipher(server SekaiRegion, encrypt bool) (cipher.BlockMode, error) {
 	return cipher.NewCBCDecrypter(block, iv), nil
 }
 
-func Pack(content interface{}, server SekaiRegion) ([]byte, error) {
+func Pack(content interface{}, server utils.SekaiRegion) ([]byte, error) {
 	if content == nil {
 		return nil, errors.New("content cannot be nil")
 	}
@@ -59,7 +60,7 @@ func Pack(content interface{}, server SekaiRegion) ([]byte, error) {
 	return encrypted, nil
 }
 
-func Unpack(content []byte, server SekaiRegion) (interface{}, error) {
+func Unpack(content []byte, server utils.SekaiRegion) (interface{}, error) {
 	if len(content) == 0 {
 		return nil, errors.New("content cannot be empty")
 	}
