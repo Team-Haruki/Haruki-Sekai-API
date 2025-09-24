@@ -11,8 +11,9 @@ import (
 )
 
 type Client struct {
-	Proxy  string
-	client *fasthttp.Client
+	Proxy   string
+	Timeout time.Duration
+	client  *fasthttp.Client
 }
 
 func (c *Client) Request(ctx context.Context, method, uri string, headers map[string]string, body []byte) (status int, respHeaders map[string]string, respBody []byte, err error) {
@@ -50,9 +51,13 @@ func (c *Client) Request(ctx context.Context, method, uri string, headers map[st
 		}
 	}
 
+	timeout := c.Timeout
+	if timeout == 0 {
+		timeout = 15 * time.Second
+	}
 	errChan := make(chan error, 1)
 	go func() {
-		errChan <- c.client.DoTimeout(req, resp, 15*time.Second)
+		errChan <- c.client.DoTimeout(req, resp, timeout)
 	}()
 
 	select {
