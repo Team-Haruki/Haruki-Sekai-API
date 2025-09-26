@@ -33,6 +33,7 @@ structures = {
         "gameCharacterUnitId2",
         "honorRarity",
         "name",
+        "pronunciation",
         "description",
         [
             "levels",
@@ -210,7 +211,8 @@ structures = {
                     )
                 ]
             ]
-        ]
+        ],
+        "assetbundleName"
     ],
     "events": [
         "id",
@@ -240,7 +242,8 @@ structures = {
                     ]
                 ]
             ]
-        ]
+        ],
+        "distributionEndAt"
     ],
     "eventStories": [
         "id",
@@ -307,7 +310,7 @@ structures = {
         ],
         "gachaCeilItemId"
     ],
-    "gachas": [
+    "√": [
         "id",
         "gachaType",
         "name",
@@ -373,7 +376,9 @@ structures = {
             (
                 "gachaId",
                 "summary",
-                "description"
+                "description",
+                "bubbleAssetbundleName",
+                "bubbleText"
             )
         ],
         "dailySpinLimit",
@@ -613,7 +618,8 @@ structures = {
         "effectExpressionType",
         "virtualItemLabelType",
         "gameCharacterUnitId",
-        "unit"
+        "unit",
+        "subGameCharacterId"
     ],
     "virtualLives": [
         "id",
@@ -672,7 +678,8 @@ structures = {
             "virtualLiveCharacters",
             [
                 "gameCharacterUnitId",
-                "virtualLivePerformanceType"
+                "virtualLivePerformanceType",
+                "subGameCharacter2dId"
             ]
         ],
         [
@@ -706,7 +713,8 @@ structures = {
                 "effectExpressionType",
                 "virtualItemLabelType",
                 "gameCharacterUnitId",
-                "unit"
+                "unit",
+                "subGameCharacterId"
             ]
         ],
         [
@@ -733,7 +741,8 @@ structures = {
                 "summary",
                 "description"
             )
-        ]
+        ],
+        "subGameCharacterPenlightColorGroupId"
     ],
     "wordings": [
         "wordingKey",
@@ -751,7 +760,8 @@ structures = {
         "stampId",
         "startAt",
         "unit",
-        "assetBundleName"
+        "assetBundleName",
+        "showGameCharacterId"
     ],
     "sekaiEchoStoryGroups": [
         "groupId",
@@ -807,7 +817,8 @@ structures = {
         "resourceType",
         "resourceId",
         "quantity",
-        "echoPoint"
+        "echoPoint",
+        "seq"
     ],
     "shiningExchanges": [
         "id",
@@ -838,7 +849,8 @@ structures = {
         'label',
         'startAt',
         'endAt',
-        'purchaseOption'
+        'purchaseOption',
+        "billingShopTabChildId"
     ],
     "ongoingMissions": [
         "id",
