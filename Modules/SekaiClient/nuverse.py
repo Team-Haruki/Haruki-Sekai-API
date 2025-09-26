@@ -310,7 +310,7 @@ structures = {
         ],
         "gachaCeilItemId"
     ],
-    "√": [
+    "gachas": [
         "id",
         "gachaType",
         "name",
