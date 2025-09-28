@@ -6,6 +6,7 @@ require (
 	github.com/bytedance/sonic v1.14.1
 	github.com/go-git/go-git/v5 v5.16.2
 	github.com/go-resty/resty/v2 v2.16.5
+	github.com/hashicorp/go-version v1.7.0
 	github.com/vgorin/cryptogo v0.0.0-20180620052908-eca286428d40
 	github.com/vmihailenco/msgpack/v5 v5.4.1
 	gopkg.in/yaml.v3 v3.0.1

@@ -1,25 +1,17 @@
 package updater
 
 import (
-	"strconv"
-	"strings"
+	"github.com/hashicorp/go-version"
 )
 
-func CompareVersion(newVersion, currentVersion string) bool {
-	newParts := strings.Split(newVersion, ".")
-	currentParts := strings.Split(currentVersion, ".")
-
-	for i := 0; i < len(newParts); i++ {
-		newPart, err1 := strconv.Atoi(newParts[i])
-		currentPart, err2 := strconv.Atoi(currentParts[i])
-		if err1 != nil || err2 != nil {
-			continue
-		}
-		if newPart > currentPart {
-			return true
-		} else if newPart < currentPart {
-			return false
-		}
+func CompareVersion(newVersion, currentVersion string) (bool, error) {
+	v1, err := version.NewVersion(newVersion)
+	if err != nil {
+		return false, err
 	}
-	return false
+	v2, err := version.NewVersion(currentVersion)
+	if err != nil {
+		return false, err
+	}
+	return v1.GreaterThan(v2), nil
 }
