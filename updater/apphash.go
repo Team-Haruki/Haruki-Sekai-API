@@ -99,7 +99,8 @@ func (a *AppHashUpdater) GetLatestRemoteAppInfo(ctx context.Context, server util
 
 	var latest *utils.HarukiAppInfo
 	for app := range resultCh {
-		if latest != nil {
+		if latest == nil {
+			latest = app
 			continue
 		}
 		flag, err := CompareVersion(app.AppVersion, latest.AppVersion)

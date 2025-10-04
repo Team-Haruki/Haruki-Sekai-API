@@ -74,7 +74,7 @@ func (s *SekaiMasterUpdater) saveFile(filePath string, data any) error {
 
 // callAssetUpdater 调用 Haruki Sekai Asset Updater
 func (s *SekaiMasterUpdater) callAssetUpdater(ctx context.Context, options map[string]any) (*http.Response, error) {
-	client := &http.Client{Timeout: 30 * time.Second}
+	cli := &http.Client{Timeout: 30 * time.Second}
 
 	url, ok := options["url"].(string)
 	if !ok {
@@ -105,7 +105,7 @@ func (s *SekaiMasterUpdater) callAssetUpdater(ctx context.Context, options map[s
 		}
 	}
 
-	resp, err := client.Do(req)
+	resp, err := cli.Do(req)
 	if err != nil {
 		return nil, err
 	}
