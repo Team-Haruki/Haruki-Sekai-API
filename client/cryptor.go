@@ -5,8 +5,10 @@ import (
 	"crypto/cipher"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"haruki-sekai-api/config"
 	"haruki-sekai-api/utils"
+	"sync"
 
 	"github.com/vgorin/cryptogo/pad"
 	"github.com/vmihailenco/msgpack/v5"
@@ -33,7 +35,7 @@ func getCipher(server utils.SekaiRegion, encrypt bool) (cipher.BlockMode, error)
 	return cipher.NewCBCDecrypter(block, iv), nil
 }
 
-func Pack(content interface{}, server utils.SekaiRegion) ([]byte, error) {
+func Pack(content any, server utils.SekaiRegion) ([]byte, error) {
 	if content == nil {
 		return nil, errors.New("content cannot be nil")
 	}
@@ -60,32 +62,62 @@ func Pack(content interface{}, server utils.SekaiRegion) ([]byte, error) {
 	return encrypted, nil
 }
 
-func Unpack(content []byte, server utils.SekaiRegion) (interface{}, error) {
-	if len(content) == 0 {
-		return nil, errors.New("content cannot be empty")
+var (
+	ErrEmptyContent     = errors.New("content cannot be empty")
+	ErrInvalidBlockSize = errors.New("content length is not a multiple of AES block size")
+	ErrDecryptionFailed = errors.New("failed to decrypt content")
+)
+
+var bytesPool = sync.Pool{
+	New: func() any {
+		b := make([]byte, 0, 1024)
+		return &b
+	},
+}
+
+func UnpackInto[T any](content []byte, server utils.SekaiRegion) (*T, error) {
+	validateContent := func(content []byte) error {
+		if len(content) == 0 {
+			return ErrEmptyContent
+		}
+		if len(content)%aes.BlockSize != 0 {
+			return ErrInvalidBlockSize
+		}
+		return nil
 	}
 
-	if len(content)%aes.BlockSize != 0 {
-		return nil, errors.New("content length is not a multiple of AES block size")
+	if err := validateContent(content); err != nil {
+		return nil, err
 	}
 
 	decrypter, err := getCipher(server, false)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to create cipher: %w", err)
 	}
 
-	decrypted := make([]byte, len(content))
-	decrypter.CryptBlocks(decrypted, content)
+	decrypted := bytesPool.Get().(*[]byte)
+	if cap(*decrypted) < len(content) {
+		*decrypted = make([]byte, len(content))
+	} else {
+		*decrypted = (*decrypted)[:len(content)]
+	}
+	defer bytesPool.Put(decrypted)
 
-	unpadded, err := pad.PKCS7Unpad(decrypted)
+	decrypter.CryptBlocks(*decrypted, content)
+
+	unpadded, err := pad.PKCS7Unpad(*decrypted)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to unpad: %w", err)
 	}
 
-	var out interface{}
-	if err := msgpack.Unmarshal(unpadded, &out); err != nil {
-		return nil, err
+	var result T
+	if err := msgpack.Unmarshal(unpadded, &result); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal: %w", err)
 	}
 
-	return out, nil
+	return &result, nil
+}
+
+func Unpack(content []byte, server utils.SekaiRegion) (any, error) {
+	return UnpackInto[any](content, server)
 }

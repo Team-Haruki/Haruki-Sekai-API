@@ -99,7 +99,15 @@ func (a *AppHashUpdater) GetLatestRemoteAppInfo(ctx context.Context, server util
 
 	var latest *utils.HarukiAppInfo
 	for app := range resultCh {
-		if latest == nil || CompareVersion(app.AppVersion, latest.AppVersion) {
+		if latest != nil {
+			continue
+		}
+		flag, err := CompareVersion(app.AppVersion, latest.AppVersion)
+		if err != nil {
+			a.logger.Warnf("%s server: failed to compare versions: %v", server, err)
+			continue
+		}
+		if flag {
 			latest = app
 		}
 	}
@@ -139,7 +147,12 @@ func (a *AppHashUpdater) CheckAppVersion(ctx context.Context, server utils.Sekai
 		a.logger.Warnf("%s server: local or remote version unavailable", server)
 		return false, nil
 	}
-	if CompareVersion(remote.AppVersion, local.AppVersion) {
+	flag, err := CompareVersion(remote.AppVersion, local.AppVersion)
+	if err != nil {
+		a.logger.Warnf("%s server: failed to compare versions: %v", server, err)
+		return false, err
+	}
+	if flag {
 		a.logger.Infof("%s server found new app version: %s, saving new app hash...", server, remote.AppVersion)
 		if err := a.SaveNewAppHash(server, remote); err != nil {
 			a.logger.Warnf("%s server failed to save new app hash", server)
@@ -158,7 +171,9 @@ func (a *AppHashUpdater) CheckAppVersionConcurrently(ctx context.Context) {
 		wg.Add(1)
 		go func(s utils.SekaiRegion) {
 			defer wg.Done()
-			a.CheckAppVersion(ctx, s)
+			if _, err := a.CheckAppVersion(ctx, s); err != nil {
+				a.logger.Warnf("%s server: failed to check app version: %v", s, err)
+			}
 		}(server)
 	}
 	wg.Wait()
