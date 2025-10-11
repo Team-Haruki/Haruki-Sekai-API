@@ -7,25 +7,10 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-type MongoDBConfig struct {
-	URL                 string `yaml:"url"`
-	DB                  string `yaml:"db"`
-	Suite               string `yaml:"suite"`
-	Mysekai             string `yaml:"mysekai"`
-	Webhook             string `yaml:"webhook"`
-	WebhookUser         string `yaml:"webhook_user"`
-	PrivateApiSecret    string `yaml:"private_api_secret"`
-	PrivateApiUserAgent string `yaml:"private_api_user_agent"`
-}
-
 type RedisConfig struct {
 	Host     string `yaml:"host"`
 	Port     int    `yaml:"port"`
 	Password string `yaml:"password"`
-}
-
-type WebhookConfig struct {
-	JWTSecret string `yaml:"jwt_secret"`
 }
 
 type BackendConfig struct {
@@ -59,17 +44,11 @@ type SekaiClientConfig struct {
 	ENServerInheritClientHeaders map[string]string `yaml:"en_server_inherit_client_headers"`
 	SuiteRemoveKeys              []string          `yaml:"suite_remove_keys"`
 }
-type OthersConfig struct {
-	PublicAPIAllowedKeys []string `yaml:"public_api_allowed_keys"`
-}
 
 type Config struct {
 	Proxy       string            `yaml:"proxy"`
-	MongoDB     MongoDBConfig     `yaml:"mongodb"`
 	Redis       RedisConfig       `yaml:"redis"`
-	Webhook     WebhookConfig     `yaml:"webhook"`
 	Backend     BackendConfig     `yaml:"backend"`
-	Others      OthersConfig      `yaml:"others"`
 	SekaiClient SekaiClientConfig `yaml:"sekai_client"`
 }
 

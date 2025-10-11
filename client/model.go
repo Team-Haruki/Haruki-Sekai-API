@@ -1,9 +1,10 @@
 package client
 
 import (
-	"encoding/json"
 	"fmt"
 	"haruki-sekai-api/utils"
+
+	"github.com/bytedance/sonic"
 )
 
 type SekaiAccountInterface interface {
@@ -51,7 +52,7 @@ func (s *SekaiAccountCP) Dump() ([]byte, error) {
 		Token:    s.credential,
 	}
 
-	dump, err := json.Marshal(data)
+	dump, err := sonic.Marshal(data)
 	if err != nil {
 		return nil, err
 	}
@@ -83,7 +84,7 @@ func (s *SekaiAccountNuverse) Dump() ([]byte, error) {
 		Token:    s.accessToken,
 	}
 
-	dump, err := json.Marshal(data)
+	dump, err := sonic.Marshal(data)
 	if err != nil {
 		return nil, err
 	}
@@ -131,7 +132,7 @@ type HarukiAppHashSource struct {
 
 func NewHarukiAppHashSource(sourceType HarukiAppHashSourceType) (*HarukiAppHashSource, error) {
 	inst := &HarukiAppHashSource{
-		SourceType: HarukiAppHashSourceType(sourceType),
+		SourceType: sourceType,
 	}
 	return inst, nil
 }

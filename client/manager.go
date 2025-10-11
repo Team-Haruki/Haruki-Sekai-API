@@ -2,15 +2,17 @@ package client
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"haruki-sekai-api/logger"
 	"haruki-sekai-api/utils"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/bytedance/sonic"
 )
 
 type SekaiClientManager struct {
@@ -21,17 +23,17 @@ type SekaiClientManager struct {
 	AccountsDir   string
 	Clients       []*SekaiClient
 	ClientNo      int
-	Proxies       []string
+	Proxy         string
 	Logger        *logger.Logger
 }
 
-func NewSekaiClientManager(serverInfo SekaiServerInfo, accountsDir, versionFilePath string, proxies []string) *SekaiClientManager {
+func NewSekaiClientManager(serverInfo SekaiServerInfo, accountsDir, versionFilePath string, proxy string) *SekaiClientManager {
 	mgr := &SekaiClientManager{
 		Server:        serverInfo.Server,
 		ServerInfo:    serverInfo,
 		VersionHelper: &SekaiVersionHelper{versionFilePath: versionFilePath},
 		AccountsDir:   accountsDir,
-		Proxies:       proxies,
+		Proxy:         proxy,
 		Logger:        logger.NewLogger("SekaiClientManager", "DEBUG", nil),
 	}
 	if serverInfo.Server == "jp" {
@@ -57,7 +59,7 @@ func (mgr *SekaiClientManager) parseAccounts() ([]SekaiAccountInterface, error) 
 		}
 
 		var raw any
-		if err := json.Unmarshal(data, &raw); err != nil {
+		if err := sonic.Unmarshal(data, &raw); err != nil {
 			mgr.Logger.Warnf("Error decoding JSON in file %s: %v", path, err)
 			return nil
 		}
@@ -66,14 +68,14 @@ func (mgr *SekaiClientManager) parseAccounts() ([]SekaiAccountInterface, error) 
 		case map[string]any:
 			if mgr.Server == utils.SekaiRegionJP || mgr.Server == utils.SekaiRegionEN {
 				var acc *SekaiAccountCP
-				b, _ := json.Marshal(v)
-				if err := json.Unmarshal(b, acc); err == nil {
+				b, _ := sonic.Marshal(v)
+				if err := sonic.Unmarshal(b, acc); err == nil {
 					accounts = append(accounts, acc)
 				}
 			} else {
 				var acc *SekaiAccountNuverse
-				b, _ := json.Marshal(v)
-				if err := json.Unmarshal(b, acc); err == nil {
+				b, _ := sonic.Marshal(v)
+				if err := sonic.Unmarshal(b, acc); err == nil {
 					accounts = append(accounts, acc)
 				}
 			}
@@ -82,14 +84,14 @@ func (mgr *SekaiClientManager) parseAccounts() ([]SekaiAccountInterface, error) 
 				if m, ok := item.(map[string]any); ok {
 					if mgr.Server == utils.SekaiRegionJP || mgr.Server == utils.SekaiRegionEN {
 						var acc *SekaiAccountCP
-						b, _ := json.Marshal(m)
-						if err := json.Unmarshal(b, acc); err == nil {
+						b, _ := sonic.Marshal(m)
+						if err := sonic.Unmarshal(b, acc); err == nil {
 							accounts = append(accounts, acc)
 						}
 					} else {
 						var acc *SekaiAccountNuverse
-						b, _ := json.Marshal(m)
-						if err := json.Unmarshal(b, acc); err == nil {
+						b, _ := sonic.Marshal(m)
+						if err := sonic.Unmarshal(b, acc); err == nil {
 							accounts = append(accounts, acc)
 						}
 					}
@@ -167,7 +169,7 @@ func (mgr *SekaiClientManager) Init() error {
 			account,
 			mgr.CookieHelper,
 			mgr.VersionHelper,
-			&mgr.Proxies,
+			mgr.Proxy,
 		)
 		mgr.Clients = append(mgr.Clients, client)
 	}
@@ -306,7 +308,7 @@ func (mgr *SekaiClientManager) APIGet(ctx context.Context, path string, params m
 			return map[string]interface{}{
 				"result":  "failed",
 				"message": "No client is available, please try again later.",
-			}, 500, nil
+			}, http.StatusInternalServerError, nil
 		}
 
 		client.Lock.Lock()
@@ -317,7 +319,7 @@ func (mgr *SekaiClientManager) APIGet(ctx context.Context, path string, params m
 			return map[string]interface{}{
 				"result":  "failed",
 				"message": err.Error(),
-			}, 500, err
+			}, http.StatusInternalServerError, err
 		}
 
 		// 解析响应
@@ -352,7 +354,7 @@ func (mgr *SekaiClientManager) APIGet(ctx context.Context, path string, params m
 				return map[string]interface{}{
 					"result":  "failed",
 					"message": fmt.Sprintf("Failed to parse cookies: %v", err),
-				}, response.StatusCode(), err
+				}, http.StatusForbidden, err
 			}
 			retryCount++
 			time.Sleep(retryDelay)
@@ -364,7 +366,7 @@ func (mgr *SekaiClientManager) APIGet(ctx context.Context, path string, params m
 			return map[string]interface{}{
 				"result":  "failed",
 				"message": fmt.Sprintf("%s Game server is under maintenance.", strings.ToUpper(string(mgr.Server))),
-			}, 503, NewUnderMaintenanceError()
+			}, http.StatusServiceUnavailable, NewUnderMaintenanceError()
 
 		case SekaiApiHttpStatusOk:
 			result, err := client.response(*response)
@@ -392,5 +394,5 @@ func (mgr *SekaiClientManager) APIGet(ctx context.Context, path string, params m
 	return map[string]interface{}{
 		"result":  "failed",
 		"message": "Max retry attempts reached",
-	}, 500, fmt.Errorf("max retry attempts reached")
+	}, http.StatusInternalServerError, fmt.Errorf("max retry attempts reached")
 }

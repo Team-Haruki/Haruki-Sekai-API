@@ -23,7 +23,7 @@ type SekaiClient struct {
 	Account       SekaiAccountInterface
 	CookieHelper  *SekaiCookieHelper
 	VersionHelper *SekaiVersionHelper
-	Proxies       *[]string
+	Proxy         string
 	Logger        *logger.Logger
 
 	Lock    *sync.Mutex
@@ -35,18 +35,14 @@ func NewSekaiClient(
 	account SekaiAccountInterface,
 	cookieHelper *SekaiCookieHelper,
 	versionHelper *SekaiVersionHelper,
-	proxies *[]string,
+	proxy string,
 ) *SekaiClient {
-	if len(*proxies) == 0 {
-		proxies = &[]string{""}
-	}
-
 	return &SekaiClient{
 		ServerInfo:    serverInfo,
 		Account:       account,
 		CookieHelper:  cookieHelper,
 		VersionHelper: versionHelper,
-		Proxies:       proxies,
+		Proxy:         proxy,
 		Lock:          &sync.Mutex{},
 	}
 
@@ -56,16 +52,13 @@ func (c *SekaiClient) ParseCookies(ctx context.Context) error {
 	if c.ServerInfo.Server != utils.SekaiRegionJP {
 		return nil
 	}
-	for _, proxy := range *c.Proxies {
-		cookie, err := c.CookieHelper.GetCookies(ctx, proxy)
-		if err != nil {
-			continue
-		}
-
-		c.Session.SetHeader("Cookie", cookie)
-		return nil
+	cookie, err := c.CookieHelper.GetCookies(ctx, c.Proxy)
+	if err != nil {
+		return err
 	}
-	return NewSekaiSignatureError()
+
+	c.Session.SetHeader("Cookie", cookie)
+	return nil
 }
 
 func (c *SekaiClient) ParseVersion() error {
@@ -109,7 +102,7 @@ func (c *SekaiClient) response(response resty.Response) (any, error) {
 	}
 
 	if lo.Contains([]string{"application/octet-stream", "binary/octet-stream"}, c.Session.Header.Get("Content-Type")) {
-		unpackResponse, err := Unpack(response.Body(), utils.SekaiRegion(c.ServerInfo.Server))
+		unpackResponse, err := Unpack(response.Body(), c.ServerInfo.Server)
 		if err != nil {
 			c.Logger.Errorf("Unpack response error : %v", err)
 			return nil, err
@@ -141,7 +134,7 @@ func (c *SekaiClient) response(response resty.Response) (any, error) {
 	return nil, NewSekaiUnknownClientException(response.StatusCode(), string(response.Body()))
 }
 
-func (c *SekaiClient) CallApi(ctx context.Context, path string, method string, data []byte, params map[string]any) (*resty.Response, error) {
+func (c *SekaiClient) CallApi(ctx context.Context, path string, method string, data any, params map[string]any) (*resty.Response, error) {
 	uri := fmt.Sprintf("%s/api/%s", c.ServerInfo.ApiUrl, path)
 
 	template, err := uritemplates.Parse(uri)
@@ -165,7 +158,11 @@ func (c *SekaiClient) CallApi(ctx context.Context, path string, method string, d
 	)
 
 	cli := *c.Session
+	if c.Proxy != "" {
+		cli.SetProxy(c.Proxy)
+	}
 	req := *cli.R()
+	req.SetContext(ctx)
 	req.Header.Set("X-Request-ID", uuid.New().String())
 	req.
 		AddRetryCondition(func(response *resty.Response, err error) bool {
@@ -196,42 +193,34 @@ func (c *SekaiClient) CallApi(ctx context.Context, path string, method string, d
 			return false
 		})
 
-	for _, proxy := range *c.Proxies {
-		if proxy != "" {
-			cli.SetProxy(proxy)
-		}
-
-		for k, v := range params {
-			req.SetQueryParam(k, fmt.Sprintf("%v", v))
-		}
-		if data != nil {
-			packedData, err := Pack(data, utils.SekaiRegion(c.ServerInfo.Server))
-			if err != nil {
-				return nil, err
-			}
-			req.SetBody(packedData)
-		}
-
-		response, err := req.Execute(strings.ToUpper(method), url)
+	for k, v := range params {
+		req.SetQueryParam(k, fmt.Sprintf("%v", v))
+	}
+	if data != nil {
+		packedData, err := Pack(data, c.ServerInfo.Server)
 		if err != nil {
-			continue
+			return nil, err
 		}
-
-		return response, nil
+		req.SetBody(packedData)
 	}
 
-	return nil, NewSekaiNoReturnError()
+	response, err := req.Execute(strings.ToUpper(method), url)
+	if err != nil {
+		return nil, err
+	}
+
+	return response, nil
 }
 
 func (c *SekaiClient) Get(ctx context.Context, path string, params map[string]any) (*resty.Response, error) {
 	return c.CallApi(ctx, path, "GET", nil, params)
 }
 
-func (c *SekaiClient) Post(ctx context.Context, path string, data []byte, params map[string]any) (*resty.Response, error) {
+func (c *SekaiClient) Post(ctx context.Context, path string, data any, params map[string]any) (*resty.Response, error) {
 	return c.CallApi(ctx, path, "POST", data, params)
 }
 
-func (c *SekaiClient) Put(ctx context.Context, path string, data []byte, params map[string]any) (*resty.Response, error) {
+func (c *SekaiClient) Put(ctx context.Context, path string, data any, params map[string]any) (*resty.Response, error) {
 	return c.CallApi(ctx, path, "PUT", data, params)
 }
 
@@ -239,7 +228,7 @@ func (c *SekaiClient) Delete(ctx context.Context, path string, params map[string
 	return c.CallApi(ctx, path, "DELETE", nil, params)
 }
 
-func (c *SekaiClient) Patch(ctx context.Context, path string, data []byte, params map[string]any) (*resty.Response, error) {
+func (c *SekaiClient) Patch(ctx context.Context, path string, data any, params map[string]any) (*resty.Response, error) {
 	return c.CallApi(ctx, path, "PATCH", data, params)
 }
 
