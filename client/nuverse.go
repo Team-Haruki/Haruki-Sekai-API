@@ -84,38 +84,72 @@ func RestoreDict(arrayData []interface{}, keyStructure []interface{}) map[string
 
 // RestoreCompactData converts compact data into original structure
 func RestoreCompactData(data map[string]interface{}) []map[string]interface{} {
-	enum, _ := data["__ENUM__"].(map[string]interface{})
+	enumRaw, _ := data["__ENUM__"].(map[string]interface{})
+
 	var columnLabels []string
 	var columns [][]interface{}
 
-	for column, raw := range data {
-		if column == "__ENUM__" {
+	for key, value := range data {
+		if key == "__ENUM__" {
 			continue
 		}
-		columnLabels = append(columnLabels, column)
+		columnLabels = append(columnLabels, key)
 
-		rawArr, _ := raw.([]interface{})
-		if e, ok := enum[column].([]interface{}); ok {
-			// map enum indices
-			var col []interface{}
-			for _, idx := range rawArr {
-				if idx == nil {
-					col = append(col, nil)
-				} else {
-					if i, ok := idx.(float64); ok && int(i) < len(e) {
-						col = append(col, e[int(i)])
+		var dataColumn []interface{}
+		switch v := value.(type) {
+		case []interface{}:
+			dataColumn = v
+		default:
+			dataColumn = []interface{}{}
+		}
+
+		if enumRaw != nil {
+			if enumColumnRaw, ok := enumRaw[key]; ok {
+				var enumSlice []interface{}
+				switch e := enumColumnRaw.(type) {
+				case []interface{}:
+					enumSlice = e
+				default:
+					enumSlice = nil
+				}
+
+				columnValues := make([]interface{}, 0, len(dataColumn))
+				for _, v := range dataColumn {
+					if v == nil {
+						columnValues = append(columnValues, nil)
+						continue
+					}
+					var index int
+					switch t := v.(type) {
+					case int:
+						index = t
+					case int32:
+						index = int(t)
+					case int64:
+						index = int(t)
+					case float64:
+						index = int(t)
+					default:
+						index = 0
+					}
+					if index >= 0 && index < len(enumSlice) {
+						columnValues = append(columnValues, enumSlice[index])
 					} else {
-						col = append(col, nil)
+						columnValues = append(columnValues, nil)
 					}
 				}
+				columns = append(columns, columnValues)
+				continue
 			}
-			columns = append(columns, col)
-		} else {
-			columns = append(columns, rawArr)
 		}
+
+		columns = append(columns, dataColumn)
 	}
 
-	// calculate num_entries
+	if len(columns) == 0 {
+		return []map[string]interface{}{}
+	}
+
 	numEntries := len(columns[0])
 	for _, col := range columns {
 		if len(col) < numEntries {
@@ -123,11 +157,15 @@ func RestoreCompactData(data map[string]interface{}) []map[string]interface{} {
 		}
 	}
 
-	var result []map[string]interface{}
+	result := make([]map[string]interface{}, 0, numEntries)
 	for i := 0; i < numEntries; i++ {
-		entry := make(map[string]interface{})
-		for j, label := range columnLabels {
-			entry[label] = columns[j][i]
+		entry := make(map[string]interface{}, len(columnLabels))
+		for j, key := range columnLabels {
+			if i < len(columns[j]) {
+				entry[key] = columns[j][i]
+			} else {
+				entry[key] = nil
+			}
 		}
 		result = append(result, entry)
 	}

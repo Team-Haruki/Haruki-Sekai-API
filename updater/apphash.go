@@ -17,15 +17,15 @@ import (
 )
 
 type AppHashUpdater struct {
-	sources           []utils.HarukiAppHashSource
-	serverVersionDirs map[utils.SekaiRegion]string
+	sources           []utils.HarukiSekaiAppHashSource
+	serverVersionDirs map[utils.HarukiSekaiServerRegion]string
 	client            *http.Client
 	logger            *harukiLogger.Logger
 }
 
 func NewAppHashUpdater(
-	sources []utils.HarukiAppHashSource,
-	serverVersionDirs map[utils.SekaiRegion]string,
+	sources []utils.HarukiSekaiAppHashSource,
+	serverVersionDirs map[utils.HarukiSekaiServerRegion]string,
 ) *AppHashUpdater {
 	return &AppHashUpdater{
 		sources:           sources,
@@ -37,11 +37,11 @@ func NewAppHashUpdater(
 	}
 }
 
-func (a *AppHashUpdater) GetRemoteAppVersion(ctx context.Context, server utils.SekaiRegion, source utils.HarukiAppHashSource) (*utils.HarukiAppInfo, error) {
+func (a *AppHashUpdater) GetRemoteAppVersion(ctx context.Context, server utils.HarukiSekaiServerRegion, source utils.HarukiSekaiAppHashSource) (*utils.HarukiSekaiAppInfo, error) {
 	filename := strings.ToUpper(string(server)) + ".json"
 
 	switch source.Type {
-	case utils.HarukiAppHashSourceTypeFile:
+	case utils.HarukiSekaiAppHashSourceTypeFile:
 		path := filepath.Join(source.Dir, filename)
 		data, err := os.ReadFile(path)
 		if err != nil {
@@ -50,13 +50,13 @@ func (a *AppHashUpdater) GetRemoteAppVersion(ctx context.Context, server utils.S
 			}
 			return nil, err
 		}
-		var app utils.HarukiAppInfo
+		var app utils.HarukiSekaiAppInfo
 		if err := json.Unmarshal(data, &app); err != nil {
 			return nil, nil
 		}
 		return &app, nil
 
-	case utils.HarukiAppHashSourceTypeUrl:
+	case utils.HarukiSekaiAppHashSourceTypeUrl:
 		url := source.URL + filename
 		req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 		if err != nil {
@@ -70,7 +70,7 @@ func (a *AppHashUpdater) GetRemoteAppVersion(ctx context.Context, server utils.S
 		if resp.StatusCode != http.StatusOK {
 			return nil, nil
 		}
-		var app utils.HarukiAppInfo
+		var app utils.HarukiSekaiAppInfo
 		if err := json.NewDecoder(resp.Body).Decode(&app); err != nil {
 			return nil, nil
 		}
@@ -79,13 +79,13 @@ func (a *AppHashUpdater) GetRemoteAppVersion(ctx context.Context, server utils.S
 	return nil, nil
 }
 
-func (a *AppHashUpdater) GetLatestRemoteAppInfo(ctx context.Context, server utils.SekaiRegion) (*utils.HarukiAppInfo, error) {
+func (a *AppHashUpdater) GetLatestRemoteAppInfo(ctx context.Context, server utils.HarukiSekaiServerRegion) (*utils.HarukiSekaiAppInfo, error) {
 	var wg sync.WaitGroup
-	resultCh := make(chan *utils.HarukiAppInfo, len(a.sources))
+	resultCh := make(chan *utils.HarukiSekaiAppInfo, len(a.sources))
 
 	for _, src := range a.sources {
 		wg.Add(1)
-		go func(source utils.HarukiAppHashSource) {
+		go func(source utils.HarukiSekaiAppHashSource) {
 			defer wg.Done()
 			app, _ := a.GetRemoteAppVersion(ctx, server, source)
 			if app != nil {
@@ -97,7 +97,7 @@ func (a *AppHashUpdater) GetLatestRemoteAppInfo(ctx context.Context, server util
 	wg.Wait()
 	close(resultCh)
 
-	var latest *utils.HarukiAppInfo
+	var latest *utils.HarukiSekaiAppInfo
 	for app := range resultCh {
 		if latest == nil {
 			latest = app
@@ -115,20 +115,20 @@ func (a *AppHashUpdater) GetLatestRemoteAppInfo(ctx context.Context, server util
 	return latest, nil
 }
 
-func (a *AppHashUpdater) GetCurrentAppVersion(server utils.SekaiRegion) (*utils.HarukiAppInfo, error) {
+func (a *AppHashUpdater) GetCurrentAppVersion(server utils.HarukiSekaiServerRegion) (*utils.HarukiSekaiAppInfo, error) {
 	path := filepath.Join(a.serverVersionDirs[server], "current_version.json")
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, nil
 	}
-	var app utils.HarukiAppInfo
+	var app utils.HarukiSekaiAppInfo
 	if err := json.Unmarshal(data, &app); err != nil {
 		return nil, nil
 	}
 	return &app, nil
 }
 
-func (a *AppHashUpdater) SaveNewAppHash(server utils.SekaiRegion, app *utils.HarukiAppInfo) error {
+func (a *AppHashUpdater) SaveNewAppHash(server utils.HarukiSekaiServerRegion, app *utils.HarukiSekaiAppInfo) error {
 	path := filepath.Join(a.serverVersionDirs[server], "current_version.json")
 	data := map[string]string{
 		"appVersion": app.AppVersion,
@@ -141,7 +141,7 @@ func (a *AppHashUpdater) SaveNewAppHash(server utils.SekaiRegion, app *utils.Har
 	return os.WriteFile(path, raw, 0644)
 }
 
-func (a *AppHashUpdater) CheckAppVersion(ctx context.Context, server utils.SekaiRegion) (bool, error) {
+func (a *AppHashUpdater) CheckAppVersion(ctx context.Context, server utils.HarukiSekaiServerRegion) (bool, error) {
 	local, _ := a.GetCurrentAppVersion(server)
 	remote, _ := a.GetLatestRemoteAppInfo(ctx, server)
 	if local == nil || remote == nil {
@@ -170,7 +170,7 @@ func (a *AppHashUpdater) CheckAppVersionConcurrently(ctx context.Context) {
 	var wg sync.WaitGroup
 	for server := range a.serverVersionDirs {
 		wg.Add(1)
-		go func(s utils.SekaiRegion) {
+		go func(s utils.HarukiSekaiServerRegion) {
 			defer wg.Done()
 			if _, err := a.CheckAppVersion(ctx, s); err != nil {
 				a.logger.Warnf("%s server: failed to check app version: %v", s, err)

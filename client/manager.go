@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"fmt"
+	"haruki-sekai-api/config"
 	"haruki-sekai-api/logger"
 	"haruki-sekai-api/utils"
 	"net/http"
@@ -16,27 +17,25 @@ import (
 )
 
 type SekaiClientManager struct {
-	Server        utils.SekaiRegion
-	ServerInfo    SekaiServerInfo
+	Server        utils.HarukiSekaiServerRegion
+	ServerConfig  config.ServerConfig
 	VersionHelper *SekaiVersionHelper
 	CookieHelper  *SekaiCookieHelper
-	AccountsDir   string
 	Clients       []*SekaiClient
 	ClientNo      int
 	Proxy         string
 	Logger        *logger.Logger
 }
 
-func NewSekaiClientManager(serverInfo SekaiServerInfo, accountsDir, versionFilePath string, proxy string) *SekaiClientManager {
+func NewSekaiClientManager(server utils.HarukiSekaiServerRegion, serverConfig config.ServerConfig, proxy string) *SekaiClientManager {
 	mgr := &SekaiClientManager{
-		Server:        serverInfo.Server,
-		ServerInfo:    serverInfo,
-		VersionHelper: &SekaiVersionHelper{versionFilePath: versionFilePath},
-		AccountsDir:   accountsDir,
+		Server:        server,
+		ServerConfig:  serverConfig,
+		VersionHelper: &SekaiVersionHelper{versionFilePath: serverConfig.VersionPath},
 		Proxy:         proxy,
-		Logger:        logger.NewLogger("SekaiClientManager", "DEBUG", nil),
+		Logger:        logger.NewLogger(fmt.Sprintf("SekaiClientManager%s", strings.ToUpper(string(server))), "DEBUG", nil),
 	}
-	if serverInfo.Server == "jp" {
+	if server == utils.HarukiSekaiServerRegionJP {
 		mgr.CookieHelper = &SekaiCookieHelper{}
 	}
 	return mgr
@@ -44,7 +43,7 @@ func NewSekaiClientManager(serverInfo SekaiServerInfo, accountsDir, versionFileP
 
 func (mgr *SekaiClientManager) parseAccounts() ([]SekaiAccountInterface, error) {
 	var accounts []SekaiAccountInterface
-	err := filepath.Walk(mgr.AccountsDir, func(path string, info os.FileInfo, err error) error {
+	err := filepath.Walk(mgr.ServerConfig.AccountDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
@@ -66,7 +65,7 @@ func (mgr *SekaiClientManager) parseAccounts() ([]SekaiAccountInterface, error) 
 
 		switch v := raw.(type) {
 		case map[string]any:
-			if mgr.Server == utils.SekaiRegionJP || mgr.Server == utils.SekaiRegionEN {
+			if mgr.Server == utils.HarukiSekaiServerRegionJP || mgr.Server == utils.HarukiSekaiServerRegionEN {
 				var acc *SekaiAccountCP
 				b, _ := sonic.Marshal(v)
 				if err := sonic.Unmarshal(b, acc); err == nil {
@@ -82,7 +81,7 @@ func (mgr *SekaiClientManager) parseAccounts() ([]SekaiAccountInterface, error) 
 		case []any:
 			for _, item := range v {
 				if m, ok := item.(map[string]any); ok {
-					if mgr.Server == utils.SekaiRegionJP || mgr.Server == utils.SekaiRegionEN {
+					if mgr.Server == utils.HarukiSekaiServerRegionJP || mgr.Server == utils.HarukiSekaiServerRegionEN {
 						var acc *SekaiAccountCP
 						b, _ := sonic.Marshal(m)
 						if err := sonic.Unmarshal(b, acc); err == nil {
@@ -106,7 +105,7 @@ func (mgr *SekaiClientManager) parseAccounts() ([]SekaiAccountInterface, error) 
 }
 
 func (mgr *SekaiClientManager) ParseCookies(ctx context.Context) error {
-	if mgr.Server == utils.SekaiRegionJP {
+	if mgr.Server == utils.HarukiSekaiServerRegionJP {
 		var wg sync.WaitGroup
 		errChan := make(chan error, len(mgr.Clients))
 		for _, client := range mgr.Clients {
@@ -165,7 +164,8 @@ func (mgr *SekaiClientManager) Init() error {
 
 	for _, account := range accounts {
 		client := NewSekaiClient(
-			&mgr.ServerInfo,
+			mgr.Server,
+			mgr.ServerConfig,
 			account,
 			mgr.CookieHelper,
 			mgr.VersionHelper,
@@ -216,7 +216,7 @@ func (mgr *SekaiClientManager) Init() error {
 		}
 	}
 
-	mgr.Logger.Infof("[INFO] Client manager initialized successfully")
+	mgr.Logger.Infof("Client manager initialized successfully")
 	return nil
 }
 
@@ -369,7 +369,7 @@ func (mgr *SekaiClientManager) APIGet(ctx context.Context, path string, params m
 			}, http.StatusServiceUnavailable, NewUnderMaintenanceError()
 
 		case SekaiApiHttpStatusOk:
-			result, err := client.response(*response)
+			result, err := client.handleResponse(*response)
 			client.Lock.Unlock()
 			if err != nil {
 				return map[string]interface{}{

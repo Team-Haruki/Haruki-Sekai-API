@@ -1,15 +1,17 @@
 package api
 
+import "haruki-sekai-api/utils"
+
 type Request struct {
-	ApiType EndpointType
-	Server  ServerRegion
+	APIType utils.HarukiSekaiAPIEndpointType
+	Server  utils.HarukiSekaiServerRegion
 	Path    string
 	Query   map[string]string
 }
 
-func GetApiRequest(apiType EndpointType, server ServerRegion, subPath string, query map[string]string) *Request {
+func GetAPIRequest(apiType utils.HarukiSekaiAPIEndpointType, server utils.HarukiSekaiServerRegion, subPath string, query map[string]string) *Request {
 	req := &Request{
-		ApiType: apiType,
+		APIType: apiType,
 		Server:  server,
 		Path:    subPath,
 		Query:   query,

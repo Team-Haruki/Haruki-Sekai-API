@@ -92,7 +92,7 @@ func (s *SekaiAccountNuverse) Dump() ([]byte, error) {
 }
 
 type SekaiServerInfo struct {
-	Server               utils.SekaiRegion
+	Server               utils.HarukiSekaiServerRegion
 	ApiUrl               string
 	NuverseMasterDataUrl string
 	RequireCookies       bool

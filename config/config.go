@@ -2,6 +2,7 @@ package config
 
 import (
 	harukiLogger "haruki-sekai-api/logger"
+	"haruki-sekai-api/utils"
 	"os"
 
 	"gopkg.in/yaml.v3"
@@ -26,37 +27,57 @@ type BackendConfig struct {
 	AllowCORS     []string `yaml:"allow_cors"`
 }
 
-type SekaiClientConfig struct {
-	ENServerAPIHost              string            `yaml:"en_server_api_host"`
-	ENServerAESKey               string            `yaml:"en_server_aes_key"`
-	ENServerAESIV                string            `yaml:"en_server_aes_iv"`
-	JPServerAPIHost              string            `yaml:"jp_server_api_host"`
-	TWServerAPIHost              string            `yaml:"tw_server_api_host"`
-	KRServerAPIHost              string            `yaml:"kr_server_api_host"`
-	CNServerAPIHost              string            `yaml:"cn_server_api_host"`
-	OtherServerAESKey            string            `yaml:"other_server_aes_key"`
-	OtherServerAESIV             string            `yaml:"other_server_aes_iv"`
-	JPServerInheritToken         string            `yaml:"jp_server_inherit_token"`
-	ENServerInheritToken         string            `yaml:"en_server_inherit_token"`
-	JPServerAppVersionUrl        string            `yaml:"jp_server_app_version_url"`
-	ENServerAppVersionUrl        string            `yaml:"en_server_app_version_url"`
-	JPServerInheritClientHeaders map[string]string `yaml:"jp_server_inherit_client_headers"`
-	ENServerInheritClientHeaders map[string]string `yaml:"en_server_inherit_client_headers"`
-	SuiteRemoveKeys              []string          `yaml:"suite_remove_keys"`
+type GormLoggerConfig struct {
+	Level                     string `yaml:"level"`
+	SlowThreshold             string `yaml:"slow_threshold,omitempty"`
+	IgnoreRecordNotFoundError bool   `yaml:"ignore_record_not_found_error,omitempty"`
+	Colorful                  bool   `yaml:"colorful,omitempty"`
+}
+
+type GormNamingConfig struct {
+	TablePrefix   string `yaml:"table_prefix,omitempty"`
+	SingularTable bool   `yaml:"singular_table,omitempty"`
+}
+
+type GormConfig struct {
+	Dialect                                  string           `yaml:"dialect"`
+	DSN                                      string           `yaml:"dsn"`
+	MaxOpenConns                             int              `yaml:"max_open_conns,omitempty"`
+	MaxIdleConns                             int              `yaml:"max_idle_conns,omitempty"`
+	ConnMaxLifetime                          string           `yaml:"conn_max_lifetime,omitempty"`
+	PrepareStmt                              bool             `yaml:"prepare_stmt,omitempty"`
+	DisableForeignKeyConstraintWhenMigrating bool             `yaml:"disable_fk_migrate,omitempty"`
+	Logger                                   GormLoggerConfig `yaml:"logger"`
+	Naming                                   GormNamingConfig `yaml:"naming"`
+}
+
+type ServerConfig struct {
+	Enabled                  bool              `yaml:"enabled,omitempty"`
+	MasterDir                string            `yaml:"master_dir,omitempty"`
+	VersionPath              string            `yaml:"version_path,omitempty"`
+	AccountDir               string            `yaml:"account_dir,omitempty"`
+	APIURL                   string            `yaml:"api_url"`
+	NuverseMasterDataURL     string            `yaml:"nuverse_master_data_url,omitempty"`
+	NuverseStructureFilePath string            `yaml:"nuverse_structure_file_path,omitempty"`
+	RequireCookies           bool              `yaml:"require_cookies,omitempty"`
+	Headers                  map[string]string `yaml:"headers,omitempty"`
+	AESKeyHex                string            `yaml:"aes_key_hex,omitempty"`
+	AESIVHex                 string            `yaml:"aes_iv_hex,omitempty"`
 }
 
 type Config struct {
-	Proxy       string            `yaml:"proxy"`
-	Redis       RedisConfig       `yaml:"redis"`
-	Backend     BackendConfig     `yaml:"backend"`
-	SekaiClient SekaiClientConfig `yaml:"sekai_client"`
+	Proxy   string                                         `yaml:"proxy"`
+	Redis   RedisConfig                                    `yaml:"redis"`
+	Backend BackendConfig                                  `yaml:"backend"`
+	Gorm    GormConfig                                     `yaml:"gorm"`
+	Servers map[utils.HarukiSekaiServerRegion]ServerConfig `yaml:"servers"`
 }
 
 var Cfg Config
 
 func init() {
 	logger := harukiLogger.NewLogger("ConfigLoader", "DEBUG", nil)
-	f, err := os.Open("haruki-suite-configs.yaml")
+	f, err := os.Open("haruki-sekai-configs.yaml")
 	if err != nil {
 		logger.Errorf("Failed to open config file: %v", err)
 		os.Exit(1)

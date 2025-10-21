@@ -4,10 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"haruki-sekai-api/config"
 	"haruki-sekai-api/logger"
 	"haruki-sekai-api/utils"
 	"net"
-	netUrl "net/url"
 	"strings"
 	"sync"
 	"time"
@@ -19,37 +19,45 @@ import (
 )
 
 type SekaiClient struct {
-	ServerInfo    *SekaiServerInfo
+	Server        utils.HarukiSekaiServerRegion
+	ServerConfig  config.ServerConfig
 	Account       SekaiAccountInterface
 	CookieHelper  *SekaiCookieHelper
 	VersionHelper *SekaiVersionHelper
 	Proxy         string
 	Logger        *logger.Logger
-
-	Lock    *sync.Mutex
-	Session *resty.Client
+	Cryptor       *SekaiCryptor
+	Lock          *sync.Mutex
+	Session       *resty.Client
 }
 
 func NewSekaiClient(
-	serverInfo *SekaiServerInfo,
+	server utils.HarukiSekaiServerRegion,
+	serverConfig config.ServerConfig,
 	account SekaiAccountInterface,
 	cookieHelper *SekaiCookieHelper,
 	versionHelper *SekaiVersionHelper,
 	proxy string,
 ) *SekaiClient {
+	cryptor, err := NewSekaiCryptorFromHex(serverConfig.AESKeyHex, serverConfig.AESIVHex)
+	if err != nil {
+		panic(err)
+	}
 	return &SekaiClient{
-		ServerInfo:    serverInfo,
+		Server:        server,
+		ServerConfig:  serverConfig,
 		Account:       account,
 		CookieHelper:  cookieHelper,
 		VersionHelper: versionHelper,
 		Proxy:         proxy,
+		Cryptor:       cryptor,
 		Lock:          &sync.Mutex{},
 	}
 
 }
 
 func (c *SekaiClient) ParseCookies(ctx context.Context) error {
-	if c.ServerInfo.Server != utils.SekaiRegionJP {
+	if c.Server != utils.HarukiSekaiServerRegionJP {
 		return nil
 	}
 	cookie, err := c.CookieHelper.GetCookies(ctx, c.Proxy)
@@ -80,11 +88,11 @@ func (c *SekaiClient) Init() error {
 		SetRetryCount(4).
 		SetRetryWaitTime(time.Second * 1)
 
-	for k, v := range c.ServerInfo.Headers {
+	for k, v := range c.ServerConfig.Headers {
 		c.Session.SetHeader(k, v)
 	}
 
-	c.Logger = logger.NewLogger("SekaiClient", "DEBUG", nil)
+	c.Logger = logger.NewLogger(fmt.Sprintf("SekaiClient%s", strings.ToUpper(string(c.Server))), "DEBUG", nil)
 	if err := c.ParseCookies(context.Background()); err != nil {
 		return err
 	}
@@ -94,20 +102,20 @@ func (c *SekaiClient) Init() error {
 	return nil
 }
 
-func (c *SekaiClient) response(response resty.Response) (any, error) {
+func (c *SekaiClient) handleResponse(response resty.Response) (any, error) {
 	statusCode, err := ParseSekaiApiHttpStatus(response.StatusCode())
 	if err != nil {
 		c.Logger.Errorf("Parse status code error : %v", err)
 		return nil, err
 	}
+	contentType := strings.ToLower(response.Header().Get("Content-Type"))
 
-	if lo.Contains([]string{"application/octet-stream", "binary/octet-stream"}, c.Session.Header.Get("Content-Type")) {
-		unpackResponse, err := Unpack(response.Body(), c.ServerInfo.Server)
+	if lo.Contains([]string{"application/octet-stream", "binary/octet-stream"}, contentType) {
+		unpackResponse, err := c.Cryptor.Unpack(response.Body())
 		if err != nil {
 			c.Logger.Errorf("Unpack response error : %v", err)
 			return nil, err
 		}
-
 		switch statusCode {
 		case SekaiApiHttpStatusOk,
 			SekaiApiHttpStatusClientError,
@@ -127,15 +135,15 @@ func (c *SekaiClient) response(response resty.Response) (any, error) {
 		if statusCode == SekaiApiHttpStatusServerError {
 			return nil, NewSekaiUnknownClientException(response.StatusCode(), string(response.Body()))
 		}
-		if statusCode == SekaiApiHttpStatusSessionError && c.Session.Header.Get("Content-Type") == "text/xml" {
+		if statusCode == SekaiApiHttpStatusSessionError && contentType == "text/xml" {
 			return nil, NewCookieExpiredError()
 		}
 	}
 	return nil, NewSekaiUnknownClientException(response.StatusCode(), string(response.Body()))
 }
 
-func (c *SekaiClient) CallApi(ctx context.Context, path string, method string, data any, params map[string]any) (*resty.Response, error) {
-	uri := fmt.Sprintf("%s/api/%s", c.ServerInfo.ApiUrl, path)
+func (c *SekaiClient) CallAPI(ctx context.Context, path string, method string, data any, params map[string]any) (*resty.Response, error) {
+	uri := fmt.Sprintf("%s/api/%s", c.ServerConfig.APIURL, path)
 
 	template, err := uritemplates.Parse(uri)
 	if err != nil {
@@ -150,8 +158,7 @@ func (c *SekaiClient) CallApi(ctx context.Context, path string, method string, d
 		return nil, err
 	}
 
-	c.Logger.Infof("%s server account #%s %s %s",
-		strings.ToUpper(string(c.ServerInfo.Server)),
+	c.Logger.Infof("account #%s %s %s",
 		c.Account.GetUserId(),
 		method,
 		url,
@@ -161,75 +168,120 @@ func (c *SekaiClient) CallApi(ctx context.Context, path string, method string, d
 	if c.Proxy != "" {
 		cli.SetProxy(c.Proxy)
 	}
-	req := *cli.R()
-	req.SetContext(ctx)
-	req.Header.Set("X-Request-ID", uuid.New().String())
-	req.
-		AddRetryCondition(func(response *resty.Response, err error) bool {
-			transport, cliErr := cli.Transport()
-			if cliErr != nil || transport.Proxy == nil {
-				return true
-			}
 
-			var reqErr *netUrl.Error
-			if errors.As(err, &reqErr) {
-				var netError *net.OpError
-				if errors.As(reqErr.Err, &netError) {
-					if netError.Op == "proxyconnect" {
-						c.Logger.Warnf("net error: proxy: %v", reqErr.Err)
-					} else {
-						c.Logger.Warnf("net error: %v", reqErr.Err)
-					}
-					return false // assume that this is proxy server error
-				} else {
-					if strings.Contains(reqErr.Err.Error(), "EOF") {
-						c.Logger.Warnf("request error: %v (most probably proxy issue)", reqErr.Err)
-						return false
-					}
-					c.Logger.Warnf("request error: %v", reqErr.Err)
-					return true
-				}
-			}
-			return false
-		})
+	var lastErr error
+	for attempt := 1; attempt <= 4; attempt++ {
+		req := *cli.R()
+		req.SetContext(ctx)
+		req.Header.Set("X-Request-ID", uuid.New().String())
 
-	for k, v := range params {
-		req.SetQueryParam(k, fmt.Sprintf("%v", v))
-	}
-	if data != nil {
-		packedData, err := Pack(data, c.ServerInfo.Server)
-		if err != nil {
-			return nil, err
+		for k, v := range params {
+			req.SetQueryParam(k, fmt.Sprintf("%v", v))
 		}
-		req.SetBody(packedData)
+		if data != nil {
+			packedData, err := c.Cryptor.Pack(data)
+			if err != nil {
+				return nil, err
+			}
+			req.SetBody(packedData)
+		}
+
+		response, err := req.Execute(strings.ToUpper(method), url)
+		if err != nil {
+			var ne net.Error
+			if errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &ne) && ne.Timeout()) {
+				c.Logger.Warnf("%s client #%s request timed out, retrying...", strings.ToUpper(string(c.Server)), c.Account.GetUserId())
+				lastErr = err
+			} else {
+				c.Logger.Errorf("An error occurred: server = %s, exception = %v", strings.ToUpper(string(c.Server)), err)
+				lastErr = err
+			}
+		} else {
+			if v := response.Header().Get("X-Session-Token"); v != "" {
+				c.Session.SetHeader("X-Session-Token", v)
+			}
+			if _, respErr := c.handleResponse(*response); respErr != nil {
+				var (
+					se *SessionError
+					ce *CookieExpiredError
+					ue *UpgradeRequiredError
+					me *UnderMaintenanceError
+				)
+				switch {
+				case errors.As(respErr, &se):
+					c.Logger.Warnf("Account #%s session expired, re-logging in...", c.Account.GetUserId())
+					ctxNoRelog := context.Background()
+					if _, err := c.Login(ctxNoRelog); err != nil {
+						c.Logger.Errorf("Re-login failed: %v", err)
+						lastErr = err
+						break
+					}
+					lastErr = se
+				case errors.As(respErr, &ce):
+					c.Logger.Warnf("Clients' cookies expired, re-parsing cookies...")
+					if err := c.ParseCookies(ctx); err != nil {
+						c.Logger.Errorf("Parse cookies failed: %v", err)
+						return nil, err
+					}
+					lastErr = ce
+				case errors.As(respErr, &ue):
+					if c.Server == utils.HarukiSekaiServerRegionJP || c.Server == utils.HarukiSekaiServerRegionEN {
+						c.Logger.Warnf("App version might be upgraded")
+						return nil, ue
+					} else {
+						c.Logger.Warnf("%s server detected new data, re-logging in...", strings.ToUpper(string(c.Server)))
+						if _, err := c.Login(ctx); err != nil {
+							c.Logger.Errorf("Re-login failed: %v", err)
+							lastErr = err
+							break
+						}
+						lastErr = NewSessionError()
+					}
+				case errors.As(respErr, &me):
+					c.Logger.Warnf("Server is under maintenance")
+					return nil, me
+				default:
+					if sc := response.StatusCode(); sc >= 500 {
+						c.Logger.Warnf("Server error %d on attempt %d", sc, attempt)
+						lastErr = NewSekaiUnknownClientException(sc, string(response.Body()))
+					} else {
+						return nil, respErr
+					}
+				}
+			} else {
+				return response, nil
+			}
+		}
+
+		if attempt < 4 {
+			time.Sleep(time.Second)
+		}
 	}
 
-	response, err := req.Execute(strings.ToUpper(method), url)
-	if err != nil {
-		return nil, err
+	if lastErr != nil {
+		return nil, lastErr
 	}
-
-	return response, nil
+	return nil, fmt.Errorf("request failed after retries")
 }
 
 func (c *SekaiClient) Get(ctx context.Context, path string, params map[string]any) (*resty.Response, error) {
-	return c.CallApi(ctx, path, "GET", nil, params)
+	return c.CallAPI(ctx, path, "GET", nil, params)
 }
 
 func (c *SekaiClient) Post(ctx context.Context, path string, data any, params map[string]any) (*resty.Response, error) {
-	return c.CallApi(ctx, path, "POST", data, params)
+	return c.CallAPI(ctx, path, "POST", data, params)
 }
 
 func (c *SekaiClient) Put(ctx context.Context, path string, data any, params map[string]any) (*resty.Response, error) {
-	return c.CallApi(ctx, path, "PUT", data, params)
+	return c.CallAPI(ctx, path, "PUT", data, params)
 }
 
 func (c *SekaiClient) Delete(ctx context.Context, path string, params map[string]any) (*resty.Response, error) {
-	return c.CallApi(ctx, path, "DELETE", nil, params)
+	return c.CallAPI(ctx, path, "DELETE", nil, params)
 }
 
 func (c *SekaiClient) Patch(ctx context.Context, path string, data any, params map[string]any) (*resty.Response, error) {
-	return c.CallApi(ctx, path, "PATCH", data, params)
+	return c.CallAPI(ctx, path, "PATCH", data, params)
 }
 
 func (c *SekaiClient) Close() error {

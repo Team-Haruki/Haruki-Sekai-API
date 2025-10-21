@@ -2,12 +2,12 @@ package client
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"os"
 	"sync"
 	"time"
 
+	"github.com/bytedance/sonic"
 	"github.com/go-resty/resty/v2"
 )
 
@@ -76,7 +76,7 @@ func (h *SekaiVersionHelper) GetAppVersion() error {
 	}
 
 	var parsed map[string]string
-	if err := json.Unmarshal(data, &parsed); err != nil {
+	if err := sonic.Unmarshal(data, &parsed); err != nil {
 		return err
 	}
 

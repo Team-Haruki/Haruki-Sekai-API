@@ -19,19 +19,19 @@ import (
 )
 
 type SekaiMasterUpdater struct {
-	servers             map[utils.SekaiRegion]client.SekaiServerInfo
-	managers            map[utils.SekaiRegion]*client.SekaiClientManager
-	masterDirs          map[utils.SekaiRegion]string
-	versionDirs         map[utils.SekaiRegion]string
+	servers             map[utils.HarukiSekaiServerRegion]client.SekaiServerInfo
+	managers            map[utils.HarukiSekaiServerRegion]*client.SekaiClientManager
+	masterDirs          map[utils.HarukiSekaiServerRegion]string
+	versionDirs         map[utils.HarukiSekaiServerRegion]string
 	assetUpdaterServers []client.HarukiAssetUpdaterInfo
 	logger              *logger.Logger
 }
 
 func NewSekaiMasterUpdater(
-	servers map[utils.SekaiRegion]client.SekaiServerInfo,
-	managers map[utils.SekaiRegion]*client.SekaiClientManager,
-	masterDirs map[utils.SekaiRegion]string,
-	versionDirs map[utils.SekaiRegion]string,
+	servers map[utils.HarukiSekaiServerRegion]client.SekaiServerInfo,
+	managers map[utils.HarukiSekaiServerRegion]*client.SekaiClientManager,
+	masterDirs map[utils.HarukiSekaiServerRegion]string,
+	versionDirs map[utils.HarukiSekaiServerRegion]string,
 	assetUpdaterServers []client.HarukiAssetUpdaterInfo,
 ) *SekaiMasterUpdater {
 	return &SekaiMasterUpdater{
@@ -123,7 +123,7 @@ func (s *SekaiMasterUpdater) callAssetUpdater(ctx context.Context, options map[s
 	}
 }
 
-func (s *SekaiMasterUpdater) assetUpdater(ctx context.Context, server utils.SekaiRegion, data map[string]any) {
+func (s *SekaiMasterUpdater) assetUpdater(ctx context.Context, server utils.HarukiSekaiServerRegion, data map[string]any) {
 	body := map[string]any{
 		"server": string(server),
 	}
@@ -170,7 +170,7 @@ func (s *SekaiMasterUpdater) assetUpdater(ctx context.Context, server utils.Seka
 }
 
 // checkUpdate 检查更新
-func (s *SekaiMasterUpdater) checkUpdate(ctx context.Context, server utils.SekaiRegion, manager *client.SekaiClientManager) (map[utils.SekaiRegion]string, error) {
+func (s *SekaiMasterUpdater) checkUpdate(ctx context.Context, server utils.HarukiSekaiServerRegion, manager *client.SekaiClientManager) (map[utils.HarukiSekaiServerRegion]string, error) {
 	updateMaster := false
 	updateAsset := false
 
@@ -191,7 +191,7 @@ func (s *SekaiMasterUpdater) checkUpdate(ctx context.Context, server utils.Sekai
 	currentServerAssetVersion := getString(currentServerVersion, "assetVersion")
 	currentServerAssetHash := getString(currentServerVersion, "assetHash")
 
-	if server == utils.SekaiRegionJP || server == utils.SekaiRegionEN {
+	if server == utils.HarukiSekaiServerRegionJP || server == utils.HarukiSekaiServerRegionEN {
 		// 检查数据版本更新
 		isNewer, err := CompareVersion(currentServerDataVersion, currentDataVersion)
 		if err != nil {
@@ -253,18 +253,18 @@ func (s *SekaiMasterUpdater) checkUpdate(ctx context.Context, server utils.Sekai
 			return nil, fmt.Errorf("failed to save versioned file: %v", err)
 		}
 
-		return map[utils.SekaiRegion]string{server: currentServerDataVersion}, nil
+		return map[utils.HarukiSekaiServerRegion]string{server: currentServerDataVersion}, nil
 	}
 
 	return nil, nil
 }
 
 // checkUpdateConcurrently 并发检查更新
-func (s *SekaiMasterUpdater) CheckUpdateConcurrently(ctx context.Context) (map[utils.SekaiRegion]string, error) {
+func (s *SekaiMasterUpdater) CheckUpdateConcurrently(ctx context.Context) (map[utils.HarukiSekaiServerRegion]string, error) {
 	s.logger.Infof("Starting concurrent update check...")
 
 	type result struct {
-		data map[utils.SekaiRegion]string
+		data map[utils.HarukiSekaiServerRegion]string
 		err  error
 	}
 
@@ -273,7 +273,7 @@ func (s *SekaiMasterUpdater) CheckUpdateConcurrently(ctx context.Context) (map[u
 
 	for server, manager := range s.managers {
 		wg.Add(1)
-		go func(srv utils.SekaiRegion, mgr *client.SekaiClientManager) {
+		go func(srv utils.HarukiSekaiServerRegion, mgr *client.SekaiClientManager) {
 			defer wg.Done()
 			data, err := s.checkUpdate(ctx, srv, mgr)
 			resultChan <- result{data: data, err: err}
@@ -283,7 +283,7 @@ func (s *SekaiMasterUpdater) CheckUpdateConcurrently(ctx context.Context) (map[u
 	wg.Wait()
 	close(resultChan)
 
-	resultDict := make(map[utils.SekaiRegion]string)
+	resultDict := make(map[utils.HarukiSekaiServerRegion]string)
 	for res := range resultChan {
 		if res.err != nil {
 			s.logger.Errorf("Update check error: %v", res.err)
@@ -304,7 +304,7 @@ func (s *SekaiMasterUpdater) CheckUpdateConcurrently(ctx context.Context) (map[u
 	return nil, nil
 }
 
-func (s *SekaiMasterUpdater) saveSplitMasterData(server utils.SekaiRegion, master map[string]any) error {
+func (s *SekaiMasterUpdater) saveSplitMasterData(server utils.HarukiSekaiServerRegion, master map[string]any) error {
 	s.logger.Infof("Saving %s server split master data...", string(server))
 
 	masterDir := s.masterDirs[server]
@@ -339,7 +339,7 @@ func (s *SekaiMasterUpdater) saveSplitMasterData(server utils.SekaiRegion, maste
 	return nil
 }
 
-func (s *SekaiMasterUpdater) updateMaster(ctx context.Context, server utils.SekaiRegion, manager *client.SekaiClientManager) error {
+func (s *SekaiMasterUpdater) updateMaster(ctx context.Context, server utils.HarukiSekaiServerRegion, manager *client.SekaiClientManager) error {
 	s.logger.Infof("Downloading %s new master data...", string(server))
 
 	masterData, err := manager.DownloadMaster()

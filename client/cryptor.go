@@ -6,36 +6,49 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"haruki-sekai-api/config"
-	"haruki-sekai-api/utils"
 	"sync"
 
 	"github.com/vgorin/cryptogo/pad"
 	"github.com/vmihailenco/msgpack/v5"
 )
 
-func getCipher(server utils.SekaiRegion, encrypt bool) (cipher.BlockMode, error) {
-	var key, iv []byte
-	if server == utils.SekaiRegionEN {
-		key, _ = hex.DecodeString(config.Cfg.SekaiClient.ENServerAESKey)
-		iv, _ = hex.DecodeString(config.Cfg.SekaiClient.ENServerAESIV)
-	} else {
-		key, _ = hex.DecodeString(config.Cfg.SekaiClient.OtherServerAESKey)
-		iv, _ = hex.DecodeString(config.Cfg.SekaiClient.OtherServerAESIV)
-	}
-
-	block, err := aes.NewCipher(key)
-	if err != nil {
-		return nil, err
-	}
-
-	if encrypt {
-		return cipher.NewCBCEncrypter(block, iv), nil
-	}
-	return cipher.NewCBCDecrypter(block, iv), nil
+type SekaiCryptor struct {
+	key   []byte
+	iv    []byte
+	block cipher.Block
 }
 
-func Pack(content any, server utils.SekaiRegion) ([]byte, error) {
+func NewSekaiCryptorFromHex(aesKeyHex, aesIVHex string) (*SekaiCryptor, error) {
+	key, err := hex.DecodeString(aesKeyHex)
+	if err != nil {
+		return nil, fmt.Errorf("invalid aes key hex: %w", err)
+	}
+	iv, err := hex.DecodeString(aesIVHex)
+	if err != nil {
+		return nil, fmt.Errorf("invalid aes iv hex: %w", err)
+	}
+	if len(iv) != aes.BlockSize {
+		return nil, fmt.Errorf("invalid iv length: got %d, want %d", len(iv), aes.BlockSize)
+	}
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, fmt.Errorf("new cipher: %w", err)
+	}
+	return &SekaiCryptor{
+		key:   key,
+		iv:    iv,
+		block: block,
+	}, nil
+}
+
+func (c *SekaiCryptor) newCBC(encrypt bool) cipher.BlockMode {
+	if encrypt {
+		return cipher.NewCBCEncrypter(c.block, c.iv)
+	}
+	return cipher.NewCBCDecrypter(c.block, c.iv)
+}
+
+func (c *SekaiCryptor) Pack(content any) ([]byte, error) {
 	if content == nil {
 		return nil, errors.New("content cannot be nil")
 	}
@@ -51,10 +64,7 @@ func Pack(content any, server utils.SekaiRegion) ([]byte, error) {
 
 	padded := pad.PKCS7Pad(packed, aes.BlockSize)
 
-	encrypter, err := getCipher(server, true)
-	if err != nil {
-		return nil, err
-	}
+	encrypter := c.newCBC(true)
 
 	encrypted := make([]byte, len(padded))
 	encrypter.CryptBlocks(encrypted, padded)
@@ -75,7 +85,7 @@ var bytesPool = sync.Pool{
 	},
 }
 
-func UnpackInto[T any](content []byte, server utils.SekaiRegion) (*T, error) {
+func (c *SekaiCryptor) UnpackInto(content []byte, out any) error {
 	validateContent := func(content []byte) error {
 		if len(content) == 0 {
 			return ErrEmptyContent
@@ -87,13 +97,10 @@ func UnpackInto[T any](content []byte, server utils.SekaiRegion) (*T, error) {
 	}
 
 	if err := validateContent(content); err != nil {
-		return nil, err
+		return err
 	}
 
-	decrypter, err := getCipher(server, false)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create cipher: %w", err)
-	}
+	decrypter := c.newCBC(false)
 
 	decrypted := bytesPool.Get().(*[]byte)
 	if cap(*decrypted) < len(content) {
@@ -107,17 +114,31 @@ func UnpackInto[T any](content []byte, server utils.SekaiRegion) (*T, error) {
 
 	unpadded, err := pad.PKCS7Unpad(*decrypted)
 	if err != nil {
-		return nil, fmt.Errorf("failed to unpad: %w", err)
+		return fmt.Errorf("failed to unpad: %w", err)
 	}
 
-	var result T
-	if err := msgpack.Unmarshal(unpadded, &result); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal: %w", err)
+	if out == nil {
+		return fmt.Errorf("out must be a non-nil pointer")
+	}
+	if err := msgpack.Unmarshal(unpadded, out); err != nil {
+		return fmt.Errorf("failed to unmarshal: %w", err)
 	}
 
-	return &result, nil
+	return nil
 }
 
-func Unpack(content []byte, server utils.SekaiRegion) (any, error) {
-	return UnpackInto[any](content, server)
+func (c *SekaiCryptor) Unpack(content []byte) (any, error) {
+	var result any
+	if err := c.UnpackInto(content, &result); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+func UnpackInto[T any](c *SekaiCryptor, content []byte) (*T, error) {
+	var v T
+	if err := c.UnpackInto(content, &v); err != nil {
+		return nil, err
+	}
+	return &v, nil
 }
