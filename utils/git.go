@@ -1,4 +1,4 @@
-package updater
+package utils
 
 import (
 	"fmt"
@@ -49,7 +49,7 @@ func (g *GitUpdater) PushRemote(repo *git.Repository, dataVersion string) error 
 	commit, err := w.Commit(commitMsg, &git.CommitOptions{
 		Author: &object.Signature{
 			Name:  "Haruki Sekai Master Update Bot",
-			Email: "bot@haruki-sekai.com",
+			Email: "no-reply@seiunx.com",
 			When:  time.Now(),
 		},
 		Committer: &object.Signature{
@@ -125,7 +125,6 @@ func (g *GitUpdater) PushRemote(repo *git.Repository, dataVersion string) error 
 	}
 	logger.Infof("Pushed changes to remote branch %s", branchName)
 
-	// Restore original remote URL
 	remoteConfig.URLs[0] = origURL
 	_ = repo.DeleteRemote("origin")
 	_, _ = repo.CreateRemote(remoteConfig)

@@ -193,7 +193,7 @@ func (s *SekaiMasterUpdater) checkUpdate(ctx context.Context, server utils.Haruk
 
 	if server == utils.HarukiSekaiServerRegionJP || server == utils.HarukiSekaiServerRegionEN {
 		// 检查数据版本更新
-		isNewer, err := CompareVersion(currentServerDataVersion, currentDataVersion)
+		isNewer, err := utils.CompareVersion(currentServerDataVersion, currentDataVersion)
 		if err != nil {
 			s.logger.Warnf("Failed to compare data version: %v", err)
 		} else if isNewer {
@@ -203,7 +203,7 @@ func (s *SekaiMasterUpdater) checkUpdate(ctx context.Context, server utils.Haruk
 		}
 
 		// 检查资源版本更新
-		isNewer, err = CompareVersion(currentServerAssetVersion, currentAssetVersion)
+		isNewer, err = utils.CompareVersion(currentServerAssetVersion, currentAssetVersion)
 		if err != nil {
 			s.logger.Warnf("Failed to compare asset version: %v", err)
 		} else if isNewer {

@@ -103,7 +103,7 @@ func (a *AppHashUpdater) GetLatestRemoteAppInfo(ctx context.Context, server util
 			latest = app
 			continue
 		}
-		flag, err := CompareVersion(app.AppVersion, latest.AppVersion)
+		flag, err := utils.CompareVersion(app.AppVersion, latest.AppVersion)
 		if err != nil {
 			a.logger.Warnf("%s server: failed to compare versions: %v", server, err)
 			continue
@@ -148,7 +148,7 @@ func (a *AppHashUpdater) CheckAppVersion(ctx context.Context, server utils.Haruk
 		a.logger.Warnf("%s server: local or remote version unavailable", server)
 		return false, nil
 	}
-	flag, err := CompareVersion(remote.AppVersion, local.AppVersion)
+	flag, err := utils.CompareVersion(remote.AppVersion, local.AppVersion)
 	if err != nil {
 		a.logger.Warnf("%s server: failed to compare versions: %v", server, err)
 		return false, err
