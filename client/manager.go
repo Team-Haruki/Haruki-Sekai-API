@@ -260,7 +260,7 @@ func (mgr *SekaiClientManager) Shutdown() error {
 	return nil
 }
 
-func (mgr *SekaiClientManager) APIGet(ctx context.Context, path string, params map[string]any) (any, int, error) {
+func (mgr *SekaiClientManager) GetGameAPI(ctx context.Context, path string, params map[string]any) (any, int, error) {
 	maxRetries := 4
 	retryCount := 0
 	retryDelay := time.Second
@@ -268,10 +268,12 @@ func (mgr *SekaiClientManager) APIGet(ctx context.Context, path string, params m
 	for retryCount < maxRetries {
 		client := mgr.getClient()
 		if client == nil {
-			return map[string]any{
-				"result":  "failed",
-				"message": "No client is available, please try again later.",
-			}, http.StatusInternalServerError, nil
+			resp := HarukiSekaiAPIFailedResponse{
+				Result:  "failed",
+				Status:  http.StatusInternalServerError,
+				Message: "No client is available, please try again later.",
+			}
+			return resp, http.StatusInternalServerError, nil
 		}
 
 		client.Lock.Lock()
@@ -279,20 +281,23 @@ func (mgr *SekaiClientManager) APIGet(ctx context.Context, path string, params m
 		response, err := client.Get(ctx, path, params)
 		if err != nil {
 			client.Lock.Unlock()
-			return map[string]any{
-				"result":  "failed",
-				"message": err.Error(),
-			}, http.StatusInternalServerError, err
+			resp := HarukiSekaiAPIFailedResponse{
+				Result:  "failed",
+				Status:  http.StatusInternalServerError,
+				Message: err.Error(),
+			}
+			return resp, http.StatusInternalServerError, err
 		}
 
-		// 解析响应
 		statusCode, err := ParseSekaiApiHttpStatus(response.StatusCode())
 		if err != nil {
 			client.Lock.Unlock()
-			return map[string]any{
-				"result":  "failed",
-				"message": fmt.Sprintf("Unknown status code: %d", response.StatusCode()),
-			}, response.StatusCode(), err
+			resp := HarukiSekaiAPIFailedResponse{
+				Result:  "failed",
+				Status:  response.StatusCode(),
+				Message: fmt.Sprintf("Unknown status code: %d", response.StatusCode()),
+			}
+			return resp, response.StatusCode(), err
 		}
 
 		switch statusCode {
@@ -300,10 +305,12 @@ func (mgr *SekaiClientManager) APIGet(ctx context.Context, path string, params m
 			mgr.Logger.Warnf("%s Server upgrade required, re-parsing...", strings.ToUpper(string(mgr.Server)))
 			if err := mgr.parseVersion(); err != nil {
 				client.Lock.Unlock()
-				return map[string]any{
-					"result":  "failed",
-					"message": fmt.Sprintf("Failed to parse version: %v", err),
-				}, response.StatusCode(), err
+				resp := HarukiSekaiAPIFailedResponse{
+					Result:  "failed",
+					Status:  response.StatusCode(),
+					Message: fmt.Sprintf("Failed to parse version: %v", err),
+				}
+				return resp, response.StatusCode(), err
 			}
 			retryCount++
 			time.Sleep(retryDelay)
@@ -314,10 +321,12 @@ func (mgr *SekaiClientManager) APIGet(ctx context.Context, path string, params m
 			mgr.Logger.Warnf("%s Server cookies expired, re-parsing...", strings.ToUpper(string(mgr.Server)))
 			if err := mgr.parseCookies(ctx); err != nil {
 				client.Lock.Unlock()
-				return map[string]any{
-					"result":  "failed",
-					"message": fmt.Sprintf("Failed to parse cookies: %v", err),
-				}, http.StatusForbidden, err
+				resp := HarukiSekaiAPIFailedResponse{
+					Result:  "failed",
+					Status:  http.StatusForbidden,
+					Message: fmt.Sprintf("Failed to parse cookies: %v", err),
+				}
+				return resp, http.StatusForbidden, err
 			}
 			retryCount++
 			time.Sleep(retryDelay)
@@ -326,19 +335,23 @@ func (mgr *SekaiClientManager) APIGet(ctx context.Context, path string, params m
 
 		case SekaiApiHttpStatusUnderMaintenance:
 			client.Lock.Unlock()
-			return map[string]any{
-				"result":  "failed",
-				"message": fmt.Sprintf("%s Game server is under maintenance.", strings.ToUpper(string(mgr.Server))),
-			}, http.StatusServiceUnavailable, NewUnderMaintenanceError()
+			resp := HarukiSekaiAPIFailedResponse{
+				Result:  "failed",
+				Status:  http.StatusServiceUnavailable,
+				Message: fmt.Sprintf("%s Game server is under maintenance.", strings.ToUpper(string(mgr.Server))),
+			}
+			return resp, http.StatusServiceUnavailable, NewUnderMaintenanceError()
 
 		case SekaiApiHttpStatusOk:
 			result, err := client.handleResponse(*response)
 			client.Lock.Unlock()
 			if err != nil {
-				return map[string]any{
-					"result":  "failed",
-					"message": err.Error(),
-				}, response.StatusCode(), err
+				resp := HarukiSekaiAPIFailedResponse{
+					Result:  "failed",
+					Status:  response.StatusCode(),
+					Message: err.Error(),
+				}
+				return resp, response.StatusCode(), err
 			}
 			if m, ok := result.(map[string]any); ok {
 				return m, response.StatusCode(), nil
@@ -347,15 +360,29 @@ func (mgr *SekaiClientManager) APIGet(ctx context.Context, path string, params m
 
 		default:
 			client.Lock.Unlock()
-			return map[string]any{
-				"result":  "failed",
-				"message": fmt.Sprintf("Unexpected status code: %d", response.StatusCode()),
-			}, response.StatusCode(), fmt.Errorf("unexpected status code: %d", response.StatusCode())
+			resp := HarukiSekaiAPIFailedResponse{
+				Result:  "failed",
+				Status:  response.StatusCode(),
+				Message: fmt.Sprintf("Unexpected status code: %d", response.StatusCode()),
+			}
+			return resp, response.StatusCode(), fmt.Errorf("unexpected status code: %d", response.StatusCode())
 		}
 	}
 
-	return map[string]any{
-		"result":  "failed",
-		"message": "Max retry attempts reached",
-	}, http.StatusInternalServerError, fmt.Errorf("max retry attempts reached")
+	resp := HarukiSekaiAPIFailedResponse{
+		Result:  "failed",
+		Status:  http.StatusInternalServerError,
+		Message: "Max retry attempts reached",
+	}
+	return resp, http.StatusInternalServerError, fmt.Errorf("max retry attempts reached")
+}
+
+func (mgr *SekaiClientManager) GetCPMySekaiImage(path string) ([]byte, error) {
+	client := mgr.getClient()
+	return client.GetCPMySekaiImage(path)
+}
+
+func (mgr *SekaiClientManager) GetNuverseMySekaiImage(userID, index string) ([]byte, error) {
+	client := mgr.getClient()
+	return client.GetNuverseMySekaiImage(userID, index)
 }

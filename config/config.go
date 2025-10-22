@@ -9,22 +9,23 @@ import (
 )
 
 type RedisConfig struct {
+	Enabled  bool   `yaml:"enabled"`
 	Host     string `yaml:"host"`
 	Port     int    `yaml:"port"`
 	Password string `yaml:"password"`
 }
 
 type BackendConfig struct {
-	Host          string   `yaml:"host"`
-	Port          int      `yaml:"port"`
-	SSL           bool     `yaml:"ssl"`
-	SSLCert       string   `yaml:"ssl_cert"`
-	SSLKey        string   `yaml:"ssl_key"`
-	LogLevel      string   `yaml:"log_level"`
-	MainLogFile   string   `yaml:"main_log_file"`
-	AccessLog     string   `yaml:"access_log"`
-	AccessLogPath string   `yaml:"access_log_path"`
-	AllowCORS     []string `yaml:"allow_cors"`
+	Host                   string `yaml:"host"`
+	Port                   int    `yaml:"port"`
+	SSL                    bool   `yaml:"ssl"`
+	SSLCert                string `yaml:"ssl_cert"`
+	SSLKey                 string `yaml:"ssl_key"`
+	LogLevel               string `yaml:"log_level"`
+	MainLogFile            string `yaml:"main_log_file"`
+	AccessLog              string `yaml:"access_log"`
+	AccessLogPath          string `yaml:"access_log_path"`
+	SekaiUserJWTSigningKey string `yaml:"sekai_user_jwt_signing_key,omitempty"`
 }
 
 type GormLoggerConfig struct {
@@ -40,6 +41,7 @@ type GormNamingConfig struct {
 }
 
 type GormConfig struct {
+	Enabled                                  bool             `yaml:"enabled"`
 	Dialect                                  string           `yaml:"dialect"`
 	DSN                                      string           `yaml:"dsn"`
 	MaxOpenConns                             int              `yaml:"max_open_conns,omitempty"`

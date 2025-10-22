@@ -125,3 +125,9 @@ type HarukiSekaiAssetUpdaterPayload struct {
 	AssetVersion string                        `json:"assetVersion"`
 	AssetHash    string                        `json:"assetHash"`
 }
+
+type HarukiSekaiAPIFailedResponse struct {
+	Result  string `json:"result"`
+	Status  int    `json:"status"`
+	Message string `json:"message"`
+}
