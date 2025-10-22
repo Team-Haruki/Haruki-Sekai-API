@@ -29,7 +29,7 @@ type SekaiClientManager struct {
 	Logger              *logger.Logger
 }
 
-func NewSekaiClientManager(server utils.HarukiSekaiServerRegion, serverConfig utils.HarukiSekaiServerConfig, assetUpdaterServers []*utils.HarukiAssetUpdaterInfo, git *git.HarukiGitUpdater, proxy string) *SekaiClientManager {
+func NewSekaiClientManager(server utils.HarukiSekaiServerRegion, serverConfig utils.HarukiSekaiServerConfig, assetUpdaterServers []*utils.HarukiAssetUpdaterInfo, git *git.HarukiGitUpdater, proxy string, jpSekaiCookieURL string) *SekaiClientManager {
 	mgr := &SekaiClientManager{
 		Server:              server,
 		ServerConfig:        serverConfig,
@@ -40,25 +40,14 @@ func NewSekaiClientManager(server utils.HarukiSekaiServerRegion, serverConfig ut
 		Logger:              logger.NewLogger(fmt.Sprintf("SekaiClientManager%s", strings.ToUpper(string(server))), "DEBUG", nil),
 	}
 	if server == utils.HarukiSekaiServerRegionJP {
-		mgr.CookieHelper = &SekaiCookieHelper{url: "https://issue.sekai.colorfulpalette.org/api/signature"}
+		mgr.CookieHelper = &SekaiCookieHelper{url: jpSekaiCookieURL}
 	}
 	return mgr
 }
 
 func (mgr *SekaiClientManager) parseAccounts() ([]SekaiAccountInterface, error) {
-	mgr.Logger.Debugf("parseAccounts: scanning account dir: %s", mgr.ServerConfig.AccountDir)
-
 	var (
-		accounts        []SekaiAccountInterface
-		totalFiles      int
-		jsonFiles       int
-		parsedCP        int
-		parsedNuverse   int
-		skippedDirs     int
-		skippedNonJSON  int
-		readErrors      int
-		decodeErrors    int
-		unexpectedKinds int
+		accounts []SekaiAccountInterface
 	)
 
 	err := filepath.Walk(mgr.ServerConfig.AccountDir, func(path string, info os.FileInfo, err error) error {
@@ -66,53 +55,31 @@ func (mgr *SekaiClientManager) parseAccounts() ([]SekaiAccountInterface, error) 
 			mgr.Logger.Warnf("parseAccounts: walk error on %s: %v", path, err)
 			return err
 		}
-		totalFiles++
-
-		// Skip directories
 		if info.IsDir() {
-			skippedDirs++
-			mgr.Logger.Debugf("parseAccounts: skip dir: %s", path)
 			return nil
 		}
-
-		// Only .json files
 		if filepath.Ext(path) != ".json" {
-			skippedNonJSON++
-			mgr.Logger.Debugf("parseAccounts: skip non-json: %s", path)
 			return nil
 		}
-		jsonFiles++
-		mgr.Logger.Debugf("parseAccounts: found json file: %s", path)
-
-		// Read file
 		data, err := os.ReadFile(path)
 		if err != nil {
-			readErrors++
 			mgr.Logger.Warnf("parseAccounts: read error %s: %v", path, err)
 			return nil
 		}
-		mgr.Logger.Debugf("parseAccounts: read %d bytes from %s", len(data), path)
-
-		// Decode to get top-level kind
 		var raw any
 		if err := sonic.Unmarshal(data, &raw); err != nil {
-			decodeErrors++
 			mgr.Logger.Warnf("parseAccounts: json decode error %s: %v", path, err)
 			return nil
 		}
 
 		switch v := raw.(type) {
 		case map[string]any:
-			mgr.Logger.Debugf("parseAccounts: %s top-level kind=object (server=%s)", path, strings.ToUpper(string(mgr.Server)))
 			if mgr.Server == utils.HarukiSekaiServerRegionJP || mgr.Server == utils.HarukiSekaiServerRegionEN {
 				acc := new(SekaiAccountCP)
 				b, _ := sonic.Marshal(v)
 				if err := sonic.Unmarshal(b, acc); err == nil {
 					accounts = append(accounts, acc)
-					parsedCP++
-					mgr.Logger.Debugf("parseAccounts: appended CP account from %s (userId=%s, deviceId=%s, total CP=%d)", path, acc.GetUserId(), acc.GetDeviceId(), parsedCP)
 				} else {
-					decodeErrors++
 					mgr.Logger.Warnf("parseAccounts: CP unmarshal error %s: %v", path, err)
 				}
 			} else {
@@ -120,15 +87,11 @@ func (mgr *SekaiClientManager) parseAccounts() ([]SekaiAccountInterface, error) 
 				b, _ := sonic.Marshal(v)
 				if err := sonic.Unmarshal(b, acc); err == nil {
 					accounts = append(accounts, acc)
-					parsedNuverse++
-					mgr.Logger.Debugf("parseAccounts: appended Nuverse account from %s (userId=%s, deviceId=%s, total Nuverse=%d)", path, acc.GetUserId(), acc.GetDeviceId(), parsedNuverse)
 				} else {
-					decodeErrors++
 					mgr.Logger.Warnf("parseAccounts: Nuverse unmarshal error %s: %v", path, err)
 				}
 			}
 		case []any:
-			mgr.Logger.Debugf("parseAccounts: %s top-level kind=array (len=%d, server=%s)", path, len(v), strings.ToUpper(string(mgr.Server)))
 			for idx, item := range v {
 				if m, ok := item.(map[string]any); ok {
 					if mgr.Server == utils.HarukiSekaiServerRegionJP || mgr.Server == utils.HarukiSekaiServerRegionEN {
@@ -136,10 +99,7 @@ func (mgr *SekaiClientManager) parseAccounts() ([]SekaiAccountInterface, error) 
 						b, _ := sonic.Marshal(m)
 						if err := sonic.Unmarshal(b, acc); err == nil {
 							accounts = append(accounts, acc)
-							parsedCP++
-							mgr.Logger.Debugf("parseAccounts: [%s][%d] appended CP account (userId=%s, deviceId=%s, total CP=%d)", path, idx, acc.GetUserId(), acc.GetDeviceId(), parsedCP)
 						} else {
-							decodeErrors++
 							mgr.Logger.Warnf("parseAccounts: [%s][%d] CP unmarshal error: %v", path, idx, err)
 						}
 					} else {
@@ -147,10 +107,7 @@ func (mgr *SekaiClientManager) parseAccounts() ([]SekaiAccountInterface, error) 
 						b, _ := sonic.Marshal(m)
 						if err := sonic.Unmarshal(b, acc); err == nil {
 							accounts = append(accounts, acc)
-							parsedNuverse++
-							mgr.Logger.Debugf("parseAccounts: [%s][%d] appended Nuverse account (userId=%s, deviceId=%s, total Nuverse=%d)", path, idx, acc.GetUserId(), acc.GetDeviceId(), parsedNuverse)
 						} else {
-							decodeErrors++
 							mgr.Logger.Warnf("parseAccounts: [%s][%d] Nuverse unmarshal error: %v", path, idx, err)
 						}
 					}
@@ -159,15 +116,10 @@ func (mgr *SekaiClientManager) parseAccounts() ([]SekaiAccountInterface, error) 
 				}
 			}
 		default:
-			unexpectedKinds++
 			mgr.Logger.Warnf("parseAccounts: unexpected top-level type in %s: %T", path, v)
 		}
 		return nil
 	})
-
-	mgr.Logger.Debugf("parseAccounts summary: total=%d, dirs=%d, nonJSON=%d, json=%d, CP=%d, Nuverse=%d, readErr=%d, decodeErr=%d, unexpectedKinds=%d, appended=%d",
-		totalFiles, skippedDirs, skippedNonJSON, jsonFiles, parsedCP, parsedNuverse, readErrors, decodeErrors, unexpectedKinds, len(accounts),
-	)
 
 	if len(accounts) == 0 {
 		mgr.Logger.Warnf("parseAccounts: no accounts parsed from %s", mgr.ServerConfig.AccountDir)

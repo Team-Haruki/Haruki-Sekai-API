@@ -5,38 +5,55 @@ import (
 	"encoding/base64"
 	"fmt"
 	"net/url"
+	"strconv"
 	"strings"
+	"time"
+
+	"github.com/google/uuid"
 )
 
 func (c *SekaiClient) Login(ctx context.Context) (any, error) {
-	loginJson, err := c.Account.Dump()
+	loginMsgpack, err := c.Account.Dump()
 	if err != nil {
 		return nil, err
 	}
-	c.Logger.Debugf("Account.Dump(): %s", loginJson)
 
-	var loginPath, method string
+	var loginURL, method string
 	if _, ok := c.Account.(*SekaiAccountCP); ok {
-		loginPath = fmt.Sprintf("/user/%d/auth?refreshUpdatedResources=False", c.Account.GetUserId())
+		loginURL = fmt.Sprintf("%s/api/user/%s/auth?refreshUpdatedResources=False", c.ServerConfig.APIURL, c.Account.GetUserId())
 		method = "PUT"
 	} else {
-		loginPath = "/user/auth"
+		loginURL = fmt.Sprintf("%s/api/user/auth", c.ServerConfig.APIURL)
 		method = "POST"
 	}
 
-	response, err := c.CallAPI(ctx, loginPath, method, loginJson, nil)
+	encBody, err := c.Cryptor.Pack(loginMsgpack)
+	if err != nil {
+		c.Logger.Errorf("login pack error: %v", err)
+		return nil, err
+	}
+
+	ctxTimeout, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+
+	req := c.Session.R()
+	req.SetContext(ctxTimeout)
+	req.SetHeaders(c.Headers)
+	req.Header.Set("X-Request-Id", uuid.New().String())
+	req.SetBody(encBody)
+	resp, err := req.Execute(strings.ToUpper(method), loginURL)
 	if err != nil {
 		return nil, err
 	}
 
-	parsedStatusCode, err := ParseSekaiApiHttpStatus(response.StatusCode())
+	parsedStatusCode, err := ParseSekaiApiHttpStatus(resp.StatusCode())
 	if err != nil {
-		return nil, NewSekaiUnknownClientException(response.StatusCode(), string(response.Body()))
+		return nil, NewSekaiUnknownClientException(resp.StatusCode(), string(resp.Body()))
 	}
 
 	switch parsedStatusCode {
 	case SekaiApiHttpStatusGameUpgrade:
-		c.Logger.Warnf("Game upgrade required. (Current version: %s)", c.Session.Header.Get("X-App-Version"))
+		c.Logger.Warnf("Game upgrade required. (Current version: %s)", c.Headers["X-App-Version"])
 		return nil, NewUpgradeRequiredError()
 	case SekaiApiHttpStatusUnderMaintenance:
 		return nil, NewUnderMaintenanceError()
@@ -50,31 +67,36 @@ func (c *SekaiClient) Login(ctx context.Context) (any, error) {
 			} `msgpack:"userRegistration"`
 		}
 
-		retData, err := UnpackInto[LoginResponse](c.Cryptor, response.Body())
+		retData, err := UnpackInto[LoginResponse](c.Cryptor, resp.Body())
 		if err != nil {
 			c.Logger.Errorf("Unpack login response error : %v", err)
 			return nil, err
-		}
-		if _, ok := c.Account.(*SekaiAccountNuverse); ok {
-			if retData.UserRegistration.UserID != c.Account.GetUserId() {
-				return nil, fmt.Errorf("invalid login response: missing user ID")
-			}
-			c.Account.SetUserId(retData.UserRegistration.UserID)
 		}
 
 		if retData.SessionToken == "" || retData.DataVersion == "" || retData.AssetVersion == "" {
 			return nil, fmt.Errorf("invalid login response: missing required fields")
 		}
+
+		if _, ok := c.Account.(*SekaiAccountNuverse); ok {
+			if retData.UserRegistration.UserID != 0 {
+				return nil, fmt.Errorf("invalid login response: missing user ID")
+			}
+			c.Account.SetUserId(strconv.FormatInt(retData.UserRegistration.UserID, 10))
+		}
+
 		c.Headers["X-Session-Token"] = retData.SessionToken
 		c.Headers["X-Data-Version"] = retData.DataVersion
 		c.Headers["X-Asset-Version"] = retData.AssetVersion
 
-		c.Logger.Infof("Login successful. Server %s, User ID: %s", c.Server, c.Account.GetUserId())
+		c.Logger.Infof("Login successful, User ID: %s", c.Account.GetUserId())
 		return retData, nil
 	default:
-
-		c.Logger.Errorf("Login failed. Status code: %d, Response: %s", response.StatusCode(), string(response.Body()))
-		return nil, NewSekaiUnknownClientException(response.StatusCode(), string(response.Body()))
+		if unpacked, decErr := c.Cryptor.Unpack(resp.Body()); decErr == nil {
+			c.Logger.Warnf("Login failed. Status code: %d, Decrypted: %#v", resp.StatusCode(), unpacked)
+		} else {
+			c.Logger.Warnf("Login failed. Status code: %d, Raw len=%d", resp.StatusCode(), len(resp.Body()))
+		}
+		return nil, NewSekaiUnknownClientException(resp.StatusCode(), string(resp.Body()))
 	}
 }
 

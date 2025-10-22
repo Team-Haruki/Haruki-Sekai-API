@@ -93,7 +93,12 @@ func (c *SekaiClient) Init() error {
 		c.Session.SetHeader(k, v)
 	}
 
-	c.Logger = logger.NewLogger(fmt.Sprintf("SekaiClient%s", strings.ToUpper(string(c.Server))), "DEBUG", nil)
+	if c.Proxy != "" {
+		c.Session.SetProxy(c.Proxy)
+		c.Logger = logger.NewLogger(fmt.Sprintf("SekaiClient%s", strings.ToUpper(string(c.Server))), "DEBUG", nil)
+	} else {
+		c.Logger = logger.NewLogger(fmt.Sprintf("SekaiClient%s", strings.ToUpper(string(c.Server))), "DEBUG", nil)
+	}
 	if err := c.ParseCookies(context.Background()); err != nil {
 		return err
 	}
@@ -158,55 +163,49 @@ func (c *SekaiClient) CallAPI(ctx context.Context, path string, method string, d
 	if err != nil {
 		return nil, err
 	}
+	c.Logger.Infof("account #%s %s %s", c.Account.GetUserId(), strings.ToUpper(method), url)
 
-	c.Logger.Infof("account #%d %s %s",
-		c.Account.GetUserId(),
-		method,
-		url,
-	)
-
-	cli := *c.Session
-	if c.Proxy != "" {
-		cli.SetProxy(c.Proxy)
+	if c.Session == nil {
+		return nil, fmt.Errorf("resty client is nil")
 	}
 
 	var lastErr error
 	for attempt := 1; attempt <= 4; attempt++ {
-		req := *cli.R()
+		req := c.Session.R()
 		req.SetContext(ctx)
 		req.SetHeaders(c.Headers)
-		req.Header.Set("X-Request-ID", uuid.New().String())
+		req.Header.Set("X-Request-Id", uuid.New().String())
 
-		for k, v := range params {
-			req.SetQueryParam(k, fmt.Sprintf("%v", v))
+		if params != nil {
+			for k, v := range params {
+				req.SetQueryParam(k, fmt.Sprintf("%v", v))
+			}
 		}
+
 		if data != nil {
-			c.Logger.Debugf("payload: %v", data)
-			packedData, err := c.Cryptor.Pack(data)
-			c.Logger.Debugf("payload: %v", packedData)
-			if err != nil {
-				return nil, err
+			packedData, packErr := c.Cryptor.Pack(data)
+			if packErr != nil {
+				c.Logger.Errorf("pack error: %v", packErr)
+				return nil, packErr
 			}
 			req.SetBody(packedData)
 		}
-		c.Logger.Debugf("headers: %+v", req.Header)
-		response, err := req.Execute(strings.ToUpper(method), url)
-		unpacked, _ := c.Cryptor.Unpack(response.Body())
-		c.Logger.Debugf("response raw: %v", string(response.Body()))
-		c.Logger.Debugf("response decrypted: %v", unpacked)
-		if err != nil {
+
+		response, execErr := req.Execute(strings.ToUpper(method), url)
+		if execErr != nil {
 			var ne net.Error
-			if errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &ne) && ne.Timeout()) {
-				c.Logger.Warnf("%s client #%s request timed out, retrying...", strings.ToUpper(string(c.Server)), c.Account.GetUserId())
-				lastErr = err
+			if errors.Is(execErr, context.DeadlineExceeded) || (errors.As(execErr, &ne) && ne.Timeout()) {
+				c.Logger.Warnf("account #%s request timed out (attempt %d), retrying...", c.Account.GetUserId(), attempt)
+				lastErr = execErr
 			} else {
-				c.Logger.Errorf("An error occurred: server = %s, exception = %v", strings.ToUpper(string(c.Server)), err)
-				lastErr = err
+				c.Logger.Errorf("request error (attempt %d): server=%s, err=%v", attempt, strings.ToUpper(string(c.Server)), execErr)
+				lastErr = execErr
 			}
 		} else {
 			if v := response.Header().Get("X-Session-Token"); v != "" {
 				c.Headers["X-Session-Token"] = v
 			}
+
 			if _, respErr := c.handleResponse(*response); respErr != nil {
 				var (
 					se *SessionError
@@ -216,40 +215,38 @@ func (c *SekaiClient) CallAPI(ctx context.Context, path string, method string, d
 				)
 				switch {
 				case errors.As(respErr, &se):
-					c.Logger.Warnf("Account #%s session expired, re-logging in...", c.Account.GetUserId())
-					ctxNoRelog := context.Background()
-					if _, err := c.Login(ctxNoRelog); err != nil {
-						c.Logger.Errorf("Re-login failed: %v", err)
+					c.Logger.Warnf("account #%s session expired, re-logging in...", c.Account.GetUserId())
+					if _, err := c.Login(context.Background()); err != nil {
+						c.Logger.Errorf("re-login failed: %v", err)
 						lastErr = err
-						break
+					} else {
+						lastErr = se
 					}
-					lastErr = se
 				case errors.As(respErr, &ce):
-					c.Logger.Warnf("Clients' cookies expired, re-parsing cookies...")
+					c.Logger.Warnf("cookies expired, re-parsing cookies...")
 					if err := c.ParseCookies(ctx); err != nil {
-						c.Logger.Errorf("Parse cookies failed: %v", err)
+						c.Logger.Errorf("parse cookies failed: %v", err)
 						return nil, err
 					}
 					lastErr = ce
 				case errors.As(respErr, &ue):
 					if c.Server == utils.HarukiSekaiServerRegionJP || c.Server == utils.HarukiSekaiServerRegionEN {
-						c.Logger.Warnf("App version might be upgraded")
+						c.Logger.Warnf("app version might be upgraded")
 						return nil, ue
+					}
+					c.Logger.Warnf("%s server detected new data, re-logging in...", strings.ToUpper(string(c.Server)))
+					if _, err := c.Login(ctx); err != nil {
+						c.Logger.Errorf("re-login failed: %v", err)
+						lastErr = err
 					} else {
-						c.Logger.Warnf("%s server detected new data, re-logging in...", strings.ToUpper(string(c.Server)))
-						if _, err := c.Login(ctx); err != nil {
-							c.Logger.Errorf("Re-login failed: %v", err)
-							lastErr = err
-							break
-						}
 						lastErr = NewSessionError()
 					}
 				case errors.As(respErr, &me):
-					c.Logger.Warnf("Server is under maintenance")
+					c.Logger.Warnf("server is under maintenance")
 					return nil, me
 				default:
 					if sc := response.StatusCode(); sc >= 500 {
-						c.Logger.Warnf("Server error %d on attempt %d", sc, attempt)
+						c.Logger.Warnf("server error %d on attempt %d", sc, attempt)
 						lastErr = NewSekaiUnknownClientException(sc, string(response.Body()))
 					} else {
 						return nil, respErr

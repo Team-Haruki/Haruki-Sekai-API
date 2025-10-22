@@ -62,6 +62,7 @@ type GitConfig struct {
 
 type Config struct {
 	Proxy               string                                                          `yaml:"proxy"`
+	JPSekaiCookieURL    string                                                          `yaml:"jp_sekai_cookie_url"`
 	Git                 GitConfig                                                       `yaml:"git"`
 	Redis               RedisConfig                                                     `yaml:"redis"`
 	Backend             BackendConfig                                                   `yaml:"backend"`
