@@ -84,19 +84,19 @@ func (c *SekaiClient) Login(ctx context.Context) (any, error) {
 func (c *SekaiClient) GetCPMySekaiImage(path string) ([]byte, error) {
 	ctx := context.Background()
 	pathNew := strings.TrimPrefix(path, "/")
-	url := fmt.Sprintf("%s/image/mysekai-photo/%s", c.ServerConfig.APIURL, pathNew)
+	imageURL := fmt.Sprintf("%s/image/mysekai-photo/%s", c.ServerConfig.APIURL, pathNew)
 	cli := *c.Session
 	if c.Proxy != "" {
 		cli.SetProxy(c.Proxy)
 	}
 	req := *cli.R()
 	req.SetContext(ctx)
-	resp, err := req.Get(url)
+	resp, err := req.Get(imageURL)
 	if err != nil {
 		return nil, err
 	}
 	if resp.StatusCode() != 200 {
-		return nil, fmt.Errorf("unexpected status %d fetching %s", resp.StatusCode(), url)
+		return nil, fmt.Errorf("unexpected status %d fetching %s", resp.StatusCode(), imageURL)
 	}
 	return resp.Body(), nil
 }
@@ -155,7 +155,7 @@ func (c *SekaiClient) GetCPMasterData(paths []string) (map[string]any, error) {
 	return master, nil
 }
 
-func (c *SekaiClient) GetNuverseMasterData(cdnVersion int) (any, error) {
+func (c *SekaiClient) GetNuverseMasterData(cdnVersion int) (map[string]any, error) {
 	ctx := context.Background()
 	u := fmt.Sprintf("%s/master-data-%d.info", c.ServerConfig.NuverseMasterDataURL, cdnVersion)
 	parsed, err := url.Parse(u)

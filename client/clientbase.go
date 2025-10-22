@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"haruki-sekai-api/config"
 	"haruki-sekai-api/utils"
 	"haruki-sekai-api/utils/logger"
 	"net"
@@ -20,7 +19,7 @@ import (
 
 type SekaiClient struct {
 	Server        utils.HarukiSekaiServerRegion
-	ServerConfig  config.ServerConfig
+	ServerConfig  utils.HarukiSekaiServerConfig
 	Account       SekaiAccountInterface
 	CookieHelper  *SekaiCookieHelper
 	VersionHelper *SekaiVersionHelper
@@ -33,7 +32,7 @@ type SekaiClient struct {
 
 func NewSekaiClient(
 	server utils.HarukiSekaiServerRegion,
-	serverConfig config.ServerConfig,
+	serverConfig utils.HarukiSekaiServerConfig,
 	account SekaiAccountInterface,
 	cookieHelper *SekaiCookieHelper,
 	versionHelper *SekaiVersionHelper,
@@ -149,7 +148,7 @@ func (c *SekaiClient) CallAPI(ctx context.Context, path string, method string, d
 	if err != nil {
 		return nil, err
 	}
-	values := map[string]interface{}{
+	values := map[string]any{
 		"userId": c.Account.GetUserId(),
 	}
 

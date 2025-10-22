@@ -14,15 +14,24 @@ import (
 	"github.com/go-git/go-git/v5/plumbing/transport/http"
 )
 
-type GitUpdater struct {
+type HarukiGitUpdater struct {
 	User     string
 	Email    string
 	Password string
 	Proxy    string
 }
 
-func (g *GitUpdater) PushRemote(repo *git.Repository, dataVersion string) error {
-	logger := harukiLogger.NewLogger("GitUpdater", "INFO", nil)
+func NewHarukiGitUpdater(user, email, password, proxy string) *HarukiGitUpdater {
+	return &HarukiGitUpdater{
+		User:     user,
+		Email:    email,
+		Password: password,
+		Proxy:    proxy,
+	}
+}
+
+func (g *HarukiGitUpdater) PushRemote(repo *git.Repository, dataVersion string) error {
+	logger := harukiLogger.NewLogger("HarukiGitUpdater", "INFO", nil)
 	w, err := repo.Worktree()
 	if err != nil {
 		logger.Errorf("Failed to get worktree: %v", err)

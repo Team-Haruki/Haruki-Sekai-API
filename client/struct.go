@@ -91,57 +91,6 @@ func (s *SekaiAccountNuverse) Dump() ([]byte, error) {
 	return dump, nil
 }
 
-type SekaiServerInfo struct {
-	Server               utils.HarukiSekaiServerRegion
-	ApiUrl               string
-	NuverseMasterDataUrl string
-	RequireCookies       bool
-	Headers              map[string]string
-	Enabled              bool
-	AESKey               string
-	AESIV                string
-}
-
-type HarukiAssetUpdaterInfo struct {
-	Url           string
-	Authorization string
-}
-
-type HarukiAppHashSourceType string
-
-const (
-	HarukiAppHashSourceTypeFile HarukiAppHashSourceType = "file"
-	HarukiAppHashSourceTypeUrl  HarukiAppHashSourceType = "url"
-)
-
-func ParseHarukiAppHashSourceType(s string) (HarukiAppHashSourceType, error) {
-	switch HarukiAppHashSourceType(s) {
-	case HarukiAppHashSourceTypeFile,
-		HarukiAppHashSourceTypeUrl:
-		return HarukiAppHashSourceType(s), nil
-	default:
-		return "", fmt.Errorf("invalid app hash source type: %s", s)
-	}
-}
-
-type HarukiAppHashSource struct {
-	SourceType HarukiAppHashSourceType
-	Dir        string
-	Url        string
-}
-
-func NewHarukiAppHashSource(sourceType HarukiAppHashSourceType) (*HarukiAppHashSource, error) {
-	inst := &HarukiAppHashSource{
-		SourceType: sourceType,
-	}
-	return inst, nil
-}
-
-type HarukiAppInfo struct {
-	AppVersion string
-	AppHash    string
-}
-
 type SekaiApiHttpStatus int
 
 const (
@@ -169,4 +118,10 @@ func ParseSekaiApiHttpStatus(code int) (SekaiApiHttpStatus, error) {
 	default:
 		return 0, fmt.Errorf("invalid http status code: %d", code)
 	}
+}
+
+type HarukiSekaiAssetUpdaterPayload struct {
+	Server       utils.HarukiSekaiServerRegion `json:"server"`
+	AssetVersion string                        `json:"assetVersion"`
+	AssetHash    string                        `json:"assetHash"`
 }

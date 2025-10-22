@@ -51,28 +51,25 @@ type GormConfig struct {
 	Naming                                   GormNamingConfig `yaml:"naming"`
 }
 
-type ServerConfig struct {
-	Enabled                  bool              `yaml:"enabled,omitempty"`
-	MasterDir                string            `yaml:"master_dir,omitempty"`
-	VersionPath              string            `yaml:"version_path,omitempty"`
-	AccountDir               string            `yaml:"account_dir,omitempty"`
-	APIURL                   string            `yaml:"api_url"`
-	NuverseMasterDataURL     string            `yaml:"nuverse_master_data_url,omitempty"`
-	NuverseStructureFilePath string            `yaml:"nuverse_structure_file_path,omitempty"`
-	RequireCookies           bool              `yaml:"require_cookies,omitempty"`
-	Headers                  map[string]string `yaml:"headers,omitempty"`
-	AESKeyHex                string            `yaml:"aes_key_hex,omitempty"`
-	AESIVHex                 string            `yaml:"aes_iv_hex,omitempty"`
+type GitConfig struct {
+	Enabled  bool   `yaml:"enabled"`
+	Username string `yaml:"username,omitempty"`
+	Email    string `yaml:"email,omitempty"`
+	Password string `yaml:"password,omitempty"`
 }
 
 type Config struct {
-	Proxy   string                                         `yaml:"proxy"`
-	Redis   RedisConfig                                    `yaml:"redis"`
-	Backend BackendConfig                                  `yaml:"backend"`
-	Gorm    GormConfig                                     `yaml:"gorm"`
-	Servers map[utils.HarukiSekaiServerRegion]ServerConfig `yaml:"servers"`
+	Proxy               string                                                          `yaml:"proxy"`
+	Git                 GitConfig                                                       `yaml:"git"`
+	Redis               RedisConfig                                                     `yaml:"redis"`
+	Backend             BackendConfig                                                   `yaml:"backend"`
+	Gorm                GormConfig                                                      `yaml:"gorm"`
+	AppHashSources      []*utils.HarukiSekaiAppHashSource                               `yaml:"apphash_sources"`
+	AssetUpdaterServers []*utils.HarukiAssetUpdaterInfo                                 `yaml:"asset_updater_servers"`
+	Servers             map[utils.HarukiSekaiServerRegion]utils.HarukiSekaiServerConfig `yaml:"servers"`
 }
 
+var Version = "v5.0.0-dev"
 var Cfg Config
 
 func init() {

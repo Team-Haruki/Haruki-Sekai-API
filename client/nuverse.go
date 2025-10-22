@@ -8,7 +8,7 @@ import (
 	"github.com/bytedance/sonic"
 )
 
-func LoadStructures(path string) (map[string][]interface{}, error) {
+func loadStructures(path string) (map[string][]interface{}, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
@@ -20,19 +20,16 @@ func LoadStructures(path string) (map[string][]interface{}, error) {
 	return structures, nil
 }
 
-// RestoreDict converts array_data to a map based on key_structure
-func RestoreDict(arrayData []interface{}, keyStructure []interface{}) map[string]interface{} {
-	result := make(map[string]interface{})
+func RestoreDict(arrayData []interface{}, keyStructure []interface{}) map[string]any {
+	result := make(map[string]any)
 
 	for i, key := range keyStructure {
 		switch k := key.(type) {
 		case string:
-			// key is string
 			if i < len(arrayData) && arrayData[i] != nil {
 				result[k] = arrayData[i]
 			}
 		case []interface{}:
-			// key is list, must check its second element
 			if len(k) < 2 {
 				continue
 			}
@@ -43,8 +40,7 @@ func RestoreDict(arrayData []interface{}, keyStructure []interface{}) map[string
 
 			switch second := k[1].(type) {
 			case []interface{}:
-				// nested list
-				var subList []map[string]interface{}
+				var subList []map[string]any
 				if i < len(arrayData) {
 					if arr, ok := arrayData[i].([]interface{}); ok {
 						for _, sub := range arr {
@@ -56,11 +52,10 @@ func RestoreDict(arrayData []interface{}, keyStructure []interface{}) map[string
 				}
 				result[keyName] = subList
 
-			case map[string]interface{}:
-				// check for tuple scheme 1
+			case map[string]any:
 				if tupleKeysRaw, found := second["__tuple__"]; found {
 					if tupleKeys, ok := tupleKeysRaw.([]interface{}); ok {
-						dict := make(map[string]interface{})
+						dict := make(map[string]any)
 						if i < len(arrayData) {
 							if arr, ok := arrayData[i].([]interface{}); ok {
 								for j, v := range arr {
@@ -82,12 +77,13 @@ func RestoreDict(arrayData []interface{}, keyStructure []interface{}) map[string
 	return result
 }
 
-// RestoreCompactData converts compact data into original structure
-func RestoreCompactData(data map[string]interface{}) []map[string]interface{} {
-	enumRaw, _ := data["__ENUM__"].(map[string]interface{})
-
+func RestoreCompactData(data map[string]any) []map[string]any {
 	var columnLabels []string
 	var columns [][]interface{}
+	var enumRaw map[string]any
+	if v, ok := data["__ENUM__"].(map[string]any); ok {
+		enumRaw = v
+	}
 
 	for key, value := range data {
 		if key == "__ENUM__" {
@@ -147,7 +143,7 @@ func RestoreCompactData(data map[string]interface{}) []map[string]interface{} {
 	}
 
 	if len(columns) == 0 {
-		return []map[string]interface{}{}
+		return []map[string]any{}
 	}
 
 	numEntries := len(columns[0])
@@ -157,9 +153,9 @@ func RestoreCompactData(data map[string]interface{}) []map[string]interface{} {
 		}
 	}
 
-	result := make([]map[string]interface{}, 0, numEntries)
+	result := make([]map[string]any, 0, numEntries)
 	for i := 0; i < numEntries; i++ {
-		entry := make(map[string]interface{}, len(columnLabels))
+		entry := make(map[string]any, len(columnLabels))
 		for j, key := range columnLabels {
 			if i < len(columns[j]) {
 				entry[key] = columns[j][i]
@@ -173,10 +169,9 @@ func RestoreCompactData(data map[string]interface{}) []map[string]interface{} {
 	return result
 }
 
-// NuverseMasterRestorer restores master data
-func NuverseMasterRestorer(masterData map[string]interface{}, nuverseStructureFilePath string) (map[string]interface{}, error) {
-	restoredCompactMaster := make(map[string]interface{})
-	structures, err := LoadStructures(nuverseStructureFilePath)
+func NuverseMasterRestorer(masterData map[string]any, nuverseStructureFilePath string) (map[string]any, error) {
+	restoredCompactMaster := make(map[string]any)
+	structures, err := loadStructures(nuverseStructureFilePath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load nuverve master structure: %v", err)
 	}
@@ -191,7 +186,7 @@ func NuverseMasterRestorer(masterData map[string]interface{}, nuverseStructureFi
 				}()
 
 				if len(key) >= 7 && key[:7] == "compact" {
-					if v, ok := value.(map[string]interface{}); ok {
+					if v, ok := value.(map[string]any); ok {
 						data := RestoreCompactData(v)
 						newKeyOriginal := key[7:]
 						if len(newKeyOriginal) > 0 {
@@ -209,7 +204,7 @@ func NuverseMasterRestorer(masterData map[string]interface{}, nuverseStructureFi
 
 				if structDef, exists := structures[key]; exists {
 					if arr, ok := value.([]interface{}); ok {
-						var newArr []map[string]interface{}
+						var newArr []map[string]any
 						for _, v := range arr {
 							if subArr, ok := v.([]interface{}); ok {
 								newArr = append(newArr, RestoreDict(subArr, structDef))
@@ -220,15 +215,15 @@ func NuverseMasterRestorer(masterData map[string]interface{}, nuverseStructureFi
 				}
 
 				if idKey != "" {
-					if arr, ok := masterData[key].([]map[string]interface{}); ok {
+					if arr, ok := masterData[key].([]map[string]any); ok {
 						valueIDs := make(map[interface{}]bool)
 						for _, item := range arr {
 							if id, ok := item[idKey]; ok {
 								valueIDs[id] = true
 							}
 						}
-						if valArr, ok := value.([]map[string]interface{}); ok {
-							var merged []map[string]interface{}
+						if valArr, ok := value.([]map[string]any); ok {
+							var merged []map[string]any
 							for _, x := range valArr {
 								if id, ok := x[idKey]; ok {
 									if !valueIDs[id] {

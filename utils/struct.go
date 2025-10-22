@@ -58,3 +58,22 @@ type HarukiSekaiAppInfo struct {
 	AppVersion string `json:"app_version"`
 	AppHash    string `json:"app_hash"`
 }
+
+type HarukiSekaiServerConfig struct {
+	Enabled                  bool              `yaml:"enabled,omitempty"`
+	MasterDir                string            `yaml:"master_dir,omitempty"`
+	VersionPath              string            `yaml:"version_path,omitempty"`
+	AccountDir               string            `yaml:"account_dir,omitempty"`
+	APIURL                   string            `yaml:"api_url"`
+	NuverseMasterDataURL     string            `yaml:"nuverse_master_data_url,omitempty"`
+	NuverseStructureFilePath string            `yaml:"nuverse_structure_file_path,omitempty"`
+	RequireCookies           bool              `yaml:"require_cookies,omitempty"`
+	Headers                  map[string]string `yaml:"headers,omitempty"`
+	AESKeyHex                string            `yaml:"aes_key_hex,omitempty"`
+	AESIVHex                 string            `yaml:"aes_iv_hex,omitempty"`
+}
+
+type HarukiAssetUpdaterInfo struct {
+	URL           string `yaml:"url"`
+	Authorization string `yaml:"authorization,omitempty"`
+}

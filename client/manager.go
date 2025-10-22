@@ -3,8 +3,8 @@ package client
 import (
 	"context"
 	"fmt"
-	"haruki-sekai-api/config"
 	"haruki-sekai-api/utils"
+	"haruki-sekai-api/utils/git"
 	"haruki-sekai-api/utils/logger"
 	"net/http"
 	"os"
@@ -17,23 +17,27 @@ import (
 )
 
 type SekaiClientManager struct {
-	Server        utils.HarukiSekaiServerRegion
-	ServerConfig  config.ServerConfig
-	VersionHelper *SekaiVersionHelper
-	CookieHelper  *SekaiCookieHelper
-	Clients       []*SekaiClient
-	ClientNo      int
-	Proxy         string
-	Logger        *logger.Logger
+	Server              utils.HarukiSekaiServerRegion
+	ServerConfig        utils.HarukiSekaiServerConfig
+	VersionHelper       *SekaiVersionHelper
+	CookieHelper        *SekaiCookieHelper
+	Clients             []*SekaiClient
+	AssetUpdaterServers []*utils.HarukiAssetUpdaterInfo
+	Git                 *git.HarukiGitUpdater
+	ClientNo            int
+	Proxy               string
+	Logger              *logger.Logger
 }
 
-func NewSekaiClientManager(server utils.HarukiSekaiServerRegion, serverConfig config.ServerConfig, proxy string) *SekaiClientManager {
+func NewSekaiClientManager(server utils.HarukiSekaiServerRegion, serverConfig utils.HarukiSekaiServerConfig, assetUpdaterServers []*utils.HarukiAssetUpdaterInfo, git *git.HarukiGitUpdater, proxy string) *SekaiClientManager {
 	mgr := &SekaiClientManager{
-		Server:        server,
-		ServerConfig:  serverConfig,
-		VersionHelper: &SekaiVersionHelper{versionFilePath: serverConfig.VersionPath},
-		Proxy:         proxy,
-		Logger:        logger.NewLogger(fmt.Sprintf("SekaiClientManager%s", strings.ToUpper(string(server))), "DEBUG", nil),
+		Server:              server,
+		ServerConfig:        serverConfig,
+		VersionHelper:       &SekaiVersionHelper{versionFilePath: serverConfig.VersionPath},
+		Proxy:               proxy,
+		AssetUpdaterServers: assetUpdaterServers,
+		Git:                 git,
+		Logger:              logger.NewLogger(fmt.Sprintf("SekaiClientManager%s", strings.ToUpper(string(server))), "DEBUG", nil),
 	}
 	if server == utils.HarukiSekaiServerRegionJP {
 		mgr.CookieHelper = &SekaiCookieHelper{}
@@ -104,7 +108,7 @@ func (mgr *SekaiClientManager) parseAccounts() ([]SekaiAccountInterface, error) 
 	return accounts, err
 }
 
-func (mgr *SekaiClientManager) ParseCookies(ctx context.Context) error {
+func (mgr *SekaiClientManager) parseCookies(ctx context.Context) error {
 	if mgr.Server == utils.HarukiSekaiServerRegionJP {
 		var wg sync.WaitGroup
 		errChan := make(chan error, len(mgr.Clients))
@@ -130,7 +134,7 @@ func (mgr *SekaiClientManager) ParseCookies(ctx context.Context) error {
 	return nil
 }
 
-func (mgr *SekaiClientManager) ParseVersion() error {
+func (mgr *SekaiClientManager) parseVersion() error {
 	var wg sync.WaitGroup
 	errChan := make(chan error, len(mgr.Clients))
 	for _, client := range mgr.Clients {
@@ -220,53 +224,13 @@ func (mgr *SekaiClientManager) Init() error {
 	return nil
 }
 
-func (mgr *SekaiClientManager) GetClient() *SekaiClient {
+func (mgr *SekaiClientManager) getClient() *SekaiClient {
 	if mgr.ClientNo == len(mgr.Clients) {
 		mgr.ClientNo = 0
 		return mgr.Clients[mgr.ClientNo]
 	}
 	mgr.ClientNo++
 	return mgr.Clients[mgr.ClientNo-1]
-}
-
-func (mgr *SekaiClientManager) GetLoginData() (map[string]interface{}, error) {
-	client := mgr.GetClient()
-	if client == nil {
-		return nil, nil
-	}
-
-	client.Lock.Lock()
-	defer client.Lock.Unlock()
-
-	ctx := context.Background()
-	loginData, err := client.Login(ctx)
-	if err != nil {
-		return nil, err
-	}
-	if m, ok := loginData.(map[string]interface{}); ok {
-		return m, nil
-	}
-	return nil, nil
-}
-
-func (mgr *SekaiClientManager) DownloadMaster() (map[string]interface{}, error) {
-	client := mgr.GetClient()
-	if client == nil {
-		return nil, nil
-	}
-
-	client.Lock.Lock()
-	defer client.Lock.Unlock()
-
-	ctx := context.Background()
-	masterData, err := client.GetMasterData(ctx)
-	if err != nil {
-		return nil, err
-	}
-	if m, ok := masterData.(map[string]interface{}); ok {
-		return m, nil
-	}
-	return nil, nil
 }
 
 func (mgr *SekaiClientManager) Shutdown() error {
@@ -296,16 +260,15 @@ func (mgr *SekaiClientManager) Shutdown() error {
 	return nil
 }
 
-// APIGet 调用游戏API并处理重试逻辑
-func (mgr *SekaiClientManager) APIGet(ctx context.Context, path string, params map[string]interface{}) (any, int, error) {
+func (mgr *SekaiClientManager) APIGet(ctx context.Context, path string, params map[string]any) (any, int, error) {
 	maxRetries := 4
 	retryCount := 0
 	retryDelay := time.Second
 
 	for retryCount < maxRetries {
-		client := mgr.GetClient()
+		client := mgr.getClient()
 		if client == nil {
-			return map[string]interface{}{
+			return map[string]any{
 				"result":  "failed",
 				"message": "No client is available, please try again later.",
 			}, http.StatusInternalServerError, nil
@@ -316,7 +279,7 @@ func (mgr *SekaiClientManager) APIGet(ctx context.Context, path string, params m
 		response, err := client.Get(ctx, path, params)
 		if err != nil {
 			client.Lock.Unlock()
-			return map[string]interface{}{
+			return map[string]any{
 				"result":  "failed",
 				"message": err.Error(),
 			}, http.StatusInternalServerError, err
@@ -326,7 +289,7 @@ func (mgr *SekaiClientManager) APIGet(ctx context.Context, path string, params m
 		statusCode, err := ParseSekaiApiHttpStatus(response.StatusCode())
 		if err != nil {
 			client.Lock.Unlock()
-			return map[string]interface{}{
+			return map[string]any{
 				"result":  "failed",
 				"message": fmt.Sprintf("Unknown status code: %d", response.StatusCode()),
 			}, response.StatusCode(), err
@@ -335,9 +298,9 @@ func (mgr *SekaiClientManager) APIGet(ctx context.Context, path string, params m
 		switch statusCode {
 		case SekaiApiHttpStatusGameUpgrade:
 			mgr.Logger.Warnf("%s Server upgrade required, re-parsing...", strings.ToUpper(string(mgr.Server)))
-			if err := mgr.ParseVersion(); err != nil {
+			if err := mgr.parseVersion(); err != nil {
 				client.Lock.Unlock()
-				return map[string]interface{}{
+				return map[string]any{
 					"result":  "failed",
 					"message": fmt.Sprintf("Failed to parse version: %v", err),
 				}, response.StatusCode(), err
@@ -349,9 +312,9 @@ func (mgr *SekaiClientManager) APIGet(ctx context.Context, path string, params m
 
 		case SekaiApiHttpStatusSessionError:
 			mgr.Logger.Warnf("%s Server cookies expired, re-parsing...", strings.ToUpper(string(mgr.Server)))
-			if err := mgr.ParseCookies(ctx); err != nil {
+			if err := mgr.parseCookies(ctx); err != nil {
 				client.Lock.Unlock()
-				return map[string]interface{}{
+				return map[string]any{
 					"result":  "failed",
 					"message": fmt.Sprintf("Failed to parse cookies: %v", err),
 				}, http.StatusForbidden, err
@@ -363,7 +326,7 @@ func (mgr *SekaiClientManager) APIGet(ctx context.Context, path string, params m
 
 		case SekaiApiHttpStatusUnderMaintenance:
 			client.Lock.Unlock()
-			return map[string]interface{}{
+			return map[string]any{
 				"result":  "failed",
 				"message": fmt.Sprintf("%s Game server is under maintenance.", strings.ToUpper(string(mgr.Server))),
 			}, http.StatusServiceUnavailable, NewUnderMaintenanceError()
@@ -372,26 +335,26 @@ func (mgr *SekaiClientManager) APIGet(ctx context.Context, path string, params m
 			result, err := client.handleResponse(*response)
 			client.Lock.Unlock()
 			if err != nil {
-				return map[string]interface{}{
+				return map[string]any{
 					"result":  "failed",
 					"message": err.Error(),
 				}, response.StatusCode(), err
 			}
-			if m, ok := result.(map[string]interface{}); ok {
+			if m, ok := result.(map[string]any); ok {
 				return m, response.StatusCode(), nil
 			}
 			return result, response.StatusCode(), nil
 
 		default:
 			client.Lock.Unlock()
-			return map[string]interface{}{
+			return map[string]any{
 				"result":  "failed",
 				"message": fmt.Sprintf("Unexpected status code: %d", response.StatusCode()),
 			}, response.StatusCode(), fmt.Errorf("unexpected status code: %d", response.StatusCode())
 		}
 	}
 
-	return map[string]interface{}{
+	return map[string]any{
 		"result":  "failed",
 		"message": "Max retry attempts reached",
 	}, http.StatusInternalServerError, fmt.Errorf("max retry attempts reached")
