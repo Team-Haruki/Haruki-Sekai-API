@@ -68,10 +68,6 @@ func registerHarukiSekaiAPIRoutes(app *fiber.App) {
 	})
 
 	api.Get("/event/:event_id/top100", func(c *fiber.Ctx) error {
-		region, _, err := getMgr(c)
-		if err != nil {
-			return err
-		}
 		eventID := c.Params("event_id")
 		if !digitsRe.MatchString(eventID) {
 			return fiber.NewError(fiber.StatusBadRequest, "event_id must be numeric")

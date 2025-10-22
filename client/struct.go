@@ -4,91 +4,81 @@ import (
 	"fmt"
 	"haruki-sekai-api/utils"
 
-	"github.com/bytedance/sonic"
+	"github.com/vmihailenco/msgpack/v5"
 )
 
 type SekaiAccountInterface interface {
-	SetupAccount(userId string, deviceId string, token string)
-	GetUserId() string
-	SetUserId(userId string)
+	SetupAccount(userId int64, deviceId string, token string)
+	GetUserId() int64
+	SetUserId(userId int64)
 	GetDeviceId() string
 	GetToken() string
 	Dump() ([]byte, error)
 }
 
-func NewSekaiAccount[T SekaiAccountInterface](userId string, deviceId string, token string) T {
+func NewSekaiAccount[T SekaiAccountInterface](userId int64, deviceId string, token string) T {
 	var inst T
 	inst.SetupAccount(userId, deviceId, token)
 	return inst
 }
 
 type SekaiAccountCommonBase struct {
-	UserId   string
-	DeviceID string
+	UserId   int64  `json:"userId"`
+	DeviceID string `json:"deviceId,omitempty"`
 }
 
 type SekaiAccountCP struct {
 	SekaiAccountCommonBase
-	credential string
+	Credential string `json:"credential"`
 }
 
-func (s *SekaiAccountCP) SetupAccount(userId string, deviceId string, token string) {
+func (s *SekaiAccountCP) SetupAccount(userId int64, deviceId string, token string) {
 	s.UserId = userId
 	s.DeviceID = deviceId
-	s.credential = token
+	s.Credential = token
 }
-func (s *SekaiAccountCP) GetUserId() string       { return s.UserId }
-func (s *SekaiAccountCP) SetUserId(userId string) { s.UserId = userId }
-func (s *SekaiAccountCP) GetDeviceId() string     { return s.DeviceID }
-func (s *SekaiAccountCP) GetToken() string        { return s.credential }
+func (s *SekaiAccountCP) GetUserId() int64       { return s.UserId }
+func (s *SekaiAccountCP) SetUserId(userId int64) { s.UserId = userId }
+func (s *SekaiAccountCP) GetDeviceId() string    { return s.DeviceID }
+func (s *SekaiAccountCP) GetToken() string       { return s.Credential }
 func (s *SekaiAccountCP) Dump() ([]byte, error) {
-	data := struct {
-		UserId   string `json:"userId"`
-		DeviceID string `json:"deviceId"`
-		Token    string `json:"credential"`
-	}{
-		UserId:   s.UserId,
-		DeviceID: s.DeviceID,
-		Token:    s.credential,
+	var deviceID *string
+	if s.DeviceID != "" {
+		deviceID = &s.DeviceID
 	}
-
-	dump, err := sonic.Marshal(data)
-	if err != nil {
-		return nil, err
+	payload := map[string]any{
+		"deviceId":        deviceID,
+		"credential":      s.Credential,
+		"authTriggerType": "normal",
 	}
-	return dump, nil
+	return msgpack.Marshal(payload)
 }
 
 type SekaiAccountNuverse struct {
 	SekaiAccountCommonBase
-	accessToken string
+	AccessToken string `json:"accessToken"`
 }
 
-func (s *SekaiAccountNuverse) SetupAccount(userId string, deviceId string, token string) {
+func (s *SekaiAccountNuverse) SetupAccount(userId int64, deviceId string, token string) {
 	s.UserId = userId
 	s.DeviceID = deviceId
-	s.accessToken = token
+	s.AccessToken = token
 }
-func (s *SekaiAccountNuverse) GetUserId() string       { return s.UserId }
-func (s *SekaiAccountNuverse) SetUserId(userId string) { s.UserId = userId }
-func (s *SekaiAccountNuverse) GetDeviceId() string     { return s.DeviceID }
-func (s *SekaiAccountNuverse) GetToken() string        { return s.accessToken }
+func (s *SekaiAccountNuverse) GetUserId() int64       { return s.UserId }
+func (s *SekaiAccountNuverse) SetUserId(userId int64) { s.UserId = userId }
+func (s *SekaiAccountNuverse) GetDeviceId() string    { return s.DeviceID }
+func (s *SekaiAccountNuverse) GetToken() string       { return s.AccessToken }
 func (s *SekaiAccountNuverse) Dump() ([]byte, error) {
 	data := struct {
-		UserId   string `json:"userId"`
-		DeviceID string `json:"deviceId"`
-		Token    string `json:"accessToken"`
+		UserId   int64  `msgpack:"userId"`
+		DeviceID string `msgpack:"deviceId"`
+		Token    string `msgpack:"accessToken"`
 	}{
 		UserId:   s.UserId,
 		DeviceID: s.DeviceID,
-		Token:    s.accessToken,
+		Token:    s.AccessToken,
 	}
-
-	dump, err := sonic.Marshal(data)
-	if err != nil {
-		return nil, err
-	}
-	return dump, nil
+	return msgpack.Marshal(data)
 }
 
 type SekaiApiHttpStatus int

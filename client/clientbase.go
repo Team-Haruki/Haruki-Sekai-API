@@ -28,6 +28,7 @@ type SekaiClient struct {
 	Cryptor       *SekaiCryptor
 	Lock          *sync.Mutex
 	Session       *resty.Client
+	Headers       map[string]string
 }
 
 func NewSekaiClient(
@@ -50,6 +51,7 @@ func NewSekaiClient(
 		VersionHelper: versionHelper,
 		Proxy:         proxy,
 		Cryptor:       cryptor,
+		Headers:       serverConfig.Headers,
 		Lock:          &sync.Mutex{},
 	}
 
@@ -63,8 +65,7 @@ func (c *SekaiClient) ParseCookies(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-
-	c.Session.SetHeader("Cookie", cookie)
+	c.Headers["Cookie"] = cookie
 	return nil
 }
 
@@ -72,12 +73,13 @@ func (c *SekaiClient) ParseVersion() error {
 	if err := c.VersionHelper.GetAppVersion(); err != nil {
 		return err
 	}
-	c.Session.SetHeaders(map[string]string{
-		"X-App-Version":   c.VersionHelper.AppVersion,
-		"X-Data-Version":  c.VersionHelper.DataVersion,
-		"X-Asset-Version": c.VersionHelper.AssetVersion,
-		"X-App-Hash":      c.VersionHelper.AppHash,
-	})
+	if c.Headers == nil {
+		c.Headers = map[string]string{}
+	}
+	c.Headers["X-App-Version"] = c.VersionHelper.AppVersion
+	c.Headers["X-Data-Version"] = c.VersionHelper.DataVersion
+	c.Headers["X-Asset-Version"] = c.VersionHelper.AssetVersion
+	c.Headers["X-App-Hash"] = c.VersionHelper.AppHash
 	return nil
 }
 
@@ -142,7 +144,7 @@ func (c *SekaiClient) handleResponse(response resty.Response) (any, error) {
 }
 
 func (c *SekaiClient) CallAPI(ctx context.Context, path string, method string, data any, params map[string]any) (*resty.Response, error) {
-	uri := fmt.Sprintf("%s/api/%s", c.ServerConfig.APIURL, path)
+	uri := fmt.Sprintf("%s/api%s", c.ServerConfig.APIURL, path)
 
 	template, err := uritemplates.Parse(uri)
 	if err != nil {
@@ -157,7 +159,7 @@ func (c *SekaiClient) CallAPI(ctx context.Context, path string, method string, d
 		return nil, err
 	}
 
-	c.Logger.Infof("account #%s %s %s",
+	c.Logger.Infof("account #%d %s %s",
 		c.Account.GetUserId(),
 		method,
 		url,
@@ -172,20 +174,26 @@ func (c *SekaiClient) CallAPI(ctx context.Context, path string, method string, d
 	for attempt := 1; attempt <= 4; attempt++ {
 		req := *cli.R()
 		req.SetContext(ctx)
+		req.SetHeaders(c.Headers)
 		req.Header.Set("X-Request-ID", uuid.New().String())
 
 		for k, v := range params {
 			req.SetQueryParam(k, fmt.Sprintf("%v", v))
 		}
 		if data != nil {
+			c.Logger.Debugf("payload: %v", data)
 			packedData, err := c.Cryptor.Pack(data)
+			c.Logger.Debugf("payload: %v", packedData)
 			if err != nil {
 				return nil, err
 			}
 			req.SetBody(packedData)
 		}
-
+		c.Logger.Debugf("headers: %+v", req.Header)
 		response, err := req.Execute(strings.ToUpper(method), url)
+		unpacked, _ := c.Cryptor.Unpack(response.Body())
+		c.Logger.Debugf("response raw: %v", string(response.Body()))
+		c.Logger.Debugf("response decrypted: %v", unpacked)
 		if err != nil {
 			var ne net.Error
 			if errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &ne) && ne.Timeout()) {
@@ -197,7 +205,7 @@ func (c *SekaiClient) CallAPI(ctx context.Context, path string, method string, d
 			}
 		} else {
 			if v := response.Header().Get("X-Session-Token"); v != "" {
-				c.Session.SetHeader("X-Session-Token", v)
+				c.Headers["X-Session-Token"] = v
 			}
 			if _, respErr := c.handleResponse(*response); respErr != nil {
 				var (

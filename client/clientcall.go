@@ -13,22 +13,18 @@ func (c *SekaiClient) Login(ctx context.Context) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	c.Logger.Debugf("Account.Dump(): %s", loginJson)
 
-	reqData, err := c.Cryptor.Pack(loginJson)
-	if err != nil {
-		return nil, err
-	}
-
-	var loginURL, method string
+	var loginPath, method string
 	if _, ok := c.Account.(*SekaiAccountCP); ok {
-		loginURL = fmt.Sprintf("%s/api/user/%s/auth?refreshUpdatedResources=False", c.ServerConfig.APIURL, c.Account.GetUserId())
+		loginPath = fmt.Sprintf("/user/%d/auth?refreshUpdatedResources=False", c.Account.GetUserId())
 		method = "PUT"
 	} else {
-		loginURL = fmt.Sprintf("%s/api/user/auth", c.ServerConfig.APIURL)
+		loginPath = "/user/auth"
 		method = "POST"
 	}
 
-	response, err := c.CallAPI(ctx, loginURL, method, reqData, nil)
+	response, err := c.CallAPI(ctx, loginPath, method, loginJson, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -50,7 +46,7 @@ func (c *SekaiClient) Login(ctx context.Context) (any, error) {
 			DataVersion      string `msgpack:"dataVersion"`
 			AssetVersion     string `msgpack:"assetVersion"`
 			UserRegistration struct {
-				UserID string `msgpack:"userId"`
+				UserID int64 `msgpack:"userId"`
 			} `msgpack:"userRegistration"`
 		}
 
@@ -60,7 +56,7 @@ func (c *SekaiClient) Login(ctx context.Context) (any, error) {
 			return nil, err
 		}
 		if _, ok := c.Account.(*SekaiAccountNuverse); ok {
-			if retData.UserRegistration.UserID == "" {
+			if retData.UserRegistration.UserID != c.Account.GetUserId() {
 				return nil, fmt.Errorf("invalid login response: missing user ID")
 			}
 			c.Account.SetUserId(retData.UserRegistration.UserID)
@@ -69,13 +65,14 @@ func (c *SekaiClient) Login(ctx context.Context) (any, error) {
 		if retData.SessionToken == "" || retData.DataVersion == "" || retData.AssetVersion == "" {
 			return nil, fmt.Errorf("invalid login response: missing required fields")
 		}
-		c.Session.Header.Set("X-Session-Token", retData.SessionToken)
-		c.Session.Header.Set("X-Data-Version", retData.DataVersion)
-		c.Session.Header.Set("X-Asset-Version", retData.AssetVersion)
+		c.Headers["X-Session-Token"] = retData.SessionToken
+		c.Headers["X-Data-Version"] = retData.DataVersion
+		c.Headers["X-Asset-Version"] = retData.AssetVersion
 
 		c.Logger.Infof("Login successful. Server %s, User ID: %s", c.Server, c.Account.GetUserId())
 		return retData, nil
 	default:
+
 		c.Logger.Errorf("Login failed. Status code: %d, Response: %s", response.StatusCode(), string(response.Body()))
 		return nil, NewSekaiUnknownClientException(response.StatusCode(), string(response.Body()))
 	}

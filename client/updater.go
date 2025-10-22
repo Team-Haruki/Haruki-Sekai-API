@@ -96,6 +96,10 @@ func (mgr *SekaiClientManager) CheckSekaiMasterUpdate() {
 		return
 	}
 	sekaiClient := mgr.getClient()
+	if sekaiClient == nil {
+		mgr.Logger.Errorf("Sekai updater failed to initialize client, skipped.")
+		return
+	}
 	respAny, err := sekaiClient.Login(ctx)
 	if err != nil {
 		mgr.Logger.Errorf("Sekai updater failed to login: %v", err)
@@ -220,8 +224,12 @@ func (mgr *SekaiClientManager) saveSplitMasterData(master map[string]any) {
 func (mgr *SekaiClientManager) updateMasterData(dataVersion string, paths []string, cdnVersion int) {
 	mgr.Logger.Infof("Sekai updater downloading new master data...")
 	var err error
-	sekaiClient := mgr.getClient()
 	masterData := make(map[string]any)
+	sekaiClient := mgr.getClient()
+	if sekaiClient == nil {
+		mgr.Logger.Errorf("Sekai updater failed to initialize client, skipped.")
+		return
+	}
 
 	if mgr.Server == utils.HarukiSekaiServerRegionJP || mgr.Server == utils.HarukiSekaiServerRegionEN {
 		masterData, err = sekaiClient.GetCPMasterData(paths)

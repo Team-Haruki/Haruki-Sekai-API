@@ -150,6 +150,7 @@ func InitAPIUtils(cfg config.Config) error {
 	for server, serverConfig := range cfg.Servers {
 		if serverConfig.Enabled {
 			sekaiManager[server] = client.NewSekaiClientManager(server, serverConfig, cfg.AssetUpdaterServers, harukiGit, cfg.Proxy)
+			sekaiManager[server].Init()
 		}
 	}
 	HarukiSekaiManagers = sekaiManager

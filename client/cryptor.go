@@ -50,25 +50,29 @@ func (c *SekaiCryptor) newCBC(encrypt bool) cipher.BlockMode {
 
 func (c *SekaiCryptor) Pack(content any) ([]byte, error) {
 	if content == nil {
-		return nil, errors.New("content cannot be nil")
+		return nil, ErrEmptyContent
 	}
 
-	packed, err := msgpack.Marshal(content)
-	if err != nil {
-		return nil, err
+	var raw []byte
+	switch v := content.(type) {
+	case []byte:
+		raw = v
+	default:
+		b, err := msgpack.Marshal(v)
+		if err != nil {
+			return nil, fmt.Errorf("msgpack marshal: %w", err)
+		}
+		raw = b
 	}
 
-	if len(packed) == 0 {
-		return nil, errors.New("packed content is empty")
+	if len(raw) == 0 {
+		return nil, ErrEmptyContent
 	}
 
-	padded := pad.PKCS7Pad(packed, aes.BlockSize)
-
+	padded := pad.PKCS7Pad(raw, aes.BlockSize)
 	encrypter := c.newCBC(true)
-
 	encrypted := make([]byte, len(padded))
 	encrypter.CryptBlocks(encrypted, padded)
-
 	return encrypted, nil
 }
 
