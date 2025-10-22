@@ -1,8 +1,8 @@
-package utils
+package git
 
 import (
 	"fmt"
-	harukiLogger "haruki-sekai-api/logger"
+	harukiLogger "haruki-sekai-api/utils/logger"
 	"net/url"
 	"os"
 	"strings"

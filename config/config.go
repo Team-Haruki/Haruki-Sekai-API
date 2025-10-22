@@ -1,8 +1,8 @@
 package config
 
 import (
-	harukiLogger "haruki-sekai-api/logger"
 	"haruki-sekai-api/utils"
+	harukiLogger "haruki-sekai-api/utils/logger"
 	"os"
 
 	"gopkg.in/yaml.v3"
