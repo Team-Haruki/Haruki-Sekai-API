@@ -75,15 +75,20 @@ func (h *SekaiVersionHelper) GetAppVersion() error {
 		return err
 	}
 
-	var parsed map[string]string
-	if err := sonic.Unmarshal(data, &parsed); err != nil {
+	type versionFile struct {
+		AppVersion   string `json:"appVersion"`
+		AppHash      string `json:"appHash"`
+		DataVersion  string `json:"dataVersion"`
+		AssetVersion string `json:"assetVersion"`
+	}
+	var v versionFile
+	if err := sonic.Unmarshal(data, &v); err != nil {
 		return err
 	}
 
-	h.AppVersion = parsed["appVersion"]
-	h.AppHash = parsed["appHash"]
-	h.DataVersion = parsed["dataVersion"]
-	h.AssetVersion = parsed["assetVersion"]
-
+	h.AppVersion = v.AppVersion
+	h.AppHash = v.AppHash
+	h.DataVersion = v.DataVersion
+	h.AssetVersion = v.AssetVersion
 	return nil
 }

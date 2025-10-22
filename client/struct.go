@@ -3,6 +3,7 @@ package client
 import (
 	"fmt"
 	"haruki-sekai-api/utils"
+	"strconv"
 
 	"github.com/vmihailenco/msgpack/v5"
 )
@@ -73,10 +74,14 @@ func (s *SekaiAccountNuverse) Dump() ([]byte, error) {
 	if s.DeviceID != "" {
 		deviceID = &s.DeviceID
 	}
+	userId, err := strconv.Atoi(s.UserId)
+	if err != nil {
+		return nil, err
+	}
 	payload := map[string]any{
 		"deviceId":    deviceID,
 		"accessToken": s.AccessToken,
-		"userID":      s.UserId,
+		"userID":      userId,
 	}
 	return msgpack.Marshal(payload)
 }

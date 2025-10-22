@@ -163,7 +163,7 @@ func (c *SekaiClient) CallAPI(ctx context.Context, path string, method string, d
 	if err != nil {
 		return nil, err
 	}
-	c.Logger.Infof("account #%s %s %s", c.Account.GetUserId(), strings.ToUpper(method), url)
+	c.Logger.Infof("account #%s %s %s", c.Account.GetUserId(), strings.ToUpper(method), path)
 
 	if c.Session == nil {
 		return nil, fmt.Errorf("resty client is nil")

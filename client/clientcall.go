@@ -41,16 +41,14 @@ func (c *SekaiClient) Login(ctx context.Context) (any, error) {
 	req.SetHeaders(c.Headers)
 	req.Header.Set("X-Request-Id", uuid.New().String())
 	req.SetBody(encBody)
-	resp, err := req.Execute(strings.ToUpper(method), loginURL)
+	resp, err := req.Execute(method, loginURL)
 	if err != nil {
 		return nil, err
 	}
-
 	parsedStatusCode, err := ParseSekaiApiHttpStatus(resp.StatusCode())
 	if err != nil {
 		return nil, NewSekaiUnknownClientException(resp.StatusCode(), string(resp.Body()))
 	}
-
 	switch parsedStatusCode {
 	case SekaiApiHttpStatusGameUpgrade:
 		c.Logger.Warnf("Game upgrade required. (Current version: %s)", c.Headers["X-App-Version"])
@@ -63,7 +61,7 @@ func (c *SekaiClient) Login(ctx context.Context) (any, error) {
 			DataVersion      string `msgpack:"dataVersion"`
 			AssetVersion     string `msgpack:"assetVersion"`
 			UserRegistration struct {
-				UserID int64 `msgpack:"userId"`
+				UserID any `msgpack:"userId"`
 			} `msgpack:"userRegistration"`
 		}
 
@@ -78,17 +76,32 @@ func (c *SekaiClient) Login(ctx context.Context) (any, error) {
 		}
 
 		if _, ok := c.Account.(*SekaiAccountNuverse); ok {
-			if retData.UserRegistration.UserID != 0 {
+			var uidStr string
+			switch v := retData.UserRegistration.UserID.(type) {
+			case string:
+				uidStr = v
+			case int64:
+				uidStr = strconv.FormatInt(v, 10)
+			case uint64:
+				uidStr = strconv.FormatUint(v, 10)
+			case int:
+				uidStr = strconv.Itoa(v)
+			case float64:
+				uidStr = strconv.FormatInt(int64(v), 10)
+			default:
+				return nil, fmt.Errorf("invalid login response: unexpected userId type %T", v)
+			}
+			if uidStr == "" {
 				return nil, fmt.Errorf("invalid login response: missing user ID")
 			}
-			c.Account.SetUserId(strconv.FormatInt(retData.UserRegistration.UserID, 10))
+			c.Account.SetUserId(uidStr)
 		}
 
 		c.Headers["X-Session-Token"] = retData.SessionToken
 		c.Headers["X-Data-Version"] = retData.DataVersion
 		c.Headers["X-Asset-Version"] = retData.AssetVersion
 
-		c.Logger.Infof("Login successful, User ID: %s", c.Account.GetUserId())
+		c.Logger.Infof("Login successfully, User ID: %s", c.Account.GetUserId())
 		return retData, nil
 	default:
 		if unpacked, decErr := c.Cryptor.Unpack(resp.Body()); decErr == nil {
@@ -110,6 +123,7 @@ func (c *SekaiClient) GetCPMySekaiImage(path string) ([]byte, error) {
 	}
 	req := *cli.R()
 	req.SetContext(ctx)
+	req.SetHeaders(c.Headers)
 	resp, err := req.Get(imageURL)
 	if err != nil {
 		return nil, err
@@ -131,12 +145,19 @@ func (c *SekaiClient) GetNuverseMySekaiImage(userID, index string) ([]byte, erro
 	if err != nil {
 		return nil, err
 	}
-	m, ok := respAny.(map[string]any)
-	if !ok {
+
+	ptr, ok := respAny.(*interface{})
+	if !ok || ptr == nil {
 		return nil, fmt.Errorf("unexpected response type: %T", respAny)
 	}
-	b64, ok := m["thumbnail"].(string)
-	if !ok || b64 == "" {
+
+	m, ok := (*ptr).(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("unexpected inner type: %T", *ptr)
+	}
+
+	b64, _ := m["thumbnail"].(string)
+	if b64 == "" {
 		return nil, fmt.Errorf("missing thumbnail base64 in response")
 	}
 	img, err := base64.StdEncoding.DecodeString(b64)

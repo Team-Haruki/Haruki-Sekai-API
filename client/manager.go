@@ -179,7 +179,7 @@ func (mgr *SekaiClientManager) parseVersion() error {
 }
 
 func (mgr *SekaiClientManager) Init() error {
-	mgr.Logger.Debugf("Initializing client manager...")
+	mgr.Logger.Infof("Initializing client manager...")
 
 	accounts, err := mgr.parseAccounts()
 	if err != nil {
