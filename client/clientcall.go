@@ -165,6 +165,7 @@ func (c *SekaiClient) GetNuverseMySekaiImage(userID, index string) ([]byte, erro
 }
 
 func (c *SekaiClient) GetCPMasterData(paths []string) (*orderedmap.OrderedMap, error) {
+	start := time.Now()
 	master := orderedmap.New()
 	master.SetEscapeHTML(false)
 	ctx := context.Background()
@@ -217,6 +218,7 @@ func (c *SekaiClient) GetCPMasterData(paths []string) (*orderedmap.OrderedMap, e
 	if err := eg.Wait(); err != nil {
 		return nil, err
 	}
+	c.Logger.Debugf("GetCPMasterData: fetched %d paths (elapsed=%s)", len(paths), time.Since(start))
 	return master, nil
 }
 
@@ -232,10 +234,6 @@ func (c *SekaiClient) GetNuverseMasterData(cdnVersion int) (*orderedmap.OrderedM
 	}
 	host := parsed.Hostname()
 
-	c.Logger.Debugf("GetNuverseMasterData: cdnVersion=%d url=%s host=%s proxy=%q", cdnVersion, u, host, c.Proxy)
-	c.Logger.Debugf("GetNuverseMasterData: structurePath=%s", c.ServerConfig.NuverseStructureFilePath)
-	c.Logger.Debugf("GetNuverseMasterData: client headers snapshot: %#v", c.Headers)
-
 	cli := *c.Session
 	if c.Proxy != "" {
 		cli.SetProxy(c.Proxy)
@@ -245,8 +243,6 @@ func (c *SekaiClient) GetNuverseMasterData(cdnVersion int) (*orderedmap.OrderedM
 	if host != "" {
 		req.SetHeader("Host", host)
 	}
-	// Note: we currently don't copy game headers for this CDN call; logging the final request headers below.
-	c.Logger.Debugf("GetNuverseMasterData: request headers => Host=%q, UA=%q", req.Header.Get("Host"), req.Header.Get("User-Agent"))
 
 	resp, err := req.Get(u)
 	if err != nil {
@@ -260,16 +256,6 @@ func (c *SekaiClient) GetNuverseMasterData(cdnVersion int) (*orderedmap.OrderedM
 
 	status := resp.StatusCode()
 	body := resp.Body()
-	ct := resp.Header().Get("Content-Type")
-	cl := resp.Header().Get("Content-Length")
-	c.Logger.Debugf("GetNuverseMasterData: resp status=%d content-type=%q content-length=%q body-len=%d", status, ct, cl, len(body))
-	if len(body) > 0 {
-		preview := 64
-		if len(body) < preview {
-			preview = len(body)
-		}
-		c.Logger.Debugf("GetNuverseMasterData: resp body hex preview=%x", body[:preview])
-	}
 	if status < 200 || status >= 300 {
 		c.Logger.Warnf("GetNuverseMasterData: non-success status=%d", status)
 	}
@@ -284,39 +270,11 @@ func (c *SekaiClient) GetNuverseMasterData(cdnVersion int) (*orderedmap.OrderedM
 		return nil, fmt.Errorf("unexpected nuverse master info: nil ordered map")
 	}
 
-	c.Logger.Debugf("GetNuverseMasterData: unpack ok, keys=%d", len(masterOM.Keys()))
-	if len(masterOM.Keys()) > 0 {
-		keys := masterOM.Keys()
-		max := 10
-		if len(keys) < max {
-			max = len(keys)
-		}
-		for i := 0; i < max; i++ {
-			k := keys[i]
-			if v, ok := masterOM.Get(k); ok {
-				c.Logger.Debugf("  key[%d]=%s type=%T", i, k, v)
-			}
-		}
-	}
-
 	restored, err := NuverseMasterRestorer(masterOM, c.ServerConfig.NuverseStructureFilePath)
 	if err != nil {
 		c.Logger.Errorf("GetNuverseMasterData: NuverseMasterRestorer error: %v", err)
 		return nil, err
 	}
 	c.Logger.Debugf("GetNuverseMasterData: restored keys=%d (elapsed=%s)", len(restored.Keys()), time.Since(start))
-	if len(restored.Keys()) > 0 {
-		keys := restored.Keys()
-		max := 10
-		if len(keys) < max {
-			max = len(keys)
-		}
-		for i := 0; i < max; i++ {
-			k := keys[i]
-			if v, ok := restored.Get(k); ok {
-				c.Logger.Debugf("  restored[%d]=%s type=%T", i, k, v)
-			}
-		}
-	}
 	return restored, nil
 }

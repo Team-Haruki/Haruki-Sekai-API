@@ -1,9 +1,11 @@
 package client
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"sort"
+	"strconv"
 
 	"github.com/bytedance/sonic"
 	"github.com/iancoleman/orderedmap"
@@ -15,6 +17,7 @@ func loadStructures(path string) (*orderedmap.OrderedMap, error) {
 		return nil, err
 	}
 	om := orderedmap.New()
+	om.SetEscapeHTML(false)
 	if err := sonic.Unmarshal(data, om); err != nil {
 		return nil, err
 	}
@@ -23,13 +26,97 @@ func loadStructures(path string) (*orderedmap.OrderedMap, error) {
 
 func RestoreDict(arrayData []interface{}, keyStructure []interface{}) *orderedmap.OrderedMap {
 	result := orderedmap.New()
+	result.SetEscapeHTML(false)
+
+	handleTuple := func(second interface{}, i int) *orderedmap.OrderedMap {
+		var tupleKeys []interface{}
+		switch s := second.(type) {
+		case *orderedmap.OrderedMap:
+			if tupleKeysRaw, found := s.Get("__tuple__"); found {
+				tupleKeys, _ = tupleKeysRaw.([]interface{})
+			}
+		case orderedmap.OrderedMap:
+			if tupleKeysRaw, found := s.Get("__tuple__"); found {
+				tupleKeys, _ = tupleKeysRaw.([]interface{})
+			}
+		case map[string]interface{}:
+			if tupleKeysRaw, found := s["__tuple__"]; found {
+				tupleKeys, _ = tupleKeysRaw.([]interface{})
+			}
+		}
+
+		if tupleKeys != nil {
+			dict := orderedmap.New()
+			dict.SetEscapeHTML(false)
+
+			if i < len(arrayData) && arrayData[i] != nil {
+				if tupleVals, ok := arrayData[i].([]interface{}); ok {
+					for j, v := range tupleVals {
+						if j >= len(tupleKeys) {
+							break
+						}
+						if v != nil {
+							if keyStr, ok := tupleKeys[j].(string); ok {
+								dict.Set(keyStr, v)
+							}
+						}
+					}
+				}
+			}
+			return dict
+		}
+		return nil
+	}
+
+	if len(keyStructure) == 2 {
+		if keyName, ok := keyStructure[0].(string); ok {
+			var tupleKeys []interface{}
+			switch second := keyStructure[1].(type) {
+			case *orderedmap.OrderedMap:
+				if tupleKeysRaw, found := second.Get("__tuple__"); found {
+					tupleKeys, _ = tupleKeysRaw.([]interface{})
+				}
+			case orderedmap.OrderedMap:
+				if tupleKeysRaw, found := second.Get("__tuple__"); found {
+					tupleKeys, _ = tupleKeysRaw.([]interface{})
+				}
+			case map[string]interface{}:
+				if tupleKeysRaw, found := second["__tuple__"]; found {
+					tupleKeys, _ = tupleKeysRaw.([]interface{})
+				}
+			}
+
+			if tupleKeys != nil {
+				dict := orderedmap.New()
+				dict.SetEscapeHTML(false)
+
+				tupleVals := arrayData
+				if len(arrayData) == 1 {
+					if innerArr, ok := arrayData[0].([]interface{}); ok {
+						tupleVals = innerArr
+					}
+				}
+
+				for j, v := range tupleVals {
+					if j >= len(tupleKeys) {
+						break
+					}
+					if v != nil {
+						if keyStr, ok := tupleKeys[j].(string); ok {
+							dict.Set(keyStr, v)
+						}
+					}
+				}
+
+				result.Set(keyName, dict)
+				return result
+			}
+		}
+	}
 
 	for i, key := range keyStructure {
 		switch k := key.(type) {
-		case string:
-			if i < len(arrayData) && arrayData[i] != nil {
-				result.Set(k, arrayData[i])
-			}
+
 		case []interface{}:
 			if len(k) < 2 {
 				continue
@@ -38,37 +125,41 @@ func RestoreDict(arrayData []interface{}, keyStructure []interface{}) *orderedma
 			if !ok {
 				continue
 			}
+
 			switch second := k[1].(type) {
+
+			case *orderedmap.OrderedMap, orderedmap.OrderedMap, map[string]interface{}:
+				if dict := handleTuple(second, i); dict != nil {
+					result.Set(keyName, dict)
+				}
+
 			case []interface{}:
-				var subList []*orderedmap.OrderedMap
+				subList := make([]*orderedmap.OrderedMap, 0)
 				if i < len(arrayData) {
 					if arr, ok := arrayData[i].([]interface{}); ok {
 						for _, sub := range arr {
 							if subArr, ok := sub.([]interface{}); ok {
-								subList = append(subList, RestoreDict(subArr, second))
+								if len(second) > 0 {
+									if innerStruct, ok := second[0].([]interface{}); ok && len(innerStruct) >= 2 {
+										subList = append(subList, RestoreDict(subArr, innerStruct))
+									} else {
+										subList = append(subList, RestoreDict(subArr, second))
+									}
+								} else {
+									subList = append(subList, RestoreDict(subArr, second))
+								}
+							} else {
+								subList = append(subList, orderedmap.New())
 							}
 						}
 					}
 				}
 				result.Set(keyName, subList)
-			case map[string]any:
-				if tupleKeysRaw, found := second["__tuple__"]; found {
-					if tupleKeys, ok := tupleKeysRaw.([]interface{}); ok {
-						dict := orderedmap.New()
-						if i < len(arrayData) {
-							if arr, ok := arrayData[i].([]interface{}); ok {
-								for j, v := range arr {
-									if v != nil && j < len(tupleKeys) {
-										if keyStr, ok := tupleKeys[j].(string); ok {
-											dict.Set(keyStr, v)
-										}
-									}
-								}
-							}
-						}
-						result.Set(keyName, dict)
-					}
-				}
+			}
+
+		case string:
+			if i < len(arrayData) && arrayData[i] != nil {
+				result.Set(k, arrayData[i])
 			}
 		}
 	}
@@ -76,78 +167,151 @@ func RestoreDict(arrayData []interface{}, keyStructure []interface{}) *orderedma
 }
 
 func RestoreCompactData(data *orderedmap.OrderedMap) []*orderedmap.OrderedMap {
-	var columnLabels []string
-	var columns [][]interface{}
+	var (
+		columnLabels []string
+		columns      [][]interface{}
+	)
 
-	var enumRaw any
+	var enumOM *orderedmap.OrderedMap
 	if v, ok := data.Get("__ENUM__"); ok {
-		enumRaw = v
+		switch em := v.(type) {
+		case *orderedmap.OrderedMap:
+			enumOM = em
+		case map[string]any:
+			om := orderedmap.New()
+			om.SetEscapeHTML(false)
+			keys := make([]string, 0, len(em))
+			for k := range em {
+				keys = append(keys, k)
+			}
+			sort.Strings(keys)
+			for _, k := range keys {
+				om.Set(k, em[k])
+			}
+			enumOM = om
+		}
 	}
 
 	for _, key := range data.Keys() {
 		if key == "__ENUM__" {
 			continue
 		}
-		val, _ := data.Get(key)
 		columnLabels = append(columnLabels, key)
+
 		var dataColumn []interface{}
-		if v, ok := val.([]interface{}); ok {
-			dataColumn = v
+		if val, ok := data.Get(key); ok {
+			if vSlice, ok := val.([]interface{}); ok {
+				dataColumn = vSlice
+			} else {
+				dataColumn = []interface{}{}
+			}
 		} else {
 			dataColumn = []interface{}{}
 		}
 
-		if enumRaw != nil {
-			var enumMap map[string]any
-			switch em := enumRaw.(type) {
-			case *orderedmap.OrderedMap:
-				enumMap = make(map[string]any, len(em.Keys()))
-				for _, ek := range em.Keys() {
-					if ev, ok := em.Get(ek); ok {
-						enumMap[ek] = ev
+		if enumOM != nil {
+			if enumColRaw, ok := enumOM.Get(key); ok {
+				var enumSlice []interface{}
+				switch e := enumColRaw.(type) {
+				case []interface{}:
+					enumSlice = e
+				case *orderedmap.OrderedMap:
+					keys := e.Keys()
+					allNum := true
+					idx := make([]int, len(keys))
+					for i, k := range keys {
+						n, err := strconv.Atoi(k)
+						if err != nil {
+							allNum = false
+							break
+						}
+						idx[i] = n
 					}
-				}
-			case map[string]any:
-				enumMap = em
-			}
-			if enumMap != nil {
-				if enumColumnRaw, ok := enumMap[key]; ok {
-					var enumSlice []interface{}
-					if e, ok := enumColumnRaw.([]interface{}); ok {
-						enumSlice = e
-					}
-					if enumSlice != nil {
-						columnValues := make([]interface{}, 0, len(dataColumn))
-						for _, v := range dataColumn {
-							if v == nil {
-								columnValues = append(columnValues, nil)
-								continue
-							}
-							var index int
-							switch t := v.(type) {
-							case int:
-								index = t
-							case int32:
-								index = int(t)
-							case int64:
-								index = int(t)
-							case float64:
-								index = int(t)
-							default:
-								index = 0
-							}
-							if index >= 0 && index < len(enumSlice) {
-								columnValues = append(columnValues, enumSlice[index])
-							} else {
-								columnValues = append(columnValues, nil)
+					if allNum {
+						order := make([]int, len(keys))
+						for i := range order {
+							order[i] = i
+						}
+						sort.Slice(order, func(i, j int) bool { return idx[order[i]] < idx[order[j]] })
+						kMax := -1
+						for _, n := range idx {
+							if n > kMax {
+								kMax = n
 							}
 						}
-						columns = append(columns, columnValues)
-						continue
+						enumSlice = make([]interface{}, kMax+1)
+						for _, oi := range order {
+							k := keys[oi]
+							v, _ := e.Get(k)
+							n := idx[oi]
+							if n >= 0 && n < len(enumSlice) {
+								enumSlice[n] = v
+							}
+						}
+					} else {
+						enumSlice = make([]interface{}, 0, len(keys))
+						for _, k := range keys {
+							v, _ := e.Get(k)
+							enumSlice = append(enumSlice, v)
+						}
 					}
+				}
+
+				if enumSlice != nil {
+					mapped := make([]interface{}, len(dataColumn))
+					for i, v := range dataColumn {
+						if v == nil {
+							mapped[i] = nil
+							continue
+						}
+						idx := -1
+						switch t := v.(type) {
+						case int:
+							idx = t
+						case int8:
+							idx = int(t)
+						case int16:
+							idx = int(t)
+						case int32:
+							idx = int(t)
+						case int64:
+							idx = int(t)
+						case uint:
+							idx = int(t)
+						case uint8:
+							idx = int(t)
+						case uint16:
+							idx = int(t)
+						case uint32:
+							idx = int(t)
+						case uint64:
+							idx = int(t)
+						case float32:
+							idx = int(t)
+						case float64:
+							idx = int(t)
+						case string:
+							if n, err := strconv.Atoi(t); err == nil {
+								idx = n
+							}
+						case json.Number:
+							if n, err := strconv.Atoi(string(t)); err == nil {
+								idx = n
+							}
+						default:
+						}
+						if idx >= 0 && idx < len(enumSlice) {
+							mapped[i] = enumSlice[idx]
+						} else {
+							mapped[i] = v
+						}
+					}
+					columns = append(columns, mapped)
+					continue
 				}
 			}
 		}
+
 		columns = append(columns, dataColumn)
 	}
 
@@ -165,6 +329,7 @@ func RestoreCompactData(data *orderedmap.OrderedMap) []*orderedmap.OrderedMap {
 	result := make([]*orderedmap.OrderedMap, 0, numEntries)
 	for i := 0; i < numEntries; i++ {
 		entry := orderedmap.New()
+		entry.SetEscapeHTML(false)
 		for j, key := range columnLabels {
 			if i < len(columns[j]) {
 				entry.Set(key, columns[j][i])
@@ -179,6 +344,7 @@ func RestoreCompactData(data *orderedmap.OrderedMap) []*orderedmap.OrderedMap {
 
 func NuverseMasterRestorer(masterData *orderedmap.OrderedMap, nuverseStructureFilePath string) (*orderedmap.OrderedMap, error) {
 	restoredCompactMaster := orderedmap.New()
+	restoredCompactMaster.SetEscapeHTML(false)
 	structures, err := loadStructures(nuverseStructureFilePath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load nuverve master structure: %v", err)
@@ -215,7 +381,7 @@ func NuverseMasterRestorer(masterData *orderedmap.OrderedMap, nuverseStructureFi
 
 			if structDefVal, exists := structures.Get(key); exists {
 				if arr, ok := value.([]interface{}); ok {
-					var newArr []*orderedmap.OrderedMap
+					newArr := make([]*orderedmap.OrderedMap, 0, len(arr))
 					if def, ok := structDefVal.([]interface{}); ok {
 						for _, v := range arr {
 							if subArr, ok := v.([]interface{}); ok {
@@ -241,7 +407,7 @@ func NuverseMasterRestorer(masterData *orderedmap.OrderedMap, nuverseStructureFi
 							valueIDs[id] = true
 						}
 					}
-					var merged []*orderedmap.OrderedMap
+					merged := make([]*orderedmap.OrderedMap, 0)
 					if vs, ok := value.([]interface{}); ok {
 						for _, x := range vs {
 							var m *orderedmap.OrderedMap
@@ -255,6 +421,7 @@ func NuverseMasterRestorer(masterData *orderedmap.OrderedMap, nuverseStructureFi
 								}
 								sort.Strings(keys)
 								om := orderedmap.New()
+								om.SetEscapeHTML(false)
 								for _, k2 := range keys {
 									om.Set(k2, t[k2])
 								}
