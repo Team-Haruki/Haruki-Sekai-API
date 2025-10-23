@@ -67,7 +67,7 @@ func registerHarukiSekaiAPIRoutes(app *fiber.App) {
 		return proxyGameAPI(c, "/information", nil)
 	})
 
-	api.Get("/event/:event_id/top100", func(c *fiber.Ctx) error {
+	api.Get("/event/:event_id/ranking-top100", func(c *fiber.Ctx) error {
 		eventID := c.Params("event_id")
 		if !digitsRe.MatchString(eventID) {
 			return fiber.NewError(fiber.StatusBadRequest, "event_id must be numeric")
