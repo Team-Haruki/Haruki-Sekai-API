@@ -1,9 +1,10 @@
 package utils
 
 import (
-	"strconv"
+	"fmt"
 
 	"github.com/hashicorp/go-version"
+	"github.com/iancoleman/orderedmap"
 )
 
 func CompareVersion(newVersion, currentVersion string) (bool, error) {
@@ -18,26 +19,37 @@ func CompareVersion(newVersion, currentVersion string) (bool, error) {
 	return v1.GreaterThan(v2), nil
 }
 
-func GetString(m map[string]any, key string) string {
-	if v, ok := m[key]; ok {
-		if s, ok := v.(string); ok {
-			return s
+func GetString(om *orderedmap.OrderedMap, key string) string {
+	if v, ok := om.Get(key); ok {
+		switch t := v.(type) {
+		case string:
+			return t
+		case fmt.Stringer:
+			return t.String()
+		case int:
+			return fmt.Sprintf("%d", t)
+		case int64:
+			return fmt.Sprintf("%d", t)
+		case float64:
+			return fmt.Sprintf("%g", t)
 		}
 	}
 	return ""
 }
 
-func GetInt(m map[string]any, key string) int {
-	if v, ok := m[key]; ok {
-		switch val := v.(type) {
+func GetInt(om *orderedmap.OrderedMap, key string) int {
+	if v, ok := om.Get(key); ok {
+		switch t := v.(type) {
 		case int:
-			return val
+			return t
+		case int64:
+			return int(t)
 		case float64:
-			return int(val)
+			return int(t)
 		case string:
-			if i, err := strconv.Atoi(val); err == nil {
-				return i
-			}
+			var n int
+			fmt.Sscanf(t, "%d", &n)
+			return n
 		}
 	}
 	return 0

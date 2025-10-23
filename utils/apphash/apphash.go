@@ -3,6 +3,7 @@ package apphash
 import (
 	"context"
 	"errors"
+	"fmt"
 	harukiLogger "haruki-sekai-api/utils/logger"
 	"io/fs"
 	"os"
@@ -15,49 +16,44 @@ import (
 
 	"github.com/bytedance/sonic"
 	"github.com/go-resty/resty/v2"
+	"github.com/iancoleman/orderedmap"
 )
 
-type AppHashUpdater struct {
-	sources            []utils.HarukiSekaiAppHashSource
-	serverVersionPaths map[utils.HarukiSekaiServerRegion]string
-	client             *resty.Client
-	logger             *harukiLogger.Logger
+type HarukiSekaiAppHashUpdater struct {
+	sources           []utils.HarukiSekaiAppHashSource
+	server            string
+	serverVersionPath *string
+	client            *resty.Client
+	logger            *harukiLogger.Logger
 }
 
-func NewAppHashUpdater(
-	sources []utils.HarukiSekaiAppHashSource,
-	jpVersionPath, enVersionPath, twVersionPath, krVersionPath, cnVersionPath *string,
-) *AppHashUpdater {
-	paths := make(map[utils.HarukiSekaiServerRegion]string)
-	if jpVersionPath != nil && *jpVersionPath != "" {
-		paths[utils.HarukiSekaiServerRegionJP] = *jpVersionPath
-	}
-	if enVersionPath != nil && *enVersionPath != "" {
-		paths[utils.HarukiSekaiServerRegionEN] = *enVersionPath
-	}
-	if twVersionPath != nil && *twVersionPath != "" {
-		paths[utils.HarukiSekaiServerRegionTW] = *twVersionPath
-	}
-	if krVersionPath != nil && *krVersionPath != "" {
-		paths[utils.HarukiSekaiServerRegionKR] = *krVersionPath
-	}
-	if cnVersionPath != nil && *cnVersionPath != "" {
-		paths[utils.HarukiSekaiServerRegionCN] = *cnVersionPath
-	}
-	return &AppHashUpdater{
-		sources:            sources,
-		serverVersionPaths: paths,
+func NewAppHashUpdater(sources []utils.HarukiSekaiAppHashSource, server utils.HarukiSekaiServerRegion, versionPath *string) *HarukiSekaiAppHashUpdater {
+	return &HarukiSekaiAppHashUpdater{
+		sources:           sources,
+		server:            string(server),
+		serverVersionPath: versionPath,
 		client: func() *resty.Client {
 			cli := resty.New()
 			cli.SetTimeout(30 * time.Second)
 			return cli
 		}(),
-		logger: harukiLogger.NewLogger("HarukiAppHashUpdater", "INFO", nil),
+		logger: harukiLogger.NewLogger(fmt.Sprintf("HarukiAppHashUpdater%s", strings.ToUpper(string(server))), "INFO", nil),
 	}
 }
 
-func (a *AppHashUpdater) GetRemoteAppVersion(ctx context.Context, server utils.HarukiSekaiServerRegion, source utils.HarukiSekaiAppHashSource) (*utils.HarukiSekaiAppInfo, error) {
-	filename := strings.ToUpper(string(server)) + ".json"
+func (a *HarukiSekaiAppHashUpdater) GetRemoteAppVersion(ctx context.Context, server string, source utils.HarukiSekaiAppHashSource) (*utils.HarukiSekaiAppInfo, error) {
+	filename := strings.ToUpper(server) + ".json"
+
+	getFirstStr := func(om *orderedmap.OrderedMap, keys ...string) string {
+		for _, k := range keys {
+			if v, ok := om.Get(k); ok {
+				if s, ok := v.(string); ok && s != "" {
+					return s
+				}
+			}
+		}
+		return ""
+	}
 
 	switch source.Type {
 	case utils.HarukiSekaiAppHashSourceTypeFile:
@@ -67,25 +63,63 @@ func (a *AppHashUpdater) GetRemoteAppVersion(ctx context.Context, server utils.H
 			if errors.Is(err, fs.ErrNotExist) {
 				return nil, nil
 			}
+			a.logger.Warnf("[FILE] read error: %v", err)
 			return nil, err
 		}
+
+		om := orderedmap.New()
+		if err := sonic.Unmarshal(data, om); err != nil {
+			a.logger.Warnf("[FILE] unmarshal to orderedmap failed: %v", err)
+			return nil, nil
+		}
+
 		var app utils.HarukiSekaiAppInfo
-		if err := sonic.Unmarshal(data, &app); err != nil {
+		app.AppVersion = getFirstStr(om, "appVersion", "app_version")
+		app.AppHash = getFirstStr(om, "appHash", "app_hash")
+		if app.AppVersion == "" {
+			a.logger.Warnf("[FILE] missing appVersion in %s", path)
 			return nil, nil
 		}
 		return &app, nil
 
 	case utils.HarukiSekaiAppHashSourceTypeUrl:
-		url := source.URL + filename
-		resp, err := a.client.R().SetContext(ctx).Get(url)
+		u := source.URL + "/" + filename
+		resp, err := a.client.R().SetContext(ctx).Get(u)
 		if err != nil {
+			a.logger.Warnf("[URL] request error: %v", err)
 			return nil, err
+		}
+		if resp == nil {
+			a.logger.Warnf("[URL] nil response from %s", u)
+			return nil, nil
 		}
 		if !resp.IsSuccess() {
 			return nil, nil
 		}
+		body := resp.Body()
+		if len(body) == 0 {
+			return nil, nil
+		}
+
 		var app utils.HarukiSekaiAppInfo
-		if err := sonic.Unmarshal(resp.Body(), &app); err != nil {
+		if err := sonic.Unmarshal(body, &app); err != nil {
+			a.logger.Warnf("[URL] unmarshal into struct failed: %v", err)
+			return nil, nil
+		}
+		if app.AppVersion == "" || app.AppHash == "" {
+			om2 := orderedmap.New()
+			if err := sonic.Unmarshal(body, om2); err == nil {
+				v := getFirstStr(om2, "appVersion", "app_version")
+				h := getFirstStr(om2, "appHash", "app_hash")
+				if app.AppVersion == "" {
+					app.AppVersion = v
+				}
+				if app.AppHash == "" {
+					app.AppHash = h
+				}
+			}
+		}
+		if app.AppVersion == "" {
 			return nil, nil
 		}
 		return &app, nil
@@ -93,7 +127,7 @@ func (a *AppHashUpdater) GetRemoteAppVersion(ctx context.Context, server utils.H
 	return nil, nil
 }
 
-func (a *AppHashUpdater) GetLatestRemoteAppInfo(ctx context.Context, server utils.HarukiSekaiServerRegion) (*utils.HarukiSekaiAppInfo, error) {
+func (a *HarukiSekaiAppHashUpdater) GetLatestRemoteAppInfo(ctx context.Context) (*utils.HarukiSekaiAppInfo, error) {
 	var wg sync.WaitGroup
 	resultCh := make(chan *utils.HarukiSekaiAppInfo, len(a.sources))
 
@@ -101,10 +135,14 @@ func (a *AppHashUpdater) GetLatestRemoteAppInfo(ctx context.Context, server util
 		wg.Add(1)
 		go func(source utils.HarukiSekaiAppHashSource) {
 			defer wg.Done()
-			app, _ := a.GetRemoteAppVersion(ctx, server, source)
-			if app != nil {
-				resultCh <- app
+			app, _ := a.GetRemoteAppVersion(ctx, a.server, source)
+			if app == nil {
+				return
 			}
+			if app.AppVersion == "" {
+				return
+			}
+			resultCh <- app
 		}(src)
 	}
 
@@ -113,13 +151,16 @@ func (a *AppHashUpdater) GetLatestRemoteAppInfo(ctx context.Context, server util
 
 	var latest *utils.HarukiSekaiAppInfo
 	for app := range resultCh {
+		if app == nil || app.AppVersion == "" {
+			continue
+		}
 		if latest == nil {
 			latest = app
 			continue
 		}
 		flag, err := utils.CompareVersion(app.AppVersion, latest.AppVersion)
 		if err != nil {
-			a.logger.Warnf("%s server: failed to compare versions: %v", server, err)
+			a.logger.Warnf("Failed to compare versions: %v (a=%s, b=%s)", err, app.AppVersion, latest.AppVersion)
 			continue
 		}
 		if flag {
@@ -129,78 +170,74 @@ func (a *AppHashUpdater) GetLatestRemoteAppInfo(ctx context.Context, server util
 	return latest, nil
 }
 
-func (a *AppHashUpdater) GetCurrentAppVersion(server utils.HarukiSekaiServerRegion) (*utils.HarukiSekaiAppInfo, error) {
-	path := a.serverVersionPaths[server]
-	data, err := os.ReadFile(path)
+func (a *HarukiSekaiAppHashUpdater) GetCurrentAppVersion() (*utils.HarukiSekaiAppInfo, error) {
+	b, err := os.ReadFile(*a.serverVersionPath)
 	if err != nil {
 		return nil, nil
 	}
+	om := orderedmap.New()
+	if err := sonic.Unmarshal(b, om); err != nil {
+		return nil, nil
+	}
 	var app utils.HarukiSekaiAppInfo
-	if err := sonic.Unmarshal(data, &app); err != nil {
+	if v, ok := om.Get("appVersion"); ok {
+		if s, ok := v.(string); ok {
+			app.AppVersion = s
+		}
+	}
+	if v, ok := om.Get("appHash"); ok {
+		if s, ok := v.(string); ok {
+			app.AppHash = s
+		}
+	}
+	if app.AppVersion == "" && app.AppHash == "" {
 		return nil, nil
 	}
 	return &app, nil
 }
 
-func (a *AppHashUpdater) SaveNewAppHash(server utils.HarukiSekaiServerRegion, app *utils.HarukiSekaiAppInfo) error {
-	path := a.serverVersionPaths[server]
+func (a *HarukiSekaiAppHashUpdater) SaveNewAppHash(app *utils.HarukiSekaiAppInfo) error {
+	path := *a.serverVersionPath
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	var existing map[string]any
+	om := orderedmap.New()
 	if b, err := os.ReadFile(path); err == nil && len(b) > 0 {
-		_ = sonic.Unmarshal(b, &existing)
+		_ = sonic.Unmarshal(b, om)
 	} else if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return err
 	}
-	if existing == nil {
-		existing = make(map[string]any)
-	}
-	existing["appVersion"] = app.AppVersion
-	existing["appHash"] = app.AppHash
-	raw, err := sonic.MarshalIndent(existing, "", "  ")
+	om.Set("appVersion", app.AppVersion)
+	om.Set("appHash", app.AppHash)
+	raw, err := sonic.MarshalIndent(om, "", "  ")
 	if err != nil {
 		return err
 	}
 	return os.WriteFile(path, raw, 0o644)
 }
 
-func (a *AppHashUpdater) CheckAppVersion(ctx context.Context, server utils.HarukiSekaiServerRegion) (bool, error) {
-	local, _ := a.GetCurrentAppVersion(server)
-	remote, _ := a.GetLatestRemoteAppInfo(ctx, server)
+func (a *HarukiSekaiAppHashUpdater) CheckAppVersion() {
+	ctx := context.Background()
+	local, _ := a.GetCurrentAppVersion()
+	remote, _ := a.GetLatestRemoteAppInfo(ctx)
 	if local == nil || remote == nil {
-		a.logger.Warnf("%s server: local or remote version unavailable", server)
-		return false, nil
+		a.logger.Warnf("Local or remote version unavailable")
+		return
 	}
 	flag, err := utils.CompareVersion(remote.AppVersion, local.AppVersion)
 	if err != nil {
-		a.logger.Warnf("%s server: failed to compare versions: %v", server, err)
-		return false, err
+		a.logger.Warnf("Failed to compare versions: %v", err)
+		return
 	}
 	if flag {
-		a.logger.Infof("%s server found new app version: %s, saving new app hash...", server, remote.AppVersion)
-		if err := a.SaveNewAppHash(server, remote); err != nil {
-			a.logger.Warnf("%s server failed to save new app hash", server)
-			return false, err
+		a.logger.Infof("Found new app version: %s, saving new app hash...", remote.AppVersion)
+		if err := a.SaveNewAppHash(remote); err != nil {
+			a.logger.Warnf("Failed to save new app hash")
+			return
 		}
-		a.logger.Infof("%s server saved new app hash", server)
-		return true, nil
+		a.logger.Infof("Saved new app hash")
+		return
 	}
-	a.logger.Infof("%s server no new app version found", server)
-	return false, nil
-}
-
-func (a *AppHashUpdater) CheckAppVersionConcurrently(ctx context.Context) {
-	var wg sync.WaitGroup
-	for server := range a.serverVersionPaths {
-		wg.Add(1)
-		go func(s utils.HarukiSekaiServerRegion) {
-			defer wg.Done()
-			if _, err := a.CheckAppVersion(ctx, s); err != nil {
-				a.logger.Warnf("%s server: failed to check app version: %v", s, err)
-			}
-		}(server)
-	}
-	wg.Wait()
+	a.logger.Infof("No new app version found")
 }

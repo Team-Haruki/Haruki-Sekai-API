@@ -67,8 +67,8 @@ type Config struct {
 	Redis               RedisConfig                                                     `yaml:"redis"`
 	Backend             BackendConfig                                                   `yaml:"backend"`
 	Gorm                GormConfig                                                      `yaml:"gorm"`
-	AppHashSources      []*utils.HarukiSekaiAppHashSource                               `yaml:"apphash_sources"`
-	AssetUpdaterServers []*utils.HarukiAssetUpdaterInfo                                 `yaml:"asset_updater_servers"`
+	AppHashSources      []utils.HarukiSekaiAppHashSource                                `yaml:"apphash_sources"`
+	AssetUpdaterServers []utils.HarukiAssetUpdaterInfo                                  `yaml:"asset_updater_servers"`
 	Servers             map[utils.HarukiSekaiServerRegion]utils.HarukiSekaiServerConfig `yaml:"servers"`
 }
 

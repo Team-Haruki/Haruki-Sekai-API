@@ -13,22 +13,24 @@ import (
 	"github.com/bytedance/sonic"
 	"github.com/go-git/go-git/v5"
 	"github.com/go-resty/resty/v2"
+	"github.com/iancoleman/orderedmap"
 )
 
-func (mgr *SekaiClientManager) loadVersionFile() (map[string]any, error) {
+func (mgr *SekaiClientManager) loadVersionFile() (*orderedmap.OrderedMap, error) {
 	data, err := os.ReadFile(mgr.ServerConfig.VersionPath)
 	if err != nil {
 		return nil, err
 	}
-	var result map[string]any
-	if err := sonic.Unmarshal(data, &result); err != nil {
+	om := orderedmap.New()
+	if err := sonic.Unmarshal(data, om); err != nil {
 		return nil, err
 	}
-	return result, nil
+	return om, nil
 }
 
 func (mgr *SekaiClientManager) saveFile(filePath string, data any) error {
-	jsonData, err := sonic.MarshalIndent(data, "", "  ")
+	json := sonic.Config{EscapeHTML: false}.Froze()
+	jsonData, err := json.MarshalIndent(data, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -43,7 +45,6 @@ func (mgr *SekaiClientManager) callHarukiAssetUpdater(updaterInfo utils.HarukiAs
 	endpoint := updaterInfo.URL
 	cli := resty.New()
 	cli.SetTimeout(30 * time.Second)
-
 	for {
 		req := cli.R().
 			SetHeader("Content-Type", "application/json").
@@ -71,13 +72,10 @@ func (mgr *SekaiClientManager) callAllHarukiAssetUpdater(assetVersion, assetHash
 	var payload = HarukiSekaiAssetUpdaterPayload{Server: mgr.Server, AssetVersion: assetVersion, AssetHash: assetHash}
 	var wg sync.WaitGroup
 	for _, info := range mgr.AssetUpdaterServers {
-		if info == nil {
-			continue
-		}
 		wg.Add(1)
-		go func(u *utils.HarukiAssetUpdaterInfo) {
+		go func(u utils.HarukiAssetUpdaterInfo) {
 			defer wg.Done()
-			mgr.callHarukiAssetUpdater(*u, payload)
+			mgr.callHarukiAssetUpdater(u, payload)
 		}(info)
 	}
 	wg.Wait()
@@ -100,28 +98,15 @@ func (mgr *SekaiClientManager) CheckSekaiMasterUpdate() {
 		mgr.Logger.Errorf("Sekai updater failed to initialize client, skipped.")
 		return
 	}
-	respAny, err := sekaiClient.Login(ctx)
+	loginResponse, err := sekaiClient.Login(ctx)
 	if err != nil {
 		mgr.Logger.Errorf("Sekai updater failed to login: %v", err)
 		return
 	}
 
-	var currentServerVersion map[string]any
-	if m, ok := respAny.(map[string]any); ok {
-		currentServerVersion = m
-	} else {
-		if raw, err2 := sonic.Marshal(respAny); err2 == nil {
-			_ = sonic.Unmarshal(raw, &currentServerVersion)
-		}
-	}
-	if currentServerVersion == nil {
-		mgr.Logger.Errorf("Sekai updater found unexpected login response type: %T", respAny)
-		return
-	}
-
-	currentServerDataVersion := utils.GetString(currentServerVersion, "dataVersion")
-	currentServerAssetVersion := utils.GetString(currentServerVersion, "assetVersion")
-	currentServerAssetHash := utils.GetString(currentServerVersion, "assetHash")
+	currentServerDataVersion := loginResponse.DataVersion
+	currentServerAssetVersion := loginResponse.AssetVersion
+	currentServerAssetHash := loginResponse.AssetHash
 	if mgr.Server == utils.HarukiSekaiServerRegionJP || mgr.Server == utils.HarukiSekaiServerRegionEN {
 		currentLocalDataVersion := utils.GetString(currentLocalVersion, "dataVersion")
 		currentLocalAssetVersion := utils.GetString(currentLocalVersion, "assetVersion")
@@ -131,10 +116,10 @@ func (mgr *SekaiClientManager) CheckSekaiMasterUpdate() {
 			return
 		} else if isNewer {
 			mgr.Logger.Criticalf("Sekai updater found new master data version: %s", currentServerDataVersion)
-			if arr, ok := currentServerVersion["suiteMasterSplitPath"].([]string); ok {
-				splitMasterDataList = arr
+			if loginResponse.SuiteMasterSplitPath != nil {
+				splitMasterDataList = loginResponse.SuiteMasterSplitPath
 			} else {
-				mgr.Logger.Warnf("Sekai updater found unexpected suiteMasterSplitPath type: %T", currentServerVersion["suiteMasterSplitPath"])
+				mgr.Logger.Warnf("Sekai updater can not found suiteMasterSplitPath")
 			}
 			requireUpdateMasterData = true
 		}
@@ -148,7 +133,7 @@ func (mgr *SekaiClientManager) CheckSekaiMasterUpdate() {
 		}
 	} else {
 		currentLocalCDNVersion := utils.GetInt(currentLocalVersion, "cdnVersion")
-		currentServerCDNVersion = utils.GetInt(currentServerVersion, "cdnVersion")
+		currentServerCDNVersion = loginResponse.CDNVersion
 		if currentLocalCDNVersion < currentServerCDNVersion {
 			mgr.Logger.Criticalf("Sekai updater found new cdn version: %d", currentServerCDNVersion)
 			requireUpdateMasterData = true
@@ -165,12 +150,12 @@ func (mgr *SekaiClientManager) CheckSekaiMasterUpdate() {
 	}
 
 	if requireUpdateMasterData || requireUpdateAsset {
-		currentLocalVersion["dataVersion"] = currentServerDataVersion
-		currentLocalVersion["assetVersion"] = currentServerAssetVersion
-		currentLocalVersion["assetHash"] = currentServerAssetHash
+		currentLocalVersion.Set("dataVersion", currentServerDataVersion)
+		currentLocalVersion.Set("assetVersion", currentServerAssetVersion)
+		currentLocalVersion.Set("assetHash", currentServerAssetHash)
 
 		if mgr.Server != utils.HarukiSekaiServerRegionJP && mgr.Server != utils.HarukiSekaiServerRegionEN {
-			currentLocalVersion["cdnVersion"] = currentServerCDNVersion
+			currentLocalVersion.Set("cdnVersion", currentServerCDNVersion)
 		}
 
 		if err := mgr.saveFile(mgr.ServerConfig.VersionPath, currentLocalVersion); err != nil {
@@ -188,16 +173,17 @@ func (mgr *SekaiClientManager) CheckSekaiMasterUpdate() {
 
 }
 
-func (mgr *SekaiClientManager) saveSplitMasterData(master map[string]any) {
+func (mgr *SekaiClientManager) saveSplitMasterData(master *orderedmap.OrderedMap) {
 	mgr.Logger.Infof("Sekai updater saving split master data...")
 	if err := os.MkdirAll(mgr.ServerConfig.MasterDir, 0755); err != nil {
 		mgr.Logger.Errorf("Sekai updater failed to create master data directory: %v", err)
 	}
 
 	var wg sync.WaitGroup
-	errChan := make(chan error, len(master))
+	errChan := make(chan error, len(master.Keys()))
 
-	for key, value := range master {
+	for _, key := range master.Keys() {
+		value, _ := master.Get(key)
 		wg.Add(1)
 		go func(k string, v any) {
 			defer wg.Done()
@@ -224,7 +210,8 @@ func (mgr *SekaiClientManager) saveSplitMasterData(master map[string]any) {
 func (mgr *SekaiClientManager) updateMasterData(dataVersion string, paths []string, cdnVersion int) {
 	mgr.Logger.Infof("Sekai updater downloading new master data...")
 	var err error
-	masterData := make(map[string]any)
+	masterData := orderedmap.New()
+	masterData.SetEscapeHTML(false)
 	sekaiClient := mgr.getClient()
 	if sekaiClient == nil {
 		mgr.Logger.Errorf("Sekai updater failed to initialize client, skipped.")
@@ -243,7 +230,6 @@ func (mgr *SekaiClientManager) updateMasterData(dataVersion string, paths []stri
 			mgr.Logger.Errorf("Sekai updater failed to get master data: %v", err)
 			return
 		}
-
 	}
 
 	mgr.Logger.Infof("Sekai updater downloaded new master data.")

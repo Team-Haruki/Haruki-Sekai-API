@@ -1,13 +1,16 @@
 package client
 
 import (
+	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"haruki-sekai-api/utils/orderedmsgpack"
 	"sync"
 
+	"github.com/iancoleman/orderedmap"
 	"github.com/vgorin/cryptogo/pad"
 	"github.com/vmihailenco/msgpack/v5"
 )
@@ -90,18 +93,14 @@ var bytesPool = sync.Pool{
 }
 
 func (c *SekaiCryptor) UnpackInto(content []byte, out any) error {
-	validateContent := func(content []byte) error {
-		if len(content) == 0 {
-			return ErrEmptyContent
-		}
-		if len(content)%aes.BlockSize != 0 {
-			return ErrInvalidBlockSize
-		}
-		return nil
+	if len(content) == 0 {
+		return ErrEmptyContent
 	}
-
-	if err := validateContent(content); err != nil {
-		return err
+	if len(content)%aes.BlockSize != 0 {
+		return ErrInvalidBlockSize
+	}
+	if out == nil {
+		return fmt.Errorf("out must be a non-nil pointer")
 	}
 
 	decrypter := c.newCBC(false)
@@ -121,19 +120,43 @@ func (c *SekaiCryptor) UnpackInto(content []byte, out any) error {
 		return fmt.Errorf("failed to unpad: %w", err)
 	}
 
-	if out == nil {
-		return fmt.Errorf("out must be a non-nil pointer")
+	switch dst := out.(type) {
+	case *orderedmap.OrderedMap:
+		om, err := orderedmsgpack.MsgpackToOrderedMap(unpadded)
+		if err != nil {
+			return fmt.Errorf("ordered decode: %w", err)
+		}
+		om.SetEscapeHTML(false)
+		*dst = *om
+		return nil
+	case **orderedmap.OrderedMap:
+		om, err := orderedmsgpack.MsgpackToOrderedMap(unpadded)
+		if err != nil {
+			return fmt.Errorf("ordered (**ptr) decode: %w", err)
+		}
+		*dst = om
+		return nil
+	default:
+		dec := msgpack.NewDecoder(bytes.NewReader(unpadded))
+		if err := dec.Decode(out); err != nil {
+			return fmt.Errorf("msgpack decode: %w", err)
+		}
+		return nil
 	}
-	if err := msgpack.Unmarshal(unpadded, out); err != nil {
-		return fmt.Errorf("failed to unmarshal: %w", err)
-	}
-
-	return nil
 }
 
 func (c *SekaiCryptor) Unpack(content []byte) (any, error) {
 	var result any
 	if err := c.UnpackInto(content, &result); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+func (c *SekaiCryptor) UnpackOrdered(content []byte) (*orderedmap.OrderedMap, error) {
+	result := orderedmap.New()
+	result.SetEscapeHTML(false)
+	if err := c.UnpackInto(content, result); err != nil {
 		return nil, err
 	}
 	return result, nil

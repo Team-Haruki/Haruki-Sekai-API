@@ -6,12 +6,15 @@ import (
 	"haruki-sekai-api/client"
 	"haruki-sekai-api/config"
 	"haruki-sekai-api/utils"
+	"haruki-sekai-api/utils/apphash"
 	"haruki-sekai-api/utils/git"
+	harukiLogger "haruki-sekai-api/utils/logger"
 	"log"
 	"os"
 	"strings"
 	"time"
 
+	"github.com/go-co-op/gocron/v2"
 	"github.com/redis/go-redis/v9"
 	"gorm.io/driver/mysql"
 	"gorm.io/driver/postgres"
@@ -28,6 +31,7 @@ var (
 	HarukiSekaiRedis             *redis.Client
 	HarukiSekaiUserDB            *gorm.DB
 	HarukiSekaiUserJWTSigningKey *string
+	harukiSchedulerLogger        *harukiLogger.Logger
 )
 
 func gormLoggerFromConfig(lc config.GormLoggerConfig) logger.Interface {
@@ -154,6 +158,61 @@ func InitAPIUtils(cfg config.Config) error {
 		}
 	}
 	HarukiSekaiManagers = sekaiManager
+
+	sch, err := gocron.NewScheduler(gocron.WithLocation(time.Local))
+	if err != nil {
+		return err
+	}
+	harukiSchedulerLogger = harukiLogger.NewLogger("HarukiSekaiUpdaterScheduler", "DEBUG", nil)
+
+	for server, serverConfig := range cfg.Servers {
+		if !serverConfig.Enabled || !serverConfig.EnableMasterUpdater || serverConfig.MasterUpdaterCron == "" {
+			continue
+		}
+		mgr := sekaiManager[server]
+		if mgr == nil {
+			continue
+		}
+		_, err := sch.NewJob(
+			gocron.CronJob(serverConfig.MasterUpdaterCron, true),
+			gocron.NewTask(func(srv utils.HarukiSekaiServerRegion, m *client.SekaiClientManager) {
+				defer func() {
+					if r := recover(); r != nil {
+						harukiSchedulerLogger.Infof("%s CheckSekaiMasterUpdate panic: %v", strings.ToUpper(string(srv)), r)
+					}
+				}()
+				m.CheckSekaiMasterUpdate()
+			}, server, mgr),
+		)
+		if err != nil {
+			return fmt.Errorf("register updater for %s failed: %w", server, err)
+		}
+		harukiSchedulerLogger.Infof("%s sekai updater registered cron: %s", strings.ToUpper(string(server)), serverConfig.MasterUpdaterCron)
+	}
+
+	for server, serverConfig := range cfg.Servers {
+		if !serverConfig.Enabled || !serverConfig.EnableAppHashUpdater || serverConfig.AppHashUpdaterCron == "" {
+			continue
+		}
+		updater := apphash.NewAppHashUpdater(cfg.AppHashSources, server, &serverConfig.VersionPath)
+		_, err := sch.NewJob(
+			gocron.CronJob(serverConfig.AppHashUpdaterCron, true),
+			gocron.NewTask(func(srv utils.HarukiSekaiServerRegion, u *apphash.HarukiSekaiAppHashUpdater) {
+				defer func() {
+					if r := recover(); r != nil {
+						harukiSchedulerLogger.Infof("%s CheckAppVersion panic: %v", strings.ToUpper(string(srv)), r)
+					}
+				}()
+				u.CheckAppVersion()
+			}, server, updater),
+		)
+		if err != nil {
+			return fmt.Errorf("register apphash updater for %s failed: %w", server, err)
+		}
+		harukiSchedulerLogger.Infof("%s apphash updater registered cron: %s", strings.ToUpper(string(server)), serverConfig.AppHashUpdaterCron)
+	}
+
+	sch.Start()
 
 	if cfg.Backend.SekaiUserJWTSigningKey != "" {
 		HarukiSekaiUserJWTSigningKey = &cfg.Backend.SekaiUserJWTSigningKey

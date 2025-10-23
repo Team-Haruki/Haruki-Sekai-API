@@ -25,22 +25,6 @@ func ParseSekaiServerRegion(s string) (HarukiSekaiServerRegion, error) {
 	}
 }
 
-type HarukiSekaiAPIEndpointType string // APIType
-
-const (
-	HarukiSekaiAPIEndpointTypeAPI   HarukiSekaiAPIEndpointType = "api"
-	HarukiSekaiAPIEndpointTypeImage HarukiSekaiAPIEndpointType = "image"
-)
-
-func ParseAPIEndpointType(s string) (HarukiSekaiAPIEndpointType, error) {
-	switch HarukiSekaiAPIEndpointType(s) {
-	case HarukiSekaiAPIEndpointTypeAPI, HarukiSekaiAPIEndpointTypeImage:
-		return HarukiSekaiAPIEndpointType(s), nil
-	default:
-		return "", fmt.Errorf("invalid endpoint type: %s", s)
-	}
-}
-
 type HarukiSekaiAppHashSourceType string
 
 const (
@@ -71,9 +55,25 @@ type HarukiSekaiServerConfig struct {
 	Headers                  map[string]string `yaml:"headers,omitempty"`
 	AESKeyHex                string            `yaml:"aes_key_hex,omitempty"`
 	AESIVHex                 string            `yaml:"aes_iv_hex,omitempty"`
+	EnableMasterUpdater      bool              `yaml:"enable_master_updater,omitempty"`
+	MasterUpdaterCron        string            `yaml:"master_updater_cron,omitempty"`
+	EnableAppHashUpdater     bool              `yaml:"enable_app_hash_updater,omitempty"`
+	AppHashUpdaterCron       string            `yaml:"app_hash_updater_cron,omitempty"`
 }
 
 type HarukiAssetUpdaterInfo struct {
 	URL           string `yaml:"url"`
 	Authorization string `yaml:"authorization,omitempty"`
+}
+
+type HarukiSekaiLoginResponse struct {
+	SessionToken         string   `msgpack:"sessionToken"`
+	DataVersion          string   `msgpack:"dataVersion"`
+	AssetVersion         string   `msgpack:"assetVersion"`
+	AssetHash            string   `msgpack:"assetHash"`
+	SuiteMasterSplitPath []string `msgpack:"suiteMasterSplitPath"`
+	CDNVersion           int      `msgpack:"cdnVersion"`
+	UserRegistration     struct {
+		UserID any `msgpack:"userId"`
+	} `msgpack:"userRegistration"`
 }

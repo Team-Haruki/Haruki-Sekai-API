@@ -4,15 +4,20 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"haruki-sekai-api/utils"
 	"net/url"
 	"strconv"
 	"strings"
 	"time"
 
+	"sync"
+
 	"github.com/google/uuid"
+	"github.com/iancoleman/orderedmap"
+	"golang.org/x/sync/errgroup"
 )
 
-func (c *SekaiClient) Login(ctx context.Context) (any, error) {
+func (c *SekaiClient) Login(ctx context.Context) (*utils.HarukiSekaiLoginResponse, error) {
 	loginMsgpack, err := c.Account.Dump()
 	if err != nil {
 		return nil, err
@@ -56,16 +61,8 @@ func (c *SekaiClient) Login(ctx context.Context) (any, error) {
 	case SekaiApiHttpStatusUnderMaintenance:
 		return nil, NewUnderMaintenanceError()
 	case SekaiApiHttpStatusOk:
-		type LoginResponse struct {
-			SessionToken     string `msgpack:"sessionToken"`
-			DataVersion      string `msgpack:"dataVersion"`
-			AssetVersion     string `msgpack:"assetVersion"`
-			UserRegistration struct {
-				UserID any `msgpack:"userId"`
-			} `msgpack:"userRegistration"`
-		}
 
-		retData, err := UnpackInto[LoginResponse](c.Cryptor, resp.Body())
+		retData, err := UnpackInto[utils.HarukiSekaiLoginResponse](c.Cryptor, resp.Body())
 		if err != nil {
 			c.Logger.Errorf("Unpack login response error : %v", err)
 			return nil, err
@@ -167,42 +164,78 @@ func (c *SekaiClient) GetNuverseMySekaiImage(userID, index string) ([]byte, erro
 	return img, nil
 }
 
-func (c *SekaiClient) GetCPMasterData(paths []string) (map[string]any, error) {
-	master := make(map[string]any)
+func (c *SekaiClient) GetCPMasterData(paths []string) (*orderedmap.OrderedMap, error) {
+	master := orderedmap.New()
+	master.SetEscapeHTML(false)
 	ctx := context.Background()
+
+	var mu sync.Mutex
+	eg, egCtx := errgroup.WithContext(ctx)
+	sem := make(chan struct{}, 12)
+
 	for _, rawPath := range paths {
-		if rawPath == "" {
+		rp := rawPath
+		if rp == "" {
 			continue
 		}
-		path := strings.TrimPrefix(rawPath, "/")
-		resp, err := c.Get(ctx, path, nil)
-		if err != nil {
-			return nil, err
-		}
-		unpacked, err := c.Cryptor.Unpack(resp.Body())
-		if err != nil {
-			c.Logger.Errorf("unpack master part failed: path=%s, err=%v", rawPath, err)
-			return nil, err
-		}
-		part, ok := unpacked.(map[string]any)
-		if !ok {
-			return nil, fmt.Errorf("unexpected master data type at path %s", rawPath)
-		}
-		for k, v := range part {
-			master[k] = v
-		}
+		eg.Go(func() error {
+			select {
+			case sem <- struct{}{}:
+				defer func() { <-sem }()
+			case <-egCtx.Done():
+				return egCtx.Err()
+			}
+
+			p := rp
+			if !strings.HasPrefix(p, "/") {
+				p = "/" + p
+			}
+
+			resp, err := c.Get(egCtx, p, nil)
+			if err != nil {
+				return err
+			}
+			om, err := c.Cryptor.UnpackOrdered(resp.Body())
+			if err != nil {
+				return fmt.Errorf("unpack master part failed: path=%s, err=%w", rp, err)
+			}
+			if om == nil {
+				return fmt.Errorf("unexpected master data: nil ordered map at path %s", rp)
+			}
+
+			mu.Lock()
+			for _, k := range om.Keys() {
+				if v, ok := om.Get(k); ok {
+					master.Set(k, v)
+				}
+			}
+			mu.Unlock()
+			return nil
+		})
+	}
+
+	if err := eg.Wait(); err != nil {
+		return nil, err
 	}
 	return master, nil
 }
 
-func (c *SekaiClient) GetNuverseMasterData(cdnVersion int) (map[string]any, error) {
+func (c *SekaiClient) GetNuverseMasterData(cdnVersion int) (*orderedmap.OrderedMap, error) {
+	start := time.Now()
 	ctx := context.Background()
+
 	u := fmt.Sprintf("%s/master-data-%d.info", c.ServerConfig.NuverseMasterDataURL, cdnVersion)
 	parsed, err := url.Parse(u)
 	if err != nil {
+		c.Logger.Errorf("GetNuverseMasterData: url parse error: %v", err)
 		return nil, err
 	}
 	host := parsed.Hostname()
+
+	c.Logger.Debugf("GetNuverseMasterData: cdnVersion=%d url=%s host=%s proxy=%q", cdnVersion, u, host, c.Proxy)
+	c.Logger.Debugf("GetNuverseMasterData: structurePath=%s", c.ServerConfig.NuverseStructureFilePath)
+	c.Logger.Debugf("GetNuverseMasterData: client headers snapshot: %#v", c.Headers)
+
 	cli := *c.Session
 	if c.Proxy != "" {
 		cli.SetProxy(c.Proxy)
@@ -212,21 +245,78 @@ func (c *SekaiClient) GetNuverseMasterData(cdnVersion int) (map[string]any, erro
 	if host != "" {
 		req.SetHeader("Host", host)
 	}
+	// Note: we currently don't copy game headers for this CDN call; logging the final request headers below.
+	c.Logger.Debugf("GetNuverseMasterData: request headers => Host=%q, UA=%q", req.Header.Get("Host"), req.Header.Get("User-Agent"))
+
 	resp, err := req.Get(u)
 	if err != nil {
+		c.Logger.Errorf("GetNuverseMasterData: request error: %v", err)
 		return nil, err
 	}
-	unpacked, err := c.Cryptor.Unpack(resp.Body())
+	if resp == nil {
+		c.Logger.Errorf("GetNuverseMasterData: nil response")
+		return nil, fmt.Errorf("nil response")
+	}
+
+	status := resp.StatusCode()
+	body := resp.Body()
+	ct := resp.Header().Get("Content-Type")
+	cl := resp.Header().Get("Content-Length")
+	c.Logger.Debugf("GetNuverseMasterData: resp status=%d content-type=%q content-length=%q body-len=%d", status, ct, cl, len(body))
+	if len(body) > 0 {
+		preview := 64
+		if len(body) < preview {
+			preview = len(body)
+		}
+		c.Logger.Debugf("GetNuverseMasterData: resp body hex preview=%x", body[:preview])
+	}
+	if status < 200 || status >= 300 {
+		c.Logger.Warnf("GetNuverseMasterData: non-success status=%d", status)
+	}
+
+	masterOM, err := c.Cryptor.UnpackOrdered(body)
 	if err != nil {
+		c.Logger.Errorf("GetNuverseMasterData: unpack ordered failed: %v", err)
 		return nil, fmt.Errorf("unpack nuverse master info failed: %w", err)
 	}
-	masterMap, ok := unpacked.(map[string]any)
-	if !ok {
-		return nil, fmt.Errorf("unexpected nuverse master info type")
+	if masterOM == nil {
+		c.Logger.Errorf("GetNuverseMasterData: unpack returned nil ordered map")
+		return nil, fmt.Errorf("unexpected nuverse master info: nil ordered map")
 	}
-	restored, err := NuverseMasterRestorer(masterMap, c.ServerConfig.NuverseStructureFilePath)
+
+	c.Logger.Debugf("GetNuverseMasterData: unpack ok, keys=%d", len(masterOM.Keys()))
+	if len(masterOM.Keys()) > 0 {
+		keys := masterOM.Keys()
+		max := 10
+		if len(keys) < max {
+			max = len(keys)
+		}
+		for i := 0; i < max; i++ {
+			k := keys[i]
+			if v, ok := masterOM.Get(k); ok {
+				c.Logger.Debugf("  key[%d]=%s type=%T", i, k, v)
+			}
+		}
+	}
+
+	restored, err := NuverseMasterRestorer(masterOM, c.ServerConfig.NuverseStructureFilePath)
 	if err != nil {
+		c.Logger.Errorf("GetNuverseMasterData: NuverseMasterRestorer error: %v", err)
 		return nil, err
+	}
+	c.Logger.Debugf("GetNuverseMasterData: restored keys=%d (elapsed=%s)", len(restored.Keys()), time.Since(start))
+	if len(restored.Keys()) > 0 {
+		keys := restored.Keys()
+		max := 10
+		if len(keys) < max {
+			max = len(keys)
+		}
+		for i := 0; i < max; i++ {
+			k := keys[i]
+			if v, ok := restored.Get(k); ok {
+				c.Logger.Debugf("  restored[%d]=%s type=%T", i, k, v)
+			}
+		}
 	}
 	return restored, nil
 }

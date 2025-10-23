@@ -22,14 +22,14 @@ type SekaiClientManager struct {
 	VersionHelper       *SekaiVersionHelper
 	CookieHelper        *SekaiCookieHelper
 	Clients             []*SekaiClient
-	AssetUpdaterServers []*utils.HarukiAssetUpdaterInfo
+	AssetUpdaterServers []utils.HarukiAssetUpdaterInfo
 	Git                 *git.HarukiGitUpdater
 	ClientNo            int
 	Proxy               string
 	Logger              *logger.Logger
 }
 
-func NewSekaiClientManager(server utils.HarukiSekaiServerRegion, serverConfig utils.HarukiSekaiServerConfig, assetUpdaterServers []*utils.HarukiAssetUpdaterInfo, git *git.HarukiGitUpdater, proxy string, jpSekaiCookieURL string) *SekaiClientManager {
+func NewSekaiClientManager(server utils.HarukiSekaiServerRegion, serverConfig utils.HarukiSekaiServerConfig, assetUpdaterServers []utils.HarukiAssetUpdaterInfo, git *git.HarukiGitUpdater, proxy string, jpSekaiCookieURL string) *SekaiClientManager {
 	mgr := &SekaiClientManager{
 		Server:              server,
 		ServerConfig:        serverConfig,
