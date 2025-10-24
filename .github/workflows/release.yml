@@ -46,7 +46,7 @@ jobs:
         GOARCH: ${{ matrix.arch }}
         CGO_ENABLED: 0
       run: |
-        BINARY_NAME="haruki-sekai-api"
+        BINARY_NAME="HarukiSekaiAPI"
         if [ "$GOOS" = "windows" ]; then
           BINARY_NAME="${BINARY_NAME}.exe"
         fi
