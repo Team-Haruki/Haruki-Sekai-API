@@ -24,12 +24,17 @@ jobs:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
 
-    - name: Get version
+    - name: Compute version from tag (fallback to config)
       id: version
       run: |
-        VERSION=$(grep 'var Version' config/config.go | cut -d'"' -f2)
-        echo "version=$VERSION" >> $GITHUB_OUTPUT
-        echo "Version: $VERSION"
+        RAW="${GITHUB_REF_NAME}"
+        CLEAN="${RAW#v}"
+        if [ -z "$CLEAN" ] || [ "$CLEAN" = "$RAW" ] && [ -z "$RAW" ]; then
+          CLEAN=$(grep -Eo 'var[[:space:]]+Version[[:space:]]*=[[:space:]]*"[^"]*"' config/config.go | cut -d'"' -f2 || true)
+        fi
+        echo "raw=$RAW" >> $GITHUB_OUTPUT
+        echo "version=$CLEAN" >> $GITHUB_OUTPUT
+        echo "Using version: ${CLEAN:-unknown} (tag: ${RAW:-none})
 
     - name: Get repository info
       id: repo

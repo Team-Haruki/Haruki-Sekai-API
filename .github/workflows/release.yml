@@ -82,6 +82,11 @@ jobs:
   release:
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    concurrency:
+      group: release-${{ github.ref_name }}
+      cancel-in-progress: false
     if: github.event_name == 'push' && contains(github.ref, 'refs/tags/')
 
     steps:
@@ -90,20 +95,22 @@ jobs:
       with:
         path: artifacts
 
-    - name: Create Release
-      id: create_release
-      uses: actions/create-release@v1
+    - name: Create or update Release (idempotent)
       env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        tag_name: ${{ github.ref_name }}
-        release_name: Release ${{ github.ref_name }}
-        draft: false
-        prerelease: false
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        TAG="${GITHUB_REF_NAME}"
+        TITLE="Release ${TAG}"
+        # If the release exists, edit it; otherwise create it.
+        if gh release view "$TAG" >/dev/null 2>&1; then
+          gh release edit "$TAG" --title "$TITLE" --latest
+        else
+          gh release create "$TAG" --title "$TITLE" --generate-notes --latest
+        fi
 
-    - name: Upload Release Assets
-      uses: softprops/action-gh-release@v1
-      with:
-        files: artifacts/**/*
+    - name: Upload Release Assets (overwrite)
       env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        TAG="${GITHUB_REF_NAME}"
+        gh release upload "$TAG" artifacts/**/* --clobber
