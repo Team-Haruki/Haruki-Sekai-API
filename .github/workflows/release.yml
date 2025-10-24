@@ -69,9 +69,9 @@ jobs:
         
         cd dist
         if [ "$GOOS" = "windows" ]; then
-          zip "${{ matrix.name }}.zip" "$BINARY_NAME"
+          zip "HarukiSekaiAPI-${{ matrix.name }}.zip" "$BINARY_NAME"
         else
-          tar -czf "${{ matrix.name }}.tar.gz" "$BINARY_NAME"
+          tar -czf "HarukiSekaiAPI-${{ matrix.name }}.tar.gz" "$BINARY_NAME"
         fi
 
     - name: Upload artifacts
