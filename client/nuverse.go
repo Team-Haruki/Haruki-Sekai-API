@@ -28,6 +28,7 @@ func RestoreDict(arrayData []interface{}, keyStructure []interface{}) *orderedma
 	result := orderedmap.New()
 	result.SetEscapeHTML(false)
 
+	// 辅助函数：处理 __tuple__ 逻辑
 	handleTuple := func(second interface{}, i int) *orderedmap.OrderedMap {
 		var tupleKeys []interface{}
 		switch s := second.(type) {
@@ -233,13 +234,13 @@ func RestoreCompactData(data *orderedmap.OrderedMap) []*orderedmap.OrderedMap {
 							order[i] = i
 						}
 						sort.Slice(order, func(i, j int) bool { return idx[order[i]] < idx[order[j]] })
-						kMax := -1
+						max := -1
 						for _, n := range idx {
-							if n > kMax {
-								kMax = n
+							if n > max {
+								max = n
 							}
 						}
-						enumSlice = make([]interface{}, kMax+1)
+						enumSlice = make([]interface{}, max+1)
 						for _, oi := range order {
 							k := keys[oi]
 							v, _ := e.Get(k)
