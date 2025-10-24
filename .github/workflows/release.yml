@@ -60,7 +60,8 @@ jobs:
         
         mkdir -p dist
         
-        go build -ldflags "-X haruki-sekai-api/config.Version=${{ steps.version.outputs.version }}" \
+        MODULE=$(go list -m)
+        go build -ldflags "-s -w -X ${MODULE}/config.Version=${{ steps.version.outputs.version }}" \
                  -o "dist/${BINARY_NAME}" \
                  -trimpath \
                  -tags netgo \
@@ -90,6 +91,11 @@ jobs:
     if: github.event_name == 'push' && contains(github.ref, 'refs/tags/')
 
     steps:
+    - name: Checkout repo
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
     - name: Download all artifacts
       uses: actions/download-artifact@v4
       with:
@@ -101,11 +107,11 @@ jobs:
       run: |
         TAG="${GITHUB_REF_NAME}"
         TITLE="Release ${TAG}"
-        # If the release exists, edit it; otherwise create it.
-        if gh release view "$TAG" >/dev/null 2>&1; then
-          gh release edit "$TAG" --title "$TITLE" --latest
+        REPO="${GITHUB_REPOSITORY}"
+        if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+          gh release edit "$TAG" --repo "$REPO" --title "$TITLE" --latest
         else
-          gh release create "$TAG" --title "$TITLE" --generate-notes --latest
+          gh release create "$TAG" --repo "$REPO" --title "$TITLE" --generate-notes --latest
         fi
 
     - name: Upload Release Assets (overwrite)
@@ -113,4 +119,5 @@ jobs:
         GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: |
         TAG="${GITHUB_REF_NAME}"
-        gh release upload "$TAG" artifacts/**/* --clobber
+        REPO="${GITHUB_REPOSITORY}"
+        gh release upload "$TAG" artifacts/**/* --repo "$REPO" --clobber
