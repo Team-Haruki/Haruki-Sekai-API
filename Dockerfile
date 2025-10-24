@@ -17,7 +17,6 @@ RUN apk --no-cache add ca-certificates tzdata
 WORKDIR /app
 COPY --from=builder /app/haruki-sekai-api .
 COPY --from=builder /app/Data ./Data
-COPY --from=builder /app/haruki-sekai-configs.yaml .
 RUN mkdir -p logs
 EXPOSE 9999
 ENV TZ=Asia/Shanghai

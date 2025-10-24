@@ -27,6 +27,8 @@ jobs:
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
 
     - name: Set up Go
       uses: actions/setup-go@v4
@@ -36,7 +38,12 @@ jobs:
     - name: Get version
       id: version
       run: |
-        VERSION=$(grep 'var Version' config/config.go | cut -d'"' -f2)
+        # Prefer the pushed tag (refs/tags/vX.Y.Z -> vX.Y.Z)
+        VERSION="${GITHUB_REF##*/}"
+        # Fallback to the source placeholder if not running for a tag
+        if [ -z "$VERSION" ] || [ "$VERSION" = "refs/tags/" ]; then
+          VERSION=$(grep 'var Version' config/config.go | cut -d'"' -f2)
+        fi
         echo "version=$VERSION" >> $GITHUB_OUTPUT
         echo "Version: $VERSION"
 
@@ -50,6 +57,8 @@ jobs:
         if [ "$GOOS" = "windows" ]; then
           BINARY_NAME="${BINARY_NAME}.exe"
         fi
+        
+        mkdir -p dist
         
         go build -ldflags "-X haruki-sekai-api/config.Version=${{ steps.version.outputs.version }}" \
                  -o "dist/${BINARY_NAME}" \
@@ -87,8 +96,8 @@ jobs:
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
-        tag_name: ${{ github.ref }}
-        release_name: Release ${{ github.ref }}
+        tag_name: ${{ github.ref_name }}
+        release_name: Release ${{ github.ref_name }}
         draft: false
         prerelease: false
 
