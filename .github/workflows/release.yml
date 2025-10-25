@@ -25,60 +25,60 @@ jobs:
             name: macos-arm64
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
 
-      - name: Set up Go
-        uses: actions/setup-go@v4
-        with:
-          go-version: '1.25.3'
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: '1.25.3'
 
-      - name: Get version
-        id: version
-        run: |
-          # Prefer the pushed tag (refs/tags/vX.Y.Z -> vX.Y.Z)
-          VERSION="${GITHUB_REF##*/}"
-          # Fallback to the source placeholder if not running for a tag
-          if [ -z "$VERSION" ] || [ "$VERSION" = "refs/tags/" ]; then
-            VERSION=$(grep 'var Version' config/config.go | cut -d'"' -f2)
-          fi
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
-          echo "Version: $VERSION"
+    - name: Get version
+      id: version
+      run: |
+        # Prefer the pushed tag (refs/tags/vX.Y.Z -> vX.Y.Z)
+        VERSION="${GITHUB_REF##*/}"
+        # Fallback to the source placeholder if not running for a tag
+        if [ -z "$VERSION" ] || [ "$VERSION" = "refs/tags/" ]; then
+          VERSION=$(grep 'var Version' config/config.go | cut -d'"' -f2)
+        fi
+        echo "version=$VERSION" >> $GITHUB_OUTPUT
+        echo "Version: $VERSION"
 
-      - name: Build for ${{ matrix.name }}
-        env:
-          GOOS: ${{ matrix.os == 'windows-latest' && 'windows' || matrix.os == 'ubuntu-latest' && 'linux' || 'darwin' }}
-          GOARCH: ${{ matrix.arch }}
-          CGO_ENABLED: 0
-        run: |
-          BINARY_NAME="HarukiSekaiAPI"
-          if [ "$GOOS" = "windows" ]; then
-            BINARY_NAME="${BINARY_NAME}.exe"
-          fi
-          
-          mkdir -p dist
-          
-          MODULE=$(go list -m)
-          go build -ldflags "-s -w -X ${MODULE}/config.Version=${{ steps.version.outputs.version }}" \
-                   -o "dist/${BINARY_NAME}" \
-                   -trimpath \
-                   -tags netgo \
-                   .
-          
-          cd dist
-          if [ "$GOOS" = "windows" ]; then
-            zip "HarukiSekaiAPI-${{ matrix.name }}.zip" "$BINARY_NAME"
-          else
-            tar -czf "HarukiSekaiAPI-${{ matrix.name }}.tar.gz" "$BINARY_NAME"
-          fi
+    - name: Build for ${{ matrix.name }}
+      env:
+        GOOS: ${{ matrix.os == 'windows-latest' && 'windows' || matrix.os == 'ubuntu-latest' && 'linux' || 'darwin' }}
+        GOARCH: ${{ matrix.arch }}
+        CGO_ENABLED: 0
+      run: |
+        BINARY_NAME="HarukiSekaiAPI"
+        if [ "$GOOS" = "windows" ]; then
+          BINARY_NAME="${BINARY_NAME}.exe"
+        fi
+        
+        mkdir -p dist
+        
+        MODULE=$(go list -m)
+        go build -ldflags "-s -w -X ${MODULE}/config.Version=${{ steps.version.outputs.version }}" \
+                 -o "dist/${BINARY_NAME}" \
+                 -trimpath \
+                 -tags netgo \
+                 .
+        
+        cd dist
+        if [ "$GOOS" = "windows" ]; then
+          zip "HarukiSekaiAPI-${{ matrix.name }}.zip" "$BINARY_NAME"
+        else
+          tar -czf "HarukiSekaiAPI-${{ matrix.name }}.tar.gz" "$BINARY_NAME"
+        fi
 
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.name }}
-          path: dist/${{ matrix.name }}.*
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ matrix.name }}
+        path: dist/HarukiSekaiAPI-${{ matrix.name }}.*
 
   release:
     needs: build
@@ -91,36 +91,33 @@ jobs:
     if: github.event_name == 'push' && contains(github.ref, 'refs/tags/')
 
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+    - name: Checkout repo
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
 
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: artifacts
+    - name: Download all artifacts
+      uses: actions/download-artifact@v4
+      with:
+        path: artifacts
 
-      - name: Create or update Release (idempotent)
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          TAG="${GITHUB_REF_NAME}"
-          TITLE="Release ${TAG}"
-          REPO="${GITHUB_REPOSITORY}"
-          if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
-            gh release edit "$TAG" --repo "$REPO" --title "$TITLE" --latest
-          else
-            gh release create "$TAG" --repo "$REPO" --title "$TITLE" --generate-notes --latest
-          fi
+    - name: Create or update Release (idempotent)
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        TAG="${GITHUB_REF_NAME}"
+        TITLE="Release ${TAG}"
+        REPO="${GITHUB_REPOSITORY}"
+        if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+          gh release edit "$TAG" --repo "$REPO" --title "$TITLE" --latest
+        else
+          gh release create "$TAG" --repo "$REPO" --title "$TITLE" --generate-notes --latest
+        fi
 
-      - name: Upload Release Assets (overwrite)
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -e
-          TAG="${GITHUB_REF_NAME}"
-          REPO="${GITHUB_REPOSITORY}"
-          echo "Uploading release assets..."
-          ls -R artifacts || true
-          gh release upload "$TAG" artifacts/*/* --repo "$REPO" --clobber
+    - name: Upload Release Assets (overwrite)
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        TAG="${GITHUB_REF_NAME}"
+        REPO="${GITHUB_REPOSITORY}"
+        gh release upload "$TAG" artifacts/**/* --repo "$REPO" --clobber
