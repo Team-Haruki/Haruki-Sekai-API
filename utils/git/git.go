@@ -1,8 +1,10 @@
 package git
 
 import (
+	"crypto/tls"
 	"fmt"
 	harukiLogger "haruki-sekai-api/utils/logger"
+	"net/http"
 	"net/url"
 	"os"
 	"strings"
@@ -11,7 +13,7 @@ import (
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/config"
 	"github.com/go-git/go-git/v5/plumbing/object"
-	"github.com/go-git/go-git/v5/plumbing/transport/http"
+	githttp "github.com/go-git/go-git/v5/plumbing/transport/http"
 )
 
 type HarukiGitUpdater struct {
@@ -111,18 +113,52 @@ func (g *HarukiGitUpdater) PushRemote(repo *git.Repository, dataVersion string) 
 		return err
 	}
 
-	pushOpts := &git.PushOptions{
-		RemoteName: "origin",
-		Auth: &http.BasicAuth{
+	var auth githttp.AuthMethod = &githttp.BasicAuth{
+		Username: g.User,
+		Password: g.Password,
+	}
+
+	if g.Proxy != "" {
+		proxyURL, err := url.Parse(g.Proxy)
+		if err != nil {
+			logger.Errorf("Failed to parse proxy URL: %v", err)
+			return err
+		}
+
+		customTransport := &http.Transport{
+			Proxy: http.ProxyURL(proxyURL),
+			TLSClientConfig: &tls.Config{
+				InsecureSkipVerify: false,
+			},
+		}
+
+		customClient := &http.Client{
+			Transport: customTransport,
+		}
+
+		auth = &githttp.BasicAuth{
 			Username: g.User,
 			Password: g.Password,
-		},
-		RefSpecs: []config.RefSpec{config.RefSpec(fmt.Sprintf("refs/heads/%s:refs/heads/%s", branchName, branchName))},
-		Progress: os.Stdout,
+		}
+
+		_ = os.Setenv("HTTP_PROXY", g.Proxy)
+		_ = os.Setenv("HTTPS_PROXY", g.Proxy)
+
+		logger.Infof("Using proxy: %s", g.Proxy)
+
+		originalClient := http.DefaultClient
+		http.DefaultClient = customClient
+
+		defer func() {
+			http.DefaultClient = originalClient
+		}()
 	}
-	if g.Proxy != "" {
-		os.Setenv("HTTP_PROXY", g.Proxy)
-		os.Setenv("HTTPS_PROXY", g.Proxy)
+
+	pushOpts := &git.PushOptions{
+		RemoteName: "origin",
+		Auth:       auth,
+		RefSpecs:   []config.RefSpec{config.RefSpec(fmt.Sprintf("refs/heads/%s:refs/heads/%s", branchName, branchName))},
+		Progress:   os.Stdout,
 	}
 	err = repo.Push(pushOpts)
 	if err != nil && !strings.Contains(err.Error(), "already up-to-date") {
