@@ -93,10 +93,11 @@ func (c *SekaiClient) Login(ctx context.Context) (*utils.HarukiSekaiLoginRespons
 			}
 			c.Account.SetUserId(uidStr)
 		}
-
+		c.HeaderLock.Lock()
 		c.Headers["X-Session-Token"] = retData.SessionToken
 		c.Headers["X-Data-Version"] = retData.DataVersion
 		c.Headers["X-Asset-Version"] = retData.AssetVersion
+		c.HeaderLock.Unlock()
 
 		c.Logger.Infof("Login successfully, User ID: %s", c.Account.GetUserId())
 		return retData, nil
