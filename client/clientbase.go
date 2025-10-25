@@ -7,6 +7,7 @@ import (
 	"haruki-sekai-api/utils"
 	"haruki-sekai-api/utils/logger"
 	"net"
+	"net/http"
 	"strings"
 	"sync"
 	"time"
@@ -26,7 +27,8 @@ type SekaiClient struct {
 	Proxy         string
 	Logger        *logger.Logger
 	Cryptor       *SekaiCryptor
-	Lock          *sync.Mutex
+	APILock       *sync.Mutex
+	HeaderLock    *sync.Mutex
 	Session       *resty.Client
 	Headers       map[string]string
 }
@@ -52,7 +54,8 @@ func NewSekaiClient(
 		Proxy:         proxy,
 		Cryptor:       cryptor,
 		Headers:       serverConfig.Headers,
-		Lock:          &sync.Mutex{},
+		APILock:       &sync.Mutex{},
+		HeaderLock:    &sync.Mutex{},
 	}
 
 }
@@ -73,6 +76,7 @@ func (c *SekaiClient) ParseVersion() error {
 	if err := c.VersionHelper.GetAppVersion(); err != nil {
 		return err
 	}
+	c.HeaderLock.Lock()
 	if c.Headers == nil {
 		c.Headers = map[string]string{}
 	}
@@ -80,18 +84,21 @@ func (c *SekaiClient) ParseVersion() error {
 	c.Headers["X-Data-Version"] = c.VersionHelper.DataVersion
 	c.Headers["X-Asset-Version"] = c.VersionHelper.AssetVersion
 	c.Headers["X-App-Hash"] = c.VersionHelper.AppHash
+	c.HeaderLock.Unlock()
 	return nil
 }
 
 func (c *SekaiClient) Init() error {
 	c.Session = resty.New()
 	c.Session.
-		SetRetryCount(4).
-		SetRetryWaitTime(time.Second * 1)
-
-	for k, v := range c.ServerConfig.Headers {
-		c.Session.SetHeader(k, v)
-	}
+		SetRetryCount(0).
+		SetTransport(&http.Transport{
+			MaxIdleConns:        100,
+			MaxIdleConnsPerHost: 20,
+			IdleConnTimeout:     90 * time.Second,
+			TLSHandshakeTimeout: 5 * time.Second,
+			DisableKeepAlives:   false,
+		})
 
 	if c.Proxy != "" {
 		c.Session.SetProxy(c.Proxy)
@@ -203,7 +210,9 @@ func (c *SekaiClient) CallAPI(ctx context.Context, path string, method string, d
 			}
 		} else {
 			if v := response.Header().Get("X-Session-Token"); v != "" {
+				c.HeaderLock.Lock()
 				c.Headers["X-Session-Token"] = v
+				c.HeaderLock.Unlock()
 			}
 
 			if _, respErr := c.handleResponse(*response); respErr != nil {

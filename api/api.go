@@ -32,7 +32,7 @@ func proxyGameAPI(c *fiber.Ctx, path string, params map[string]any) error {
 	if err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	ctx, cancel := context.WithTimeout(c.Context(), 45*time.Second)
 	defer cancel()
 	data, status, _ := mgr.GetGameAPI(ctx, path, params)
 	return c.Status(status).JSON(data)

@@ -309,11 +309,11 @@ func (mgr *SekaiClientManager) GetGameAPI(ctx context.Context, path string, para
 			return resp, http.StatusInternalServerError, nil
 		}
 
-		client.Lock.Lock()
+		client.APILock.Lock()
 
 		response, err := client.Get(ctx, path, params)
 		if err != nil {
-			client.Lock.Unlock()
+			client.APILock.Unlock()
 			resp := HarukiSekaiAPIFailedResponse{
 				Result:  "failed",
 				Status:  http.StatusInternalServerError,
@@ -324,7 +324,7 @@ func (mgr *SekaiClientManager) GetGameAPI(ctx context.Context, path string, para
 
 		statusCode, err := ParseSekaiApiHttpStatus(response.StatusCode())
 		if err != nil {
-			client.Lock.Unlock()
+			client.APILock.Unlock()
 			resp := HarukiSekaiAPIFailedResponse{
 				Result:  "failed",
 				Status:  response.StatusCode(),
@@ -337,7 +337,7 @@ func (mgr *SekaiClientManager) GetGameAPI(ctx context.Context, path string, para
 		case SekaiApiHttpStatusGameUpgrade:
 			mgr.Logger.Warnf("%s Server upgrade required, re-parsing...", strings.ToUpper(string(mgr.Server)))
 			if err := mgr.parseVersion(); err != nil {
-				client.Lock.Unlock()
+				client.APILock.Unlock()
 				resp := HarukiSekaiAPIFailedResponse{
 					Result:  "failed",
 					Status:  response.StatusCode(),
@@ -347,13 +347,13 @@ func (mgr *SekaiClientManager) GetGameAPI(ctx context.Context, path string, para
 			}
 			retryCount++
 			time.Sleep(retryDelay)
-			client.Lock.Unlock()
+			client.APILock.Unlock()
 			continue
 
 		case SekaiApiHttpStatusSessionError:
 			mgr.Logger.Warnf("%s Server cookies expired, re-parsing...", strings.ToUpper(string(mgr.Server)))
 			if err := mgr.parseCookies(ctx); err != nil {
-				client.Lock.Unlock()
+				client.APILock.Unlock()
 				resp := HarukiSekaiAPIFailedResponse{
 					Result:  "failed",
 					Status:  http.StatusForbidden,
@@ -363,11 +363,11 @@ func (mgr *SekaiClientManager) GetGameAPI(ctx context.Context, path string, para
 			}
 			retryCount++
 			time.Sleep(retryDelay)
-			client.Lock.Unlock()
+			client.APILock.Unlock()
 			continue
 
 		case SekaiApiHttpStatusUnderMaintenance:
-			client.Lock.Unlock()
+			client.APILock.Unlock()
 			resp := HarukiSekaiAPIFailedResponse{
 				Result:  "failed",
 				Status:  http.StatusServiceUnavailable,
@@ -377,7 +377,7 @@ func (mgr *SekaiClientManager) GetGameAPI(ctx context.Context, path string, para
 
 		case SekaiApiHttpStatusOk:
 			result, err := client.handleResponse(*response)
-			client.Lock.Unlock()
+			client.APILock.Unlock()
 			if err != nil {
 				resp := HarukiSekaiAPIFailedResponse{
 					Result:  "failed",
@@ -392,7 +392,7 @@ func (mgr *SekaiClientManager) GetGameAPI(ctx context.Context, path string, para
 			return result, response.StatusCode(), nil
 
 		default:
-			client.Lock.Unlock()
+			client.APILock.Unlock()
 			resp := HarukiSekaiAPIFailedResponse{
 				Result:  "failed",
 				Status:  response.StatusCode(),
