@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/bytedance/sonic"
-	"github.com/go-git/go-git/v5"
+	"github.com/go-git/go-git/v6"
 	"github.com/go-resty/resty/v2"
 	"github.com/iancoleman/orderedmap"
 )

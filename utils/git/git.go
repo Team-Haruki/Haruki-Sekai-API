@@ -10,10 +10,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/go-git/go-git/v5"
-	"github.com/go-git/go-git/v5/config"
-	"github.com/go-git/go-git/v5/plumbing/object"
-	githttp "github.com/go-git/go-git/v5/plumbing/transport/http"
+	"github.com/go-git/go-git/v6"
+	"github.com/go-git/go-git/v6/config"
+	"github.com/go-git/go-git/v6/plumbing"
+	"github.com/go-git/go-git/v6/plumbing/object"
+	"github.com/go-git/go-git/v6/plumbing/transport"
+	githttp "github.com/go-git/go-git/v6/plumbing/transport/http"
 )
 
 type HarukiGitUpdater struct {
@@ -51,30 +53,60 @@ func (g *HarukiGitUpdater) PushRemote(repo *git.Repository, dataVersion string) 
 		logger.Errorf("Failed to get status: %v", err)
 		return err
 	}
-	if status.IsClean() {
-		logger.Infof("No changes to commit")
+
+	hasUncommittedChanges := !status.IsClean()
+	hasUnpushedCommits := false
+	if !hasUncommittedChanges {
+		headRef, err := repo.Head()
+		if err != nil {
+			logger.Errorf("Failed to get HEAD: %v", err)
+			return err
+		}
+
+		remoteRefName := plumbing.NewRemoteReferenceName("origin", headRef.Name().Short())
+		remoteRef, err := repo.Reference(remoteRefName, true)
+		if err != nil {
+			logger.Infof("Remote branch %s not found, assuming there are commits to push", remoteRefName)
+			hasUnpushedCommits = true
+		} else {
+			localHash := headRef.Hash()
+			remoteHash := remoteRef.Hash()
+			if localHash != remoteHash {
+				hasUnpushedCommits = true
+				logger.Infof("Found unpushed commits: local %s vs remote %s", localHash.String(), remoteHash.String())
+			}
+		}
+	}
+
+	if !hasUncommittedChanges && !hasUnpushedCommits {
+		logger.Infof("No changes to commit or push")
 		return nil
 	}
 
-	commitMsg := fmt.Sprintf("Update data version %s", dataVersion)
-	commit, err := w.Commit(commitMsg, &git.CommitOptions{
-		Author: &object.Signature{
-			Name:  "Haruki Sekai Master Update Bot",
-			Email: "no-reply@seiunx.com",
-			When:  time.Now(),
-		},
-		Committer: &object.Signature{
-			Name:  g.User,
-			Email: g.Email,
-			When:  time.Now(),
-		},
-		All: true,
-	})
-	if err != nil {
-		logger.Errorf("Failed to commit: %v", err)
-		return err
+	var commit plumbing.Hash
+	if hasUncommittedChanges {
+		commitMsg := fmt.Sprintf("Update data version %s", dataVersion)
+		commit, err = w.Commit(commitMsg, &git.CommitOptions{
+			Author: &object.Signature{
+				Name:  "Haruki Sekai Master Update Bot",
+				Email: "no-reply@seiunx.com",
+				When:  time.Now(),
+			},
+			Committer: &object.Signature{
+				Name:  g.User,
+				Email: g.Email,
+				When:  time.Now(),
+			},
+			All: true,
+		})
+		if err != nil {
+			logger.Errorf("Failed to commit: %v", err)
+			return err
+		}
+		logger.Infof("Committed changes: %v", commit)
+	} else {
+		logger.Infof("No uncommitted changes, pushing existing commits")
 	}
-	logger.Infof("Committed changes: %v", commit)
 
 	headRef, err := repo.Head()
 	if err != nil {
@@ -113,11 +145,12 @@ func (g *HarukiGitUpdater) PushRemote(repo *git.Repository, dataVersion string) 
 		return err
 	}
 
-	var auth githttp.AuthMethod = &githttp.BasicAuth{
+	auth := &githttp.BasicAuth{
 		Username: g.User,
 		Password: g.Password,
 	}
 
+	var originalHTTPSTransport, originalHTTPTransport transport.Transport
 	if g.Proxy != "" {
 		proxyURL, err := url.Parse(g.Proxy)
 		if err != nil {
@@ -125,33 +158,66 @@ func (g *HarukiGitUpdater) PushRemote(repo *git.Repository, dataVersion string) 
 			return err
 		}
 
+		logger.Infof("Configuring HTTP proxy: %s", g.Proxy)
+
 		customTransport := &http.Transport{
 			Proxy: http.ProxyURL(proxyURL),
 			TLSClientConfig: &tls.Config{
 				InsecureSkipVerify: false,
 			},
+			TLSHandshakeTimeout:   30 * time.Second,
+			ResponseHeaderTimeout: 60 * time.Second,
+			IdleConnTimeout:       90 * time.Second,
+			ExpectContinueTimeout: 1 * time.Second,
+			MaxIdleConns:          10,
+			MaxIdleConnsPerHost:   5,
 		}
 
 		customClient := &http.Client{
 			Transport: customTransport,
+			Timeout:   180 * time.Second,
 		}
-
-		auth = &githttp.BasicAuth{
-			Username: g.User,
-			Password: g.Password,
-		}
+		originalHTTPSTransport, _ = transport.Get("https")
+		originalHTTPTransport, _ = transport.Get("http")
+		gitTransport := githttp.NewTransport(&githttp.TransportOptions{
+			Client: customClient,
+		})
+		transport.Register("https", gitTransport)
+		transport.Register("http", gitTransport)
+		originalHTTPProxy := os.Getenv("HTTP_PROXY")
+		originalHTTPSProxy := os.Getenv("HTTPS_PROXY")
+		originalNoProxy := os.Getenv("NO_PROXY")
 
 		_ = os.Setenv("HTTP_PROXY", g.Proxy)
 		_ = os.Setenv("HTTPS_PROXY", g.Proxy)
-
-		logger.Infof("Using proxy: %s", g.Proxy)
-
-		originalClient := http.DefaultClient
-		http.DefaultClient = customClient
+		_ = os.Setenv("NO_PROXY", "localhost,127.0.0.1,::1")
 
 		defer func() {
-			http.DefaultClient = originalClient
+			if originalHTTPSTransport != nil {
+				transport.Register("https", originalHTTPSTransport)
+			}
+			if originalHTTPTransport != nil {
+				transport.Register("http", originalHTTPTransport)
+			}
+
+			if originalHTTPProxy == "" {
+				_ = os.Unsetenv("HTTP_PROXY")
+			} else {
+				_ = os.Setenv("HTTP_PROXY", originalHTTPProxy)
+			}
+			if originalHTTPSProxy == "" {
+				_ = os.Unsetenv("HTTPS_PROXY")
+			} else {
+				_ = os.Setenv("HTTPS_PROXY", originalHTTPSProxy)
+			}
+			if originalNoProxy == "" {
+				_ = os.Unsetenv("NO_PROXY")
+			} else {
+				_ = os.Setenv("NO_PROXY", originalNoProxy)
+			}
 		}()
+
+		logger.Infof("Proxy transport registered successfully: %s", g.Proxy)
 	}
 
 	pushOpts := &git.PushOptions{
