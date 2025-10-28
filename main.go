@@ -25,7 +25,9 @@ func main() {
 			os.Exit(1)
 		}
 		loggerWriter = io.MultiWriter(os.Stdout, logFile)
-		defer logFile.Close()
+		defer func(logFile *os.File) {
+			_ = logFile.Close()
+		}(logFile)
 	}
 	mainLogger := harukiLogger.NewLogger("Main", config.Cfg.Backend.LogLevel, loggerWriter)
 	mainLogger.Infof("========================= Haruki Sekai API %s =========================", config.Version)
@@ -46,7 +48,9 @@ func main() {
 				mainLogger.Errorf("failed to open access log file: %v", err)
 				os.Exit(1)
 			}
-			defer accessLogFile.Close()
+			defer func(accessLogFile *os.File) {
+				_ = accessLogFile.Close()
+			}(accessLogFile)
 			logCfg.Output = accessLogFile
 		}
 		app.Use(logger.New(logCfg))

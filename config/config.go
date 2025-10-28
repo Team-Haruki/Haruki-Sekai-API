@@ -82,7 +82,9 @@ func init() {
 		logger.Errorf("Failed to open config file: %v", err)
 		os.Exit(1)
 	}
-	defer f.Close()
+	defer func(f *os.File) {
+		_ = f.Close()
+	}(f)
 
 	decoder := yaml.NewDecoder(f)
 	if err := decoder.Decode(&Cfg); err != nil {

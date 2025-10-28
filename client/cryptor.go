@@ -82,7 +82,7 @@ func (c *SekaiCryptor) Pack(content any) ([]byte, error) {
 var (
 	ErrEmptyContent     = errors.New("content cannot be empty")
 	ErrInvalidBlockSize = errors.New("content length is not a multiple of AES block size")
-	ErrDecryptionFailed = errors.New("failed to decrypt content")
+	// ErrDecryptionFailed = errors.New("failed to decrypt content")
 )
 
 var bytesPool = sync.Pool{
