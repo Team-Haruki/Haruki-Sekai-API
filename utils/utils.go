@@ -48,7 +48,10 @@ func GetInt(om *orderedmap.OrderedMap, key string) int {
 			return int(t)
 		case string:
 			var n int
-			fmt.Sscanf(t, "%d", &n)
+			_, err := fmt.Sscanf(t, "%d", &n)
+			if err != nil {
+				return 0
+			}
 			return n
 		}
 	}

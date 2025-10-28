@@ -5,16 +5,11 @@ import (
 	"encoding/base64"
 	"fmt"
 	"haruki-sekai-api/utils"
-	"net/url"
 	"strconv"
 	"strings"
 	"time"
 
-	"sync"
-
 	"github.com/google/uuid"
-	"github.com/iancoleman/orderedmap"
-	"golang.org/x/sync/errgroup"
 )
 
 func (c *SekaiClient) Login(ctx context.Context) (*utils.HarukiSekaiLoginResponse, error) {
@@ -163,119 +158,4 @@ func (c *SekaiClient) GetNuverseMySekaiImage(userID, index string) ([]byte, erro
 		return nil, fmt.Errorf("decode thumbnail base64 failed: %w", err)
 	}
 	return img, nil
-}
-
-func (c *SekaiClient) GetCPMasterData(paths []string) (*orderedmap.OrderedMap, error) {
-	start := time.Now()
-	master := orderedmap.New()
-	master.SetEscapeHTML(false)
-	ctx := context.Background()
-
-	var mu sync.Mutex
-	eg, egCtx := errgroup.WithContext(ctx)
-	sem := make(chan struct{}, 12)
-
-	for _, rawPath := range paths {
-		rp := rawPath
-		if rp == "" {
-			continue
-		}
-		eg.Go(func() error {
-			select {
-			case sem <- struct{}{}:
-				defer func() { <-sem }()
-			case <-egCtx.Done():
-				return egCtx.Err()
-			}
-
-			p := rp
-			if !strings.HasPrefix(p, "/") {
-				p = "/" + p
-			}
-
-			resp, err := c.Get(egCtx, p, nil)
-			if err != nil {
-				return err
-			}
-			om, err := c.Cryptor.UnpackOrdered(resp.Body())
-			if err != nil {
-				return fmt.Errorf("unpack master part failed: path=%s, err=%w", rp, err)
-			}
-			if om == nil {
-				return fmt.Errorf("unexpected master data: nil ordered map at path %s", rp)
-			}
-
-			mu.Lock()
-			for _, k := range om.Keys() {
-				if v, ok := om.Get(k); ok {
-					master.Set(k, v)
-				}
-			}
-			mu.Unlock()
-			return nil
-		})
-	}
-
-	if err := eg.Wait(); err != nil {
-		return nil, err
-	}
-	c.Logger.Debugf("GetCPMasterData: fetched %d paths (elapsed=%s)", len(paths), time.Since(start))
-	return master, nil
-}
-
-func (c *SekaiClient) GetNuverseMasterData(cdnVersion int) (*orderedmap.OrderedMap, error) {
-	start := time.Now()
-	ctx := context.Background()
-
-	u := fmt.Sprintf("%s/master-data-%d.info", c.ServerConfig.NuverseMasterDataURL, cdnVersion)
-	parsed, err := url.Parse(u)
-	if err != nil {
-		c.Logger.Errorf("GetNuverseMasterData: url parse error: %v", err)
-		return nil, err
-	}
-	host := parsed.Hostname()
-
-	cli := *c.Session
-	if c.Proxy != "" {
-		cli.SetProxy(c.Proxy)
-	}
-	req := *cli.R()
-	req.SetContext(ctx)
-	if host != "" {
-		req.SetHeader("Host", host)
-	}
-
-	resp, err := req.Get(u)
-	if err != nil {
-		c.Logger.Errorf("GetNuverseMasterData: request error: %v", err)
-		return nil, err
-	}
-	if resp == nil {
-		c.Logger.Errorf("GetNuverseMasterData: nil response")
-		return nil, fmt.Errorf("nil response")
-	}
-
-	status := resp.StatusCode()
-	body := resp.Body()
-	if status < 200 || status >= 300 {
-		c.Logger.Warnf("GetNuverseMasterData: non-success status=%d", status)
-	}
-
-	masterOM, err := c.Cryptor.UnpackOrdered(body)
-	if err != nil {
-		c.Logger.Errorf("GetNuverseMasterData: unpack ordered failed: %v", err)
-		return nil, fmt.Errorf("unpack nuverse master info failed: %w", err)
-	}
-	if masterOM == nil {
-		c.Logger.Errorf("GetNuverseMasterData: unpack returned nil ordered map")
-		return nil, fmt.Errorf("unexpected nuverse master info: nil ordered map")
-	}
-
-	restored, err := NuverseMasterRestorer(masterOM, c.ServerConfig.NuverseStructureFilePath)
-	if err != nil {
-		c.Logger.Errorf("GetNuverseMasterData: NuverseMasterRestorer error: %v", err)
-		return nil, err
-	}
-	c.Logger.Debugf("GetNuverseMasterData: restored keys=%d (elapsed=%s)", len(restored.Keys()), time.Since(start))
-	return restored, nil
 }

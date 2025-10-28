@@ -17,12 +17,6 @@ type SekaiAccountInterface interface {
 	Dump() ([]byte, error)
 }
 
-func NewSekaiAccount[T SekaiAccountInterface](userId string, deviceId string, token string) T {
-	var inst T
-	inst.SetupAccount(userId, deviceId, token)
-	return inst
-}
-
 type SekaiAccountCommonBase struct {
 	UserId   string `json:"userId"`
 	DeviceID string `json:"deviceId,omitempty"`

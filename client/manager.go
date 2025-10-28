@@ -2,6 +2,7 @@ package client
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"haruki-sekai-api/utils"
 	"haruki-sekai-api/utils/git"
@@ -308,18 +309,40 @@ func (mgr *SekaiClientManager) GetGameAPI(ctx context.Context, path string, para
 			}
 			return resp, http.StatusInternalServerError, nil
 		}
-
 		client.APILock.Lock()
-
-		response, err := client.Get(ctx, path, params)
-		if err != nil {
+		response, getErr := client.Get(ctx, path, params)
+		if getErr != nil || response == nil {
 			client.APILock.Unlock()
+
+			var ue *UpgradeRequiredError
+			if errors.As(getErr, &ue) {
+				mgr.Logger.Warnf("%s Server upgrade required, re-parsing version...", strings.ToUpper(string(mgr.Server)))
+				if err := mgr.parseVersion(); err != nil {
+					resp := HarukiSekaiAPIFailedResponse{
+						Result:  "failed",
+						Status:  http.StatusServiceUnavailable,
+						Message: fmt.Sprintf("Failed to parse version after upgrade: %v", err),
+					}
+					return resp, http.StatusServiceUnavailable, err
+				}
+				retryCount++
+				time.Sleep(retryDelay)
+				continue
+			}
+
 			resp := HarukiSekaiAPIFailedResponse{
 				Result:  "failed",
 				Status:  http.StatusInternalServerError,
-				Message: err.Error(),
+				Message: fmt.Sprintf("Failed to get response: %v", getErr),
 			}
-			return resp, http.StatusInternalServerError, err
+
+			if retryCount >= maxRetries-1 {
+				return resp, http.StatusInternalServerError, getErr
+			}
+
+			retryCount++
+			time.Sleep(retryDelay)
+			continue
 		}
 
 		statusCode, err := ParseSekaiApiHttpStatus(response.StatusCode())
@@ -396,7 +419,7 @@ func (mgr *SekaiClientManager) GetGameAPI(ctx context.Context, path string, para
 			resp := HarukiSekaiAPIFailedResponse{
 				Result:  "failed",
 				Status:  response.StatusCode(),
-				Message: fmt.Sprintf("Unexpected status code: %d", response.StatusCode()),
+				Message: fmt.Sprintf("Game server API return status code: %d", response.StatusCode()),
 			}
 			return resp, response.StatusCode(), fmt.Errorf("unexpected status code: %d", response.StatusCode())
 		}
