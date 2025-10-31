@@ -102,10 +102,8 @@ func (c *SekaiClient) Init() error {
 
 	if c.Proxy != "" {
 		c.Session.SetProxy(c.Proxy)
-		c.Logger = logger.NewLogger(fmt.Sprintf("SekaiClient%s", strings.ToUpper(string(c.Server))), "DEBUG", nil)
-	} else {
-		c.Logger = logger.NewLogger(fmt.Sprintf("SekaiClient%s", strings.ToUpper(string(c.Server))), "DEBUG", nil)
 	}
+	c.Logger = logger.NewLogger(fmt.Sprintf("SekaiClient%s", strings.ToUpper(string(c.Server))), "DEBUG", nil)
 	if err := c.ParseCookies(context.Background()); err != nil {
 		return err
 	}

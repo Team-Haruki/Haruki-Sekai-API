@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/bytedance/sonic"
@@ -266,79 +267,106 @@ func (mgr *SekaiClientManager) updateMasterData(dataVersion string, paths []stri
 	}
 
 	runtime.GC()
-	mgr.Logger.Debugf("Sekai updater triggered GC to free memory")
 }
 
 func (mgr *SekaiClientManager) streamCPMasterData(client *SekaiClient, paths []string) error {
 	if err := os.MkdirAll(mgr.ServerConfig.MasterDir, 0755); err != nil {
 		return fmt.Errorf("failed to create master data directory: %w", err)
 	}
-
 	ctx := context.Background()
-	var mu sync.Mutex
-	var wg sync.WaitGroup
-	errChan := make(chan error, len(paths))
-	sem := make(chan struct{}, 3)
-
+	var allErrors []error
+	var errorsMu sync.Mutex
+	var pathWg sync.WaitGroup
+	pathSem := make(chan struct{}, 2)
 	for _, rawPath := range paths {
 		if rawPath == "" {
 			continue
 		}
-		wg.Add(1)
+		pathWg.Add(1)
 		go func(rp string) {
-			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
-
+			defer pathWg.Done()
+			pathSem <- struct{}{}
+			defer func() { <-pathSem }()
 			p := rp
 			if !strings.HasPrefix(p, "/") {
 				p = "/" + p
 			}
-
 			resp, err := client.Get(ctx, p, nil)
 			if err != nil {
-				errChan <- fmt.Errorf("failed to get %s: %w", rp, err)
+				errorsMu.Lock()
+				allErrors = append(allErrors, fmt.Errorf("failed to get %s: %w", rp, err))
+				errorsMu.Unlock()
 				return
 			}
-
 			body := resp.Body()
 			om, err := client.Cryptor.UnpackOrdered(body)
 			body = nil
-
 			if err != nil {
-				errChan <- fmt.Errorf("unpack master part failed: path=%s, err=%w", rp, err)
+				errorsMu.Lock()
+				allErrors = append(allErrors, fmt.Errorf("unpack master part failed: path=%s, err=%w", rp, err))
+				errorsMu.Unlock()
 				return
 			}
 			if om == nil {
-				errChan <- fmt.Errorf("unexpected master data: nil ordered map at path %s", rp)
+				errorsMu.Lock()
+				allErrors = append(allErrors, fmt.Errorf("unexpected master data: nil ordered map at path %s", rp))
+				errorsMu.Unlock()
 				return
 			}
-
 			keys := om.Keys()
+			var processedFiles sync.Map
+			var fileWg sync.WaitGroup
+			fileSem := make(chan struct{}, 2)
+			var hasError bool
+			var savedCount int32
 			for _, k := range keys {
-				if v, ok := om.Get(k); ok {
-					filePath := filepath.Join(mgr.ServerConfig.MasterDir, k+".json")
-					mu.Lock()
-					saveErr := mgr.saveFile(filePath, v)
-					mu.Unlock()
-					if saveErr != nil {
-						errChan <- fmt.Errorf("failed to save %s: %w", k, saveErr)
-						return
-					}
-					om.Delete(k)
+				if _, loaded := processedFiles.LoadOrStore(k, true); loaded {
+					continue
 				}
+				v, ok := om.Get(k)
+				if !ok {
+					mgr.Logger.Warnf("Could not get value for file %s from path %s", k, rp)
+					continue
+				}
+				fileWg.Add(1)
+				go func(key string, value any) {
+					defer fileWg.Done()
+					fileSem <- struct{}{}
+					defer func() {
+						<-fileSem
+						value = nil
+					}()
+					filePath := filepath.Join(mgr.ServerConfig.MasterDir, key+".json")
+					saveErr := mgr.saveFile(filePath, value)
+					if saveErr != nil {
+						mgr.Logger.Errorf("Failed to save %s from path %s: %v", key, rp, saveErr)
+						errorsMu.Lock()
+						allErrors = append(allErrors, fmt.Errorf("failed to save %s from path %s: %w", key, rp, saveErr))
+						errorsMu.Unlock()
+						hasError = true
+					} else {
+						atomic.AddInt32(&savedCount, 1)
+					}
+				}(k, v)
+				v = nil
 			}
+			fileWg.Wait()
 			om = nil
+			if hasError {
+				mgr.Logger.Warnf("Processed path %s with errors: saved %d/%d files", rp, savedCount, len(keys))
+			}
+			runtime.GC()
 		}(rawPath)
 	}
-
-	wg.Wait()
-	close(errChan)
-
-	for err := range errChan {
-		if err != nil {
-			return err
+	pathWg.Wait()
+	if len(allErrors) > 0 {
+		mgr.Logger.Errorf("Encountered %d errors while processing master data", len(allErrors))
+		for i, err := range allErrors {
+			if i < 10 {
+				mgr.Logger.Errorf("Error %d: %v", i+1, err)
+			}
 		}
+		return fmt.Errorf("failed to save some master data files: %d errors encountered, first error: %w", len(allErrors), allErrors[0])
 	}
 
 	return nil
@@ -348,17 +376,14 @@ func (mgr *SekaiClientManager) streamNuverseMasterData(client *SekaiClient, cdnV
 	if err := os.MkdirAll(mgr.ServerConfig.MasterDir, 0755); err != nil {
 		return fmt.Errorf("failed to create master data directory: %w", err)
 	}
-
 	ctx := context.Background()
 	u := fmt.Sprintf("%s/master-data-%d.info", client.ServerConfig.NuverseMasterDataURL, cdnVersion)
-
 	cli := *client.Session
 	if client.Proxy != "" {
 		cli.SetProxy(client.Proxy)
 	}
 	req := *cli.R()
 	req.SetContext(ctx)
-
 	resp, err := req.Get(u)
 	if err != nil {
 		return fmt.Errorf("request error: %w", err)
@@ -366,12 +391,10 @@ func (mgr *SekaiClientManager) streamNuverseMasterData(client *SekaiClient, cdnV
 	if resp == nil {
 		return fmt.Errorf("nil response")
 	}
-
 	status := resp.StatusCode()
 	if status < 200 || status >= 300 {
 		return fmt.Errorf("non-success status=%d", status)
 	}
-
 	masterOM, err := client.Cryptor.UnpackOrdered(resp.Body())
 	if err != nil {
 		return fmt.Errorf("unpack nuverse master info failed: %w", err)
@@ -379,46 +402,79 @@ func (mgr *SekaiClientManager) streamNuverseMasterData(client *SekaiClient, cdnV
 	if masterOM == nil {
 		return fmt.Errorf("unexpected nuverse master info: nil ordered map")
 	}
-
 	restored, err := NuverseMasterRestorer(masterOM, client.ServerConfig.NuverseStructureFilePath)
 	if err != nil {
 		return fmt.Errorf("NuverseMasterRestorer error: %w", err)
 	}
 	masterOM = nil
-
+	keys := restored.Keys()
+	var processedFiles sync.Map
 	var wg sync.WaitGroup
 	var mu sync.Mutex
-	errChan := make(chan error, len(restored.Keys()))
-	sem := make(chan struct{}, 3)
+	var restoredMu sync.Mutex
+	var allErrors []error
+	var savedCount int32
+	sem := make(chan struct{}, 2)
+	batchSize := 30
+	for i := 0; i < len(keys); i += batchSize {
+		end := i + batchSize
+		if end > len(keys) {
+			end = len(keys)
+		}
 
-	keys := restored.Keys()
-	for _, key := range keys {
-		value, _ := restored.Get(key)
-		wg.Add(1)
-		go func(k string, v any) {
-			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
+		batchKeys := keys[i:end]
 
-			filePath := filepath.Join(mgr.ServerConfig.MasterDir, k+".json")
-			if err := mgr.saveFile(filePath, v); err != nil {
-				errChan <- fmt.Errorf("failed to save %s: %w", k, err)
+		for _, key := range batchKeys {
+			if _, loaded := processedFiles.LoadOrStore(key, true); loaded {
+				continue
 			}
-			mu.Lock()
-			restored.Delete(k)
-			mu.Unlock()
-		}(key, value)
-	}
+			restoredMu.Lock()
+			value, ok := restored.Get(key)
+			if ok {
+				restored.Delete(key)
+			}
+			restoredMu.Unlock()
+			if !ok {
+				continue
+			}
+			wg.Add(1)
+			go func(k string, v any) {
+				defer wg.Done()
+				sem <- struct{}{}
+				defer func() {
+					<-sem
+					v = nil
+				}()
 
-	wg.Wait()
-	close(errChan)
+				filePath := filepath.Join(mgr.ServerConfig.MasterDir, k+".json")
+				if err := mgr.saveFile(filePath, v); err != nil {
+					mgr.Logger.Errorf("Failed to save %s: %v", k, err)
+					mu.Lock()
+					allErrors = append(allErrors, fmt.Errorf("failed to save %s: %w", k, err))
+					mu.Unlock()
+				} else {
+					atomic.AddInt32(&savedCount, 1)
+				}
+			}(key, value)
 
-	for err := range errChan {
-		if err != nil {
-			return err
+			value = nil
+		}
+		wg.Wait()
+		if i > 0 && i%30 == 0 || (i+batchSize) >= len(keys) {
+			runtime.GC()
 		}
 	}
-
 	restored = nil
+	keys = nil
+	if len(allErrors) > 0 {
+		mgr.Logger.Errorf("Encountered %d errors while processing nuverse master data (saved %d/%d files)", len(allErrors), savedCount, len(keys))
+		for i, err := range allErrors {
+			if i < 10 {
+				mgr.Logger.Errorf("Error %d: %v", i+1, err)
+			}
+		}
+		return fmt.Errorf("failed to save some nuverse master data files: %d errors encountered, first error: %w", len(allErrors), allErrors[0])
+	}
+
 	return nil
 }
