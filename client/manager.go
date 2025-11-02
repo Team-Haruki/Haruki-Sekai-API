@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/bytedance/sonic"
+	"github.com/go-resty/resty/v2"
 )
 
 type SekaiClientManager struct {
@@ -46,79 +47,88 @@ func NewSekaiClientManager(server utils.HarukiSekaiServerRegion, serverConfig ut
 	return mgr
 }
 
+// parseAccountFile parses a single account file
+func (mgr *SekaiClientManager) parseAccountFile(path string, data []byte) []SekaiAccountInterface {
+	var accounts []SekaiAccountInterface
+	var raw any
+	if err := sonic.Unmarshal(data, &raw); err != nil {
+		mgr.Logger.Warnf("parseAccounts: json decode error %s: %v", path, err)
+		return accounts
+	}
+
+	switch v := raw.(type) {
+	case map[string]any:
+		if acc := mgr.parseAccountMap(v, path, -1); acc != nil {
+			accounts = append(accounts, acc)
+		}
+	case []any:
+		for idx, item := range v {
+			if m, ok := item.(map[string]any); ok {
+				if acc := mgr.parseAccountMap(m, path, idx); acc != nil {
+					accounts = append(accounts, acc)
+				}
+			} else {
+				mgr.Logger.Warnf("parseAccounts: [%s][%d] unexpected array element type: %T", path, idx, item)
+			}
+		}
+	default:
+		mgr.Logger.Warnf("parseAccounts: unexpected top-level type in %s: %T", path, v)
+	}
+
+	return accounts
+}
+
+// parseAccountMap parses account data from a map
+func (mgr *SekaiClientManager) parseAccountMap(m map[string]any, path string, idx int) SekaiAccountInterface {
+	b, _ := sonic.Marshal(m)
+
+	if mgr.Server == utils.HarukiSekaiServerRegionJP || mgr.Server == utils.HarukiSekaiServerRegionEN {
+		acc := new(SekaiAccountCP)
+		if unmarshalErr := sonic.Unmarshal(b, acc); unmarshalErr == nil {
+			return acc
+		} else {
+			if idx >= 0 {
+				mgr.Logger.Warnf("parseAccounts: [%s][%d] CP unmarshal error: %v", path, idx, unmarshalErr)
+			} else {
+				mgr.Logger.Warnf("parseAccounts: CP unmarshal error %s: %v", path, unmarshalErr)
+			}
+		}
+	} else {
+		acc := new(SekaiAccountNuverse)
+		if unmarshalErr := sonic.Unmarshal(b, acc); unmarshalErr == nil {
+			return acc
+		} else {
+			if idx >= 0 {
+				mgr.Logger.Warnf("parseAccounts: [%s][%d] Nuverse unmarshal error: %v", path, idx, unmarshalErr)
+			} else {
+				mgr.Logger.Warnf("parseAccounts: Nuverse unmarshal error %s: %v", path, unmarshalErr)
+			}
+		}
+	}
+
+	return nil
+}
+
 func (mgr *SekaiClientManager) parseAccounts() ([]SekaiAccountInterface, error) {
-	var (
-		accounts []SekaiAccountInterface
-	)
+	var accounts []SekaiAccountInterface
 
 	err := filepath.Walk(mgr.ServerConfig.AccountDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			mgr.Logger.Warnf("parseAccounts: walk error on %s: %v", path, err)
 			return err
 		}
-		if info.IsDir() {
+		if info.IsDir() || filepath.Ext(path) != ".json" {
 			return nil
 		}
-		if filepath.Ext(path) != ".json" {
-			return nil
-		}
+
 		data, err := os.ReadFile(path)
 		if err != nil {
 			mgr.Logger.Warnf("parseAccounts: read error %s: %v", path, err)
 			return nil
 		}
-		var raw any
-		if err := sonic.Unmarshal(data, &raw); err != nil {
-			mgr.Logger.Warnf("parseAccounts: json decode error %s: %v", path, err)
-			return nil
-		}
 
-		switch v := raw.(type) {
-		case map[string]any:
-			if mgr.Server == utils.HarukiSekaiServerRegionJP || mgr.Server == utils.HarukiSekaiServerRegionEN {
-				acc := new(SekaiAccountCP)
-				b, _ := sonic.Marshal(v)
-				if err := sonic.Unmarshal(b, acc); err == nil {
-					accounts = append(accounts, acc)
-				} else {
-					mgr.Logger.Warnf("parseAccounts: CP unmarshal error %s: %v", path, err)
-				}
-			} else {
-				acc := new(SekaiAccountNuverse)
-				b, _ := sonic.Marshal(v)
-				if err := sonic.Unmarshal(b, acc); err == nil {
-					accounts = append(accounts, acc)
-				} else {
-					mgr.Logger.Warnf("parseAccounts: Nuverse unmarshal error %s: %v", path, err)
-				}
-			}
-		case []any:
-			for idx, item := range v {
-				if m, ok := item.(map[string]any); ok {
-					if mgr.Server == utils.HarukiSekaiServerRegionJP || mgr.Server == utils.HarukiSekaiServerRegionEN {
-						acc := new(SekaiAccountCP)
-						b, _ := sonic.Marshal(m)
-						if err := sonic.Unmarshal(b, acc); err == nil {
-							accounts = append(accounts, acc)
-						} else {
-							mgr.Logger.Warnf("parseAccounts: [%s][%d] CP unmarshal error: %v", path, idx, err)
-						}
-					} else {
-						acc := new(SekaiAccountNuverse)
-						b, _ := sonic.Marshal(m)
-						if err := sonic.Unmarshal(b, acc); err == nil {
-							accounts = append(accounts, acc)
-						} else {
-							mgr.Logger.Warnf("parseAccounts: [%s][%d] Nuverse unmarshal error: %v", path, idx, err)
-						}
-					}
-				} else {
-					mgr.Logger.Warnf("parseAccounts: [%s][%d] unexpected array element type: %T", path, idx, item)
-				}
-			}
-		default:
-			mgr.Logger.Warnf("parseAccounts: unexpected top-level type in %s: %T", path, v)
-		}
+		parsedAccounts := mgr.parseAccountFile(path, data)
+		accounts = append(accounts, parsedAccounts...)
 		return nil
 	})
 
@@ -285,6 +295,73 @@ func (mgr *SekaiClientManager) Shutdown() error {
 	return nil
 }
 
+// handleUpgradeError handles upgrade required errors
+func (mgr *SekaiClientManager) handleUpgradeError() (HarukiSekaiAPIFailedResponse, int, error) {
+	mgr.Logger.Warnf("%s Server upgrade required, re-parsing version...", strings.ToUpper(string(mgr.Server)))
+	if err := mgr.parseVersion(); err != nil {
+		resp := HarukiSekaiAPIFailedResponse{
+			Result:  "failed",
+			Status:  http.StatusServiceUnavailable,
+			Message: fmt.Sprintf("Failed to parse version after upgrade: %v", err),
+		}
+		return resp, http.StatusServiceUnavailable, err
+	}
+	return HarukiSekaiAPIFailedResponse{}, 0, nil
+}
+
+// handleSessionError handles session errors
+func (mgr *SekaiClientManager) handleSessionError(ctx context.Context) (HarukiSekaiAPIFailedResponse, int, error) {
+	mgr.Logger.Warnf("%s Server cookies expired, re-parsing...", strings.ToUpper(string(mgr.Server)))
+	if err := mgr.parseCookies(ctx); err != nil {
+		resp := HarukiSekaiAPIFailedResponse{
+			Result:  "failed",
+			Status:  http.StatusForbidden,
+			Message: fmt.Sprintf("Failed to parse cookies: %v", err),
+		}
+		return resp, http.StatusForbidden, err
+	}
+	return HarukiSekaiAPIFailedResponse{}, 0, nil
+}
+
+// processSuccessResponse processes successful API responses
+func (mgr *SekaiClientManager) processSuccessResponse(client *SekaiClient, response *resty.Response, statusCode int) (any, int, error) {
+	result, err := client.handleResponse(*response)
+	if err != nil {
+		resp := HarukiSekaiAPIFailedResponse{
+			Result:  "failed",
+			Status:  statusCode,
+			Message: err.Error(),
+		}
+		return resp, statusCode, err
+	}
+	if m, ok := result.(map[string]any); ok {
+		return m, statusCode, nil
+	}
+	return result, statusCode, nil
+}
+
+// handleGetError handles errors from client.Get calls
+func (mgr *SekaiClientManager) handleGetError(getErr error, retryCount, maxRetries int) (HarukiSekaiAPIFailedResponse, int, error, bool) {
+	var ue *UpgradeRequiredError
+	if errors.As(getErr, &ue) {
+		if resp, status, err := mgr.handleUpgradeError(); err != nil {
+			return resp, status, err, true
+		}
+		return HarukiSekaiAPIFailedResponse{}, 0, nil, false
+	}
+
+	if retryCount >= maxRetries-1 {
+		resp := HarukiSekaiAPIFailedResponse{
+			Result:  "failed",
+			Status:  http.StatusInternalServerError,
+			Message: fmt.Sprintf("Failed to get response: %v", getErr),
+		}
+		return resp, http.StatusInternalServerError, getErr, true
+	}
+
+	return HarukiSekaiAPIFailedResponse{}, 0, nil, false
+}
+
 func (mgr *SekaiClientManager) GetGameAPI(ctx context.Context, path string, params map[string]any) (any, int, error) {
 	if len(mgr.Clients) == 0 {
 		resp := HarukiSekaiAPIFailedResponse{
@@ -309,35 +386,15 @@ func (mgr *SekaiClientManager) GetGameAPI(ctx context.Context, path string, para
 			}
 			return resp, http.StatusInternalServerError, nil
 		}
+
 		client.APILock.Lock()
 		response, getErr := client.Get(ctx, path, params)
+
 		if getErr != nil || response == nil {
 			client.APILock.Unlock()
-
-			var ue *UpgradeRequiredError
-			if errors.As(getErr, &ue) {
-				mgr.Logger.Warnf("%s Server upgrade required, re-parsing version...", strings.ToUpper(string(mgr.Server)))
-				if err := mgr.parseVersion(); err != nil {
-					resp := HarukiSekaiAPIFailedResponse{
-						Result:  "failed",
-						Status:  http.StatusServiceUnavailable,
-						Message: fmt.Sprintf("Failed to parse version after upgrade: %v", err),
-					}
-					return resp, http.StatusServiceUnavailable, err
-				}
-				retryCount++
-				time.Sleep(retryDelay)
-				continue
-			}
-
-			resp := HarukiSekaiAPIFailedResponse{
-				Result:  "failed",
-				Status:  http.StatusInternalServerError,
-				Message: fmt.Sprintf("Failed to get response: %v", getErr),
-			}
-
-			if retryCount >= maxRetries-1 {
-				return resp, http.StatusInternalServerError, getErr
+			resp, status, err, shouldReturn := mgr.handleGetError(getErr, retryCount, maxRetries)
+			if shouldReturn {
+				return resp, status, err
 			}
 
 			retryCount++
@@ -358,35 +415,21 @@ func (mgr *SekaiClientManager) GetGameAPI(ctx context.Context, path string, para
 
 		switch statusCode {
 		case SekaiApiHttpStatusGameUpgrade:
-			mgr.Logger.Warnf("%s Server upgrade required, re-parsing...", strings.ToUpper(string(mgr.Server)))
-			if err := mgr.parseVersion(); err != nil {
-				client.APILock.Unlock()
-				resp := HarukiSekaiAPIFailedResponse{
-					Result:  "failed",
-					Status:  response.StatusCode(),
-					Message: fmt.Sprintf("Failed to parse version: %v", err),
-				}
-				return resp, response.StatusCode(), err
+			client.APILock.Unlock()
+			if resp, status, err := mgr.handleUpgradeError(); err != nil {
+				return resp, status, err
 			}
 			retryCount++
 			time.Sleep(retryDelay)
-			client.APILock.Unlock()
 			continue
 
 		case SekaiApiHttpStatusSessionError:
-			mgr.Logger.Warnf("%s Server cookies expired, re-parsing...", strings.ToUpper(string(mgr.Server)))
-			if err := mgr.parseCookies(ctx); err != nil {
-				client.APILock.Unlock()
-				resp := HarukiSekaiAPIFailedResponse{
-					Result:  "failed",
-					Status:  http.StatusForbidden,
-					Message: fmt.Sprintf("Failed to parse cookies: %v", err),
-				}
-				return resp, http.StatusForbidden, err
+			client.APILock.Unlock()
+			if resp, status, err := mgr.handleSessionError(ctx); err != nil {
+				return resp, status, err
 			}
 			retryCount++
 			time.Sleep(retryDelay)
-			client.APILock.Unlock()
 			continue
 
 		case SekaiApiHttpStatusUnderMaintenance:
@@ -399,20 +442,9 @@ func (mgr *SekaiClientManager) GetGameAPI(ctx context.Context, path string, para
 			return resp, http.StatusServiceUnavailable, NewUnderMaintenanceError()
 
 		case SekaiApiHttpStatusOk:
-			result, err := client.handleResponse(*response)
+			result, status, err := mgr.processSuccessResponse(client, response, response.StatusCode())
 			client.APILock.Unlock()
-			if err != nil {
-				resp := HarukiSekaiAPIFailedResponse{
-					Result:  "failed",
-					Status:  response.StatusCode(),
-					Message: err.Error(),
-				}
-				return resp, response.StatusCode(), err
-			}
-			if m, ok := result.(map[string]any); ok {
-				return m, response.StatusCode(), nil
-			}
-			return result, response.StatusCode(), nil
+			return result, status, err
 
 		default:
 			client.APILock.Unlock()

@@ -127,12 +127,8 @@ func openRedis(cfg config.RedisConfig) (*redis.Client, error) {
 	return rdb, nil
 }
 
-func InitAPIUtils(cfg config.Config) error {
-	sekaiManager := make(map[utils.HarukiSekaiServerRegion]*client.SekaiClientManager)
-	if cfg.Git.Enabled {
-		harukiGit = git.NewHarukiGitUpdater(cfg.Git.Username, cfg.Git.Email, cfg.Git.Password, cfg.Proxy)
-	}
-
+// initDatabase initializes database and Redis connections
+func initDatabase(cfg config.Config) error {
 	db, err := openGorm(cfg.Gorm)
 	if err != nil {
 		return err
@@ -150,21 +146,23 @@ func InitAPIUtils(cfg config.Config) error {
 		return err
 	}
 	HarukiSekaiRedis = rdb
+	return nil
+}
 
+// initSekaiManagers initializes Sekai client managers
+func initSekaiManagers(cfg config.Config, harukiGit *git.HarukiGitUpdater) map[utils.HarukiSekaiServerRegion]*client.SekaiClientManager {
+	sekaiManager := make(map[utils.HarukiSekaiServerRegion]*client.SekaiClientManager)
 	for server, serverConfig := range cfg.Servers {
 		if serverConfig.Enabled {
 			sekaiManager[server] = client.NewSekaiClientManager(server, serverConfig, cfg.AssetUpdaterServers, harukiGit, cfg.Proxy, cfg.JPSekaiCookieURL)
 			_ = sekaiManager[server].Init()
 		}
 	}
-	HarukiSekaiManagers = sekaiManager
+	return sekaiManager
+}
 
-	sch, err := gocron.NewScheduler(gocron.WithLocation(time.Local))
-	if err != nil {
-		return err
-	}
-	harukiSchedulerLogger = harukiLogger.NewLogger("HarukiSekaiUpdaterScheduler", "DEBUG", nil)
-
+// registerMasterUpdaters registers master update cron jobs
+func registerMasterUpdaters(cfg config.Config, sekaiManager map[utils.HarukiSekaiServerRegion]*client.SekaiClientManager, sch gocron.Scheduler) error {
 	for server, serverConfig := range cfg.Servers {
 		if !serverConfig.Enabled || !serverConfig.EnableMasterUpdater || serverConfig.MasterUpdaterCron == "" {
 			continue
@@ -189,7 +187,11 @@ func InitAPIUtils(cfg config.Config) error {
 		}
 		harukiSchedulerLogger.Infof("%s sekai updater registered cron: %s", strings.ToUpper(string(server)), serverConfig.MasterUpdaterCron)
 	}
+	return nil
+}
 
+// registerAppHashUpdaters registers app hash update cron jobs
+func registerAppHashUpdaters(cfg config.Config, sch gocron.Scheduler) error {
 	for server, serverConfig := range cfg.Servers {
 		if !serverConfig.Enabled || !serverConfig.EnableAppHashUpdater || serverConfig.AppHashUpdaterCron == "" {
 			continue
@@ -210,6 +212,34 @@ func InitAPIUtils(cfg config.Config) error {
 			return fmt.Errorf("register apphash updater for %s failed: %w", server, err)
 		}
 		harukiSchedulerLogger.Infof("%s apphash updater registered cron: %s", strings.ToUpper(string(server)), serverConfig.AppHashUpdaterCron)
+	}
+	return nil
+}
+
+func InitAPIUtils(cfg config.Config) error {
+	if cfg.Git.Enabled {
+		harukiGit = git.NewHarukiGitUpdater(cfg.Git.Username, cfg.Git.Email, cfg.Git.Password, cfg.Proxy)
+	}
+
+	if err := initDatabase(cfg); err != nil {
+		return err
+	}
+
+	sekaiManager := initSekaiManagers(cfg, harukiGit)
+	HarukiSekaiManagers = sekaiManager
+
+	sch, err := gocron.NewScheduler(gocron.WithLocation(time.Local))
+	if err != nil {
+		return err
+	}
+	harukiSchedulerLogger = harukiLogger.NewLogger("HarukiSekaiUpdaterScheduler", "DEBUG", nil)
+
+	if err := registerMasterUpdaters(cfg, sekaiManager, sch); err != nil {
+		return err
+	}
+
+	if err := registerAppHashUpdaters(cfg, sch); err != nil {
+		return err
 	}
 
 	sch.Start()

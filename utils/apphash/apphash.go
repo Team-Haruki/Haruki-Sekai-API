@@ -41,88 +41,101 @@ func NewAppHashUpdater(sources []utils.HarukiSekaiAppHashSource, server utils.Ha
 	}
 }
 
+// getFirstStr extracts first non-empty string value from ordered map
+func getFirstStr(om *orderedmap.OrderedMap, keys ...string) string {
+	for _, k := range keys {
+		if v, ok := om.Get(k); ok {
+			if s, ok := v.(string); ok && s != "" {
+				return s
+			}
+		}
+	}
+	return ""
+}
+
+// readAppInfoFromFile reads app info from file source
+func (a *HarukiSekaiAppHashUpdater) readAppInfoFromFile(source utils.HarukiSekaiAppHashSource, filename string) (*utils.HarukiSekaiAppInfo, error) {
+	path := filepath.Join(source.Dir, filename)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, nil
+		}
+		a.logger.Warnf("[FILE] read error: %v", err)
+		return nil, err
+	}
+
+	om := orderedmap.New()
+	if err := sonic.Unmarshal(data, om); err != nil {
+		a.logger.Warnf("[FILE] unmarshal to orderedmap failed: %v", err)
+		return nil, nil
+	}
+
+	var app utils.HarukiSekaiAppInfo
+	app.AppVersion = getFirstStr(om, "appVersion", "app_version")
+	app.AppHash = getFirstStr(om, "appHash", "app_hash")
+	if app.AppVersion == "" {
+		a.logger.Warnf("[FILE] missing appVersion in %s", path)
+		return nil, nil
+	}
+	return &app, nil
+}
+
+// parseAppInfoFromJSON parses app info from JSON data
+func parseAppInfoFromJSON(body []byte, logger *harukiLogger.Logger) (*utils.HarukiSekaiAppInfo, error) {
+	var app utils.HarukiSekaiAppInfo
+	if err := sonic.Unmarshal(body, &app); err != nil {
+		logger.Warnf("[URL] unmarshal into struct failed: %v", err)
+		return nil, nil
+	}
+
+	if app.AppVersion == "" || app.AppHash == "" {
+		om2 := orderedmap.New()
+		if err := sonic.Unmarshal(body, om2); err == nil {
+			v := getFirstStr(om2, "appVersion", "app_version")
+			h := getFirstStr(om2, "appHash", "app_hash")
+			if app.AppVersion == "" {
+				app.AppVersion = v
+			}
+			if app.AppHash == "" {
+				app.AppHash = h
+			}
+		}
+	}
+
+	if app.AppVersion == "" {
+		return nil, nil
+	}
+	return &app, nil
+}
+
+// readAppInfoFromURL reads app info from URL source
+func (a *HarukiSekaiAppHashUpdater) readAppInfoFromURL(ctx context.Context, source utils.HarukiSekaiAppHashSource, filename string) (*utils.HarukiSekaiAppInfo, error) {
+	u := source.URL + "/" + filename
+	resp, err := a.client.R().SetContext(ctx).Get(u)
+	if err != nil {
+		a.logger.Warnf("[URL] request error: %v", err)
+		return nil, err
+	}
+	if resp == nil {
+		a.logger.Warnf("[URL] nil response from %s", u)
+		return nil, nil
+	}
+	if !resp.IsSuccess() || len(resp.Body()) == 0 {
+		return nil, nil
+	}
+
+	return parseAppInfoFromJSON(resp.Body(), a.logger)
+}
+
 func (a *HarukiSekaiAppHashUpdater) GetRemoteAppVersion(ctx context.Context, server string, source utils.HarukiSekaiAppHashSource) (*utils.HarukiSekaiAppInfo, error) {
 	filename := strings.ToUpper(server) + ".json"
 
-	getFirstStr := func(om *orderedmap.OrderedMap, keys ...string) string {
-		for _, k := range keys {
-			if v, ok := om.Get(k); ok {
-				if s, ok := v.(string); ok && s != "" {
-					return s
-				}
-			}
-		}
-		return ""
-	}
-
 	switch source.Type {
 	case utils.HarukiSekaiAppHashSourceTypeFile:
-		path := filepath.Join(source.Dir, filename)
-		data, err := os.ReadFile(path)
-		if err != nil {
-			if errors.Is(err, fs.ErrNotExist) {
-				return nil, nil
-			}
-			a.logger.Warnf("[FILE] read error: %v", err)
-			return nil, err
-		}
-
-		om := orderedmap.New()
-		if err := sonic.Unmarshal(data, om); err != nil {
-			a.logger.Warnf("[FILE] unmarshal to orderedmap failed: %v", err)
-			return nil, nil
-		}
-
-		var app utils.HarukiSekaiAppInfo
-		app.AppVersion = getFirstStr(om, "appVersion", "app_version")
-		app.AppHash = getFirstStr(om, "appHash", "app_hash")
-		if app.AppVersion == "" {
-			a.logger.Warnf("[FILE] missing appVersion in %s", path)
-			return nil, nil
-		}
-		return &app, nil
-
+		return a.readAppInfoFromFile(source, filename)
 	case utils.HarukiSekaiAppHashSourceTypeUrl:
-		u := source.URL + "/" + filename
-		resp, err := a.client.R().SetContext(ctx).Get(u)
-		if err != nil {
-			a.logger.Warnf("[URL] request error: %v", err)
-			return nil, err
-		}
-		if resp == nil {
-			a.logger.Warnf("[URL] nil response from %s", u)
-			return nil, nil
-		}
-		if !resp.IsSuccess() {
-			return nil, nil
-		}
-		body := resp.Body()
-		if len(body) == 0 {
-			return nil, nil
-		}
-
-		var app utils.HarukiSekaiAppInfo
-		if err := sonic.Unmarshal(body, &app); err != nil {
-			a.logger.Warnf("[URL] unmarshal into struct failed: %v", err)
-			return nil, nil
-		}
-		if app.AppVersion == "" || app.AppHash == "" {
-			om2 := orderedmap.New()
-			if err := sonic.Unmarshal(body, om2); err == nil {
-				v := getFirstStr(om2, "appVersion", "app_version")
-				h := getFirstStr(om2, "appHash", "app_hash")
-				if app.AppVersion == "" {
-					app.AppVersion = v
-				}
-				if app.AppHash == "" {
-					app.AppHash = h
-				}
-			}
-		}
-		if app.AppVersion == "" {
-			return nil, nil
-		}
-		return &app, nil
+		return a.readAppInfoFromURL(ctx, source, filename)
 	}
 	return nil, nil
 }
