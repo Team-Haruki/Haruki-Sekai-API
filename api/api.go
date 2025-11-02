@@ -38,50 +38,56 @@ func proxyGameAPI(c *fiber.Ctx, path string, params map[string]any) error {
 	return c.Status(status).JSON(data)
 }
 
+func getUserProfile(c *fiber.Ctx) error {
+	region, _, err := getMgr(c)
+	if err != nil {
+		return err
+	}
+	userID := c.Params("user_id")
+	if userID == "" || !digitsRe.MatchString(userID) {
+		return fiber.NewError(fiber.StatusBadRequest, "user_id must be numeric")
+	}
+	var path string
+	if region == utils.HarukiSekaiServerRegionEN {
+		path = fmt.Sprintf("/user/%s/profile", userID)
+	} else {
+		path = fmt.Sprintf("/user/{userId}/%s/profile", userID)
+	}
+	return proxyGameAPI(c, path, nil)
+}
+
+func getSystem(c *fiber.Ctx) error {
+	return proxyGameAPI(c, "/system", nil)
+}
+
+func getInformation(c *fiber.Ctx) error {
+	return proxyGameAPI(c, "/information", nil)
+}
+
+func getEventRankingTop100(c *fiber.Ctx) error {
+	eventID := c.Params("event_id")
+	if !digitsRe.MatchString(eventID) {
+		return fiber.NewError(fiber.StatusBadRequest, "event_id must be numeric")
+	}
+	path := fmt.Sprintf("/user/{userId}/event/%s/ranking?rankingViewType=top100", eventID)
+	return proxyGameAPI(c, path, nil)
+}
+
+func getEventRankingBorder(c *fiber.Ctx) error {
+	eventID := c.Params("event_id")
+	if !digitsRe.MatchString(eventID) {
+		return fiber.NewError(fiber.StatusBadRequest, "event_id must be numeric")
+	}
+	return proxyGameAPI(c, fmt.Sprintf("/event/%s/ranking-border", eventID), nil)
+}
+
 func registerHarukiSekaiAPIRoutes(app *fiber.App) {
 	api := app.Group("/api/:server", validateUserTokenMiddleware())
 
-	api.Get("/:user_id/profile", func(c *fiber.Ctx) error {
-		region, _, err := getMgr(c)
-		if err != nil {
-			return err
-		}
-		userID := c.Params("user_id")
-		if userID == "" || !digitsRe.MatchString(userID) {
-			return fiber.NewError(fiber.StatusBadRequest, "user_id must be numeric")
-		}
-		var path string
-		if region == utils.HarukiSekaiServerRegionEN {
-			path = fmt.Sprintf("/user/%s/profile", userID)
-		} else {
-			path = fmt.Sprintf("/user/{userId}/%s/profile", userID)
-		}
-		return proxyGameAPI(c, path, nil)
-	})
-
-	api.Get("/system", func(c *fiber.Ctx) error {
-		return proxyGameAPI(c, "/system", nil)
-	})
-
-	api.Get("/information", func(c *fiber.Ctx) error {
-		return proxyGameAPI(c, "/information", nil)
-	})
-
-	api.Get("/event/:event_id/ranking-top100", func(c *fiber.Ctx) error {
-		eventID := c.Params("event_id")
-		if !digitsRe.MatchString(eventID) {
-			return fiber.NewError(fiber.StatusBadRequest, "event_id must be numeric")
-		}
-		path := fmt.Sprintf("/user/{userId}/event/%s/ranking?rankingViewType=top100", eventID)
-		return proxyGameAPI(c, path, nil)
-	})
-
-	api.Get("/event/:event_id/ranking-border", func(c *fiber.Ctx) error {
-		eventID := c.Params("event_id")
-		if !digitsRe.MatchString(eventID) {
-			return fiber.NewError(fiber.StatusBadRequest, "event_id must be numeric")
-		}
-		return proxyGameAPI(c, fmt.Sprintf("/event/%s/ranking-border", eventID), nil)
-	})
+	api.Get("/:user_id/profile", getUserProfile)
+	api.Get("/system", getSystem)
+	api.Get("/information", getInformation)
+	api.Get("/event/:event_id/ranking-top100", getEventRankingTop100)
+	api.Get("/event/:event_id/ranking-border", getEventRankingBorder)
 
 }
