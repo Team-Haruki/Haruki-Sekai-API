@@ -24,6 +24,15 @@ backend:
   access_log: "${time} ${ip} ${status} ${method} ${path}\n"
   access_log_path: "./access.log" # output to console if empty
   sekai_user_jwt_signing_key: ""
+  enable_trust_proxy: true
+  trusted_proxies:
+    - "127.0.0.0/8"
+    - "::1/128"
+    - "192.168.0.0/16"
+    - "172.16.0.0/12"
+    - "100.64.0.0/10"
+    - "10.0.0.0/8"
+  proxy_header: "X-Forwarded-For"
 
 gorm:
   enabled: true                   # set it to false if not using database
