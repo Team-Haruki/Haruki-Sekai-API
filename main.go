@@ -41,6 +41,10 @@ func main() {
 		BodyLimit:   30 * 1024 * 1024,
 		JSONEncoder: sonic.Marshal,
 		JSONDecoder: sonic.Unmarshal,
+		TrustProxy:  true,
+		TrustProxyConfig: fiber.TrustProxyConfig{
+			Proxies: []string{"127.0.0.0/8", "192.168.0.0/16", "10.0.0.0/8", "172.16.0.0/12", "100.64.0.0/10"},
+		},
 	})
 
 	if config.Cfg.Backend.AccessLog != "" {
@@ -58,23 +62,22 @@ func main() {
 		}
 		app.Use(logger.New(logCfg))
 	}
-
 	api.RegisterRoutes(app)
-
+	appConfig := fiber.ListenConfig{
+		DisableStartupMessage: true,
+	}
 	addr := fmt.Sprintf("%s:%d", config.Cfg.Backend.Host, config.Cfg.Backend.Port)
 	if config.Cfg.Backend.SSL {
 		mainLogger.Infof("SSL enabled, starting HTTPS server at %s", addr)
-		if err := app.Listen(addr, fiber.ListenConfig{
-			CertFile:              config.Cfg.Backend.SSLCert,
-			CertKeyFile:           config.Cfg.Backend.SSLKey,
-			DisableStartupMessage: true,
-		}); err != nil {
+		appConfig.CertFile = config.Cfg.Backend.SSLCert
+		appConfig.CertKeyFile = config.Cfg.Backend.SSLKey
+		if err := app.Listen(addr, appConfig); err != nil {
 			mainLogger.Errorf("failed to start HTTPS server: %v", err)
 			os.Exit(1)
 		}
 	} else {
 		mainLogger.Infof("Starting HTTP server at %s", addr)
-		if err := app.Listen(addr, fiber.ListenConfig{DisableStartupMessage: true}); err != nil {
+		if err := app.Listen(addr, appConfig); err != nil {
 			mainLogger.Errorf("failed to start HTTP server: %v", err)
 			os.Exit(1)
 		}
