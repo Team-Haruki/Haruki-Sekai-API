@@ -58,7 +58,6 @@ func checkUnpushedCommits(repo *git.Repository, logger *harukiLogger.Logger) (bo
 	return false, nil
 }
 
-// commitChanges commits all staged changes
 func (g *HarukiGitUpdater) commitChanges(w *git.Worktree, dataVersion string, logger *harukiLogger.Logger) (plumbing.Hash, error) {
 	commitMsg := fmt.Sprintf("Update data version %s", dataVersion)
 	commit, err := w.Commit(commitMsg, &git.CommitOptions{
@@ -82,7 +81,6 @@ func (g *HarukiGitUpdater) commitChanges(w *git.Worktree, dataVersion string, lo
 	return commit, nil
 }
 
-// updateRemoteURL updates the remote URL with credentials
 func (g *HarukiGitUpdater) updateRemoteURL(repo *git.Repository, logger *harukiLogger.Logger) (string, error) {
 	remote, err := repo.Remote("origin")
 	if err != nil {
@@ -115,7 +113,6 @@ func (g *HarukiGitUpdater) updateRemoteURL(repo *git.Repository, logger *harukiL
 	return origURL, nil
 }
 
-// restoreRemoteURL restores the original remote URL
 func restoreRemoteURL(repo *git.Repository, origURL string) {
 	remote, err := repo.Remote("origin")
 	if err != nil {
@@ -127,7 +124,6 @@ func restoreRemoteURL(repo *git.Repository, origURL string) {
 	_, _ = repo.CreateRemote(remoteConfig)
 }
 
-// setupProxyTransport sets up proxy transport and returns cleanup function
 func (g *HarukiGitUpdater) setupProxyTransport(logger *harukiLogger.Logger) (func(), error) {
 	if g.Proxy == "" {
 		return func() {}, nil

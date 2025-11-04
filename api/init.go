@@ -127,7 +127,6 @@ func openRedis(cfg config.RedisConfig) (*redis.Client, error) {
 	return rdb, nil
 }
 
-// initDatabase initializes database and Redis connections
 func initDatabase(cfg config.Config) error {
 	db, err := openGorm(cfg.Gorm)
 	if err != nil {
@@ -149,7 +148,6 @@ func initDatabase(cfg config.Config) error {
 	return nil
 }
 
-// initSekaiManagers initializes Sekai client managers
 func initSekaiManagers(cfg config.Config, harukiGit *git.HarukiGitUpdater) map[utils.HarukiSekaiServerRegion]*client.SekaiClientManager {
 	sekaiManager := make(map[utils.HarukiSekaiServerRegion]*client.SekaiClientManager)
 	for server, serverConfig := range cfg.Servers {
@@ -161,7 +159,6 @@ func initSekaiManagers(cfg config.Config, harukiGit *git.HarukiGitUpdater) map[u
 	return sekaiManager
 }
 
-// registerMasterUpdaters registers master update cron jobs
 func registerMasterUpdaters(cfg config.Config, sekaiManager map[utils.HarukiSekaiServerRegion]*client.SekaiClientManager, sch gocron.Scheduler) error {
 	for server, serverConfig := range cfg.Servers {
 		if !serverConfig.Enabled || !serverConfig.EnableMasterUpdater || serverConfig.MasterUpdaterCron == "" {
@@ -190,7 +187,6 @@ func registerMasterUpdaters(cfg config.Config, sekaiManager map[utils.HarukiSeka
 	return nil
 }
 
-// registerAppHashUpdaters registers app hash update cron jobs
 func registerAppHashUpdaters(cfg config.Config, sch gocron.Scheduler) error {
 	for server, serverConfig := range cfg.Servers {
 		if !serverConfig.Enabled || !serverConfig.EnableAppHashUpdater || serverConfig.AppHashUpdaterCron == "" {

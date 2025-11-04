@@ -10,12 +10,12 @@ import (
 	"haruki-sekai-api/client"
 	"haruki-sekai-api/utils"
 
-	"github.com/gofiber/fiber/v2"
+	"github.com/gofiber/fiber/v3"
 )
 
 var digitsRe = regexp.MustCompile(`^\d+$`)
 
-func getMgr(c *fiber.Ctx) (utils.HarukiSekaiServerRegion, *client.SekaiClientManager, error) {
+func getMgr(c fiber.Ctx) (utils.HarukiSekaiServerRegion, *client.SekaiClientManager, error) {
 	region, err := utils.ParseSekaiServerRegion(strings.ToLower(c.Params("server")))
 	if err != nil {
 		return "", nil, fiber.NewError(fiber.StatusBadRequest, err.Error())
@@ -27,18 +27,18 @@ func getMgr(c *fiber.Ctx) (utils.HarukiSekaiServerRegion, *client.SekaiClientMan
 	return region, mgr, nil
 }
 
-func proxyGameAPI(c *fiber.Ctx, path string, params map[string]any) error {
+func proxyGameAPI(c fiber.Ctx, path string, params map[string]any) error {
 	_, mgr, err := getMgr(c)
 	if err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(c.Context(), 45*time.Second)
+	ctx, cancel := context.WithTimeout(c.RequestCtx(), 45*time.Second)
 	defer cancel()
 	data, status, _ := mgr.GetGameAPI(ctx, path, params)
 	return c.Status(status).JSON(data)
 }
 
-func getUserProfile(c *fiber.Ctx) error {
+func getUserProfile(c fiber.Ctx) error {
 	region, _, err := getMgr(c)
 	if err != nil {
 		return err
@@ -56,15 +56,15 @@ func getUserProfile(c *fiber.Ctx) error {
 	return proxyGameAPI(c, path, nil)
 }
 
-func getSystem(c *fiber.Ctx) error {
+func getSystem(c fiber.Ctx) error {
 	return proxyGameAPI(c, "/system", nil)
 }
 
-func getInformation(c *fiber.Ctx) error {
+func getInformation(c fiber.Ctx) error {
 	return proxyGameAPI(c, "/information", nil)
 }
 
-func getEventRankingTop100(c *fiber.Ctx) error {
+func getEventRankingTop100(c fiber.Ctx) error {
 	eventID := c.Params("event_id")
 	if !digitsRe.MatchString(eventID) {
 		return fiber.NewError(fiber.StatusBadRequest, "event_id must be numeric")
@@ -73,7 +73,7 @@ func getEventRankingTop100(c *fiber.Ctx) error {
 	return proxyGameAPI(c, path, nil)
 }
 
-func getEventRankingBorder(c *fiber.Ctx) error {
+func getEventRankingBorder(c fiber.Ctx) error {
 	eventID := c.Params("event_id")
 	if !digitsRe.MatchString(eventID) {
 		return fiber.NewError(fiber.StatusBadRequest, "event_id must be numeric")

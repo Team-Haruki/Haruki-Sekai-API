@@ -12,7 +12,6 @@ import (
 	"github.com/google/uuid"
 )
 
-// prepareLoginRequest prepares login URL and method based on account type
 func (c *SekaiClient) prepareLoginRequest() (string, string) {
 	if _, ok := c.Account.(*SekaiAccountCP); ok {
 		loginURL := fmt.Sprintf("%s/api/user/%s/auth?refreshUpdatedResources=False", c.ServerConfig.APIURL, c.Account.GetUserId())
@@ -22,7 +21,6 @@ func (c *SekaiClient) prepareLoginRequest() (string, string) {
 	return loginURL, "POST"
 }
 
-// validateLoginResponse validates the login response data
 func validateLoginResponse(retData *utils.HarukiSekaiLoginResponse) error {
 	if retData.SessionToken == "" || retData.DataVersion == "" || retData.AssetVersion == "" {
 		return fmt.Errorf("invalid login response: missing required fields")
@@ -30,7 +28,6 @@ func validateLoginResponse(retData *utils.HarukiSekaiLoginResponse) error {
 	return nil
 }
 
-// extractUserID extracts user ID from login response for Nuverse accounts
 func extractUserID(userID any) (string, error) {
 	switch v := userID.(type) {
 	case string:
@@ -48,7 +45,6 @@ func extractUserID(userID any) (string, error) {
 	}
 }
 
-// handleNuverseUserID handles user ID extraction and setting for Nuverse accounts
 func (c *SekaiClient) handleNuverseUserID(retData *utils.HarukiSekaiLoginResponse) error {
 	if _, ok := c.Account.(*SekaiAccountNuverse); !ok {
 		return nil
@@ -65,7 +61,6 @@ func (c *SekaiClient) handleNuverseUserID(retData *utils.HarukiSekaiLoginRespons
 	return nil
 }
 
-// updateHeadersFromLogin updates client headers with login response data
 func (c *SekaiClient) updateHeadersFromLogin(retData *utils.HarukiSekaiLoginResponse) {
 	c.HeaderLock.Lock()
 	c.Headers["X-Session-Token"] = retData.SessionToken

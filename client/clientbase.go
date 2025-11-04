@@ -239,14 +239,12 @@ func (c *SekaiClient) handleResponseError(ctx context.Context, respErr error, re
 		return c.handleSessionError(), false
 	case errors.As(respErr, &ce):
 		err := c.handleCookieExpiredError(ctx)
-		// Return immediately if cookie parsing failed
 		if err != nil && err.Error() != "cookie expired" {
 			return err, true
 		}
 		return err, false
 	case errors.As(respErr, &ue):
 		err := c.handleUpgradeError(ctx)
-		// Return immediately for JP/EN servers
 		if c.Server == utils.HarukiSekaiServerRegionJP || c.Server == utils.HarukiSekaiServerRegionEN {
 			return err, true
 		}
