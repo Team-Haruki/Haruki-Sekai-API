@@ -6,10 +6,10 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/gofiber/fiber/v2"
+	"github.com/gofiber/fiber/v3"
 )
 
-func getMySekaiImage(c *fiber.Ctx) error {
+func getMySekaiImage(c fiber.Ctx) error {
 	region, err := utils.ParseSekaiServerRegion(strings.ToLower(c.Params("server")))
 	if err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, err.Error())

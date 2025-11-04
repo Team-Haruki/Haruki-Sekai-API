@@ -41,7 +41,6 @@ func NewAppHashUpdater(sources []utils.HarukiSekaiAppHashSource, server utils.Ha
 	}
 }
 
-// getFirstStr extracts first non-empty string value from ordered map
 func getFirstStr(om *orderedmap.OrderedMap, keys ...string) string {
 	for _, k := range keys {
 		if v, ok := om.Get(k); ok {
@@ -53,7 +52,6 @@ func getFirstStr(om *orderedmap.OrderedMap, keys ...string) string {
 	return ""
 }
 
-// readAppInfoFromFile reads app info from file source
 func (a *HarukiSekaiAppHashUpdater) readAppInfoFromFile(source utils.HarukiSekaiAppHashSource, filename string) (*utils.HarukiSekaiAppInfo, error) {
 	path := filepath.Join(source.Dir, filename)
 	data, err := os.ReadFile(path)
@@ -81,7 +79,6 @@ func (a *HarukiSekaiAppHashUpdater) readAppInfoFromFile(source utils.HarukiSekai
 	return &app, nil
 }
 
-// parseAppInfoFromJSON parses app info from JSON data
 func parseAppInfoFromJSON(body []byte, logger *harukiLogger.Logger) (*utils.HarukiSekaiAppInfo, error) {
 	var app utils.HarukiSekaiAppInfo
 	if err := sonic.Unmarshal(body, &app); err != nil {
@@ -109,7 +106,6 @@ func parseAppInfoFromJSON(body []byte, logger *harukiLogger.Logger) (*utils.Haru
 	return &app, nil
 }
 
-// readAppInfoFromURL reads app info from URL source
 func (a *HarukiSekaiAppHashUpdater) readAppInfoFromURL(ctx context.Context, source utils.HarukiSekaiAppHashSource, filename string) (*utils.HarukiSekaiAppInfo, error) {
 	u := source.URL + "/" + filename
 	resp, err := a.client.R().SetContext(ctx).Get(u)

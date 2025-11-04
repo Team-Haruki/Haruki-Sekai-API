@@ -47,7 +47,6 @@ func NewSekaiClientManager(server utils.HarukiSekaiServerRegion, serverConfig ut
 	return mgr
 }
 
-// parseAccountFile parses a single account file
 func (mgr *SekaiClientManager) parseAccountFile(path string, data []byte) []SekaiAccountInterface {
 	var accounts []SekaiAccountInterface
 	var raw any
@@ -78,7 +77,6 @@ func (mgr *SekaiClientManager) parseAccountFile(path string, data []byte) []Seka
 	return accounts
 }
 
-// parseAccountMap parses account data from a map
 func (mgr *SekaiClientManager) parseAccountMap(m map[string]any, path string, idx int) SekaiAccountInterface {
 	b, _ := sonic.Marshal(m)
 
@@ -295,7 +293,6 @@ func (mgr *SekaiClientManager) Shutdown() error {
 	return nil
 }
 
-// handleUpgradeError handles upgrade required errors
 func (mgr *SekaiClientManager) handleUpgradeError() (HarukiSekaiAPIFailedResponse, int, error) {
 	mgr.Logger.Warnf("%s Server upgrade required, re-parsing version...", strings.ToUpper(string(mgr.Server)))
 	if err := mgr.parseVersion(); err != nil {
@@ -309,7 +306,6 @@ func (mgr *SekaiClientManager) handleUpgradeError() (HarukiSekaiAPIFailedRespons
 	return HarukiSekaiAPIFailedResponse{}, 0, nil
 }
 
-// handleSessionError handles session errors
 func (mgr *SekaiClientManager) handleSessionError(ctx context.Context) (HarukiSekaiAPIFailedResponse, int, error) {
 	mgr.Logger.Warnf("%s Server cookies expired, re-parsing...", strings.ToUpper(string(mgr.Server)))
 	if err := mgr.parseCookies(ctx); err != nil {
@@ -323,7 +319,6 @@ func (mgr *SekaiClientManager) handleSessionError(ctx context.Context) (HarukiSe
 	return HarukiSekaiAPIFailedResponse{}, 0, nil
 }
 
-// processSuccessResponse processes successful API responses
 func (mgr *SekaiClientManager) processSuccessResponse(client *SekaiClient, response *resty.Response, statusCode int) (any, int, error) {
 	result, err := client.handleResponse(*response)
 	if err != nil {
@@ -340,7 +335,6 @@ func (mgr *SekaiClientManager) processSuccessResponse(client *SekaiClient, respo
 	return result, statusCode, nil
 }
 
-// handleGetError handles errors from client.Get calls
 func (mgr *SekaiClientManager) handleGetError(getErr error, retryCount, maxRetries int) (HarukiSekaiAPIFailedResponse, int, error, bool) {
 	var ue *UpgradeRequiredError
 	if errors.As(getErr, &ue) {

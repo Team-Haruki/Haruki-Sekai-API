@@ -24,7 +24,6 @@ func loadStructures(path string) (*orderedmap.OrderedMap, error) {
 	return om, nil
 }
 
-// extractTupleKeys extracts tuple keys from various types
 func extractTupleKeys(v interface{}) []interface{} {
 	switch s := v.(type) {
 	case *orderedmap.OrderedMap:
@@ -49,7 +48,6 @@ func extractTupleKeys(v interface{}) []interface{} {
 	return nil
 }
 
-// buildDictFromTuple builds an ordered map from tuple keys and values
 func buildDictFromTuple(tupleKeys []interface{}, tupleVals []interface{}) *orderedmap.OrderedMap {
 	dict := orderedmap.New()
 	dict.SetEscapeHTML(false)
@@ -67,7 +65,6 @@ func buildDictFromTuple(tupleKeys []interface{}, tupleVals []interface{}) *order
 	return dict
 }
 
-// handleSimpleTuple handles simple tuple structures with single key-value
 func handleSimpleTuple(keyStructure []interface{}, arrayData []interface{}) (*orderedmap.OrderedMap, bool) {
 	if len(keyStructure) != 2 {
 		return nil, false
@@ -97,7 +94,6 @@ func handleSimpleTuple(keyStructure []interface{}, arrayData []interface{}) (*or
 	return result, true
 }
 
-// processTupleField processes a tuple field structure
 func processTupleField(second interface{}, arrayData []interface{}, i int) *orderedmap.OrderedMap {
 	tupleKeys := extractTupleKeys(second)
 	if tupleKeys == nil {
@@ -116,7 +112,6 @@ func processTupleField(second interface{}, arrayData []interface{}, i int) *orde
 	return buildDictFromTuple(tupleKeys, tupleVals)
 }
 
-// processNestedArray processes nested array structures
 func processNestedArray(arrayData []interface{}, i int, second []interface{}) []*orderedmap.OrderedMap {
 	subList := make([]*orderedmap.OrderedMap, 0)
 	if i >= len(arrayData) {
@@ -147,24 +142,12 @@ func processNestedArray(arrayData []interface{}, i int, second []interface{}) []
 	return subList
 }
 
-// processDirectValue processes direct value assignments
-func processDirectValue(arrayData []interface{}, i int) interface{} {
-	if i < len(arrayData) {
-		return arrayData[i]
-	}
-	return nil
-}
-
 func RestoreDict(arrayData []interface{}, keyStructure []interface{}) *orderedmap.OrderedMap {
 	result := orderedmap.New()
 	result.SetEscapeHTML(false)
-
-	// Handle simple tuple case
 	if simpleResult, ok := handleSimpleTuple(keyStructure, arrayData); ok {
 		return simpleResult
 	}
-
-	// Process each key in the structure
 	for i, key := range keyStructure {
 		switch k := key.(type) {
 		case []interface{}:
@@ -196,7 +179,6 @@ func RestoreDict(arrayData []interface{}, keyStructure []interface{}) *orderedma
 	return result
 }
 
-// extractEnumOM extracts and normalizes enum ordered map
 func extractEnumOM(data *orderedmap.OrderedMap) *orderedmap.OrderedMap {
 	v, ok := data.Get("__ENUM__")
 	if !ok {
@@ -222,7 +204,6 @@ func extractEnumOM(data *orderedmap.OrderedMap) *orderedmap.OrderedMap {
 	return nil
 }
 
-// convertEnumToSlice converts enum ordered map to slice
 func convertEnumToSlice(e *orderedmap.OrderedMap) []interface{} {
 	keys := e.Keys()
 	allNum := true
@@ -243,7 +224,6 @@ func convertEnumToSlice(e *orderedmap.OrderedMap) []interface{} {
 	return convertStringEnumToSlice(e, keys)
 }
 
-// convertNumericEnumToSlice converts numeric indexed enum to slice
 func convertNumericEnumToSlice(e *orderedmap.OrderedMap, keys []string, idx []int) []interface{} {
 	order := make([]int, len(keys))
 	for i := range order {
@@ -270,7 +250,6 @@ func convertNumericEnumToSlice(e *orderedmap.OrderedMap, keys []string, idx []in
 	return enumSlice
 }
 
-// convertStringEnumToSlice converts string indexed enum to slice
 func convertStringEnumToSlice(e *orderedmap.OrderedMap, keys []string) []interface{} {
 	enumSlice := make([]interface{}, 0, len(keys))
 	for _, k := range keys {
@@ -280,7 +259,6 @@ func convertStringEnumToSlice(e *orderedmap.OrderedMap, keys []string) []interfa
 	return enumSlice
 }
 
-// convertIntType converts integer-like types to int
 func convertIntType(v interface{}) (int, bool) {
 	switch t := v.(type) {
 	case int:
@@ -307,7 +285,6 @@ func convertIntType(v interface{}) (int, bool) {
 	return 0, false
 }
 
-// convertFloatType converts float types to int
 func convertFloatType(v interface{}) (int, bool) {
 	switch t := v.(type) {
 	case float32:
@@ -318,7 +295,6 @@ func convertFloatType(v interface{}) (int, bool) {
 	return 0, false
 }
 
-// convertStringType converts string types to int
 func convertStringType(v interface{}) (int, bool) {
 	switch t := v.(type) {
 	case string:
@@ -333,7 +309,6 @@ func convertStringType(v interface{}) (int, bool) {
 	return 0, false
 }
 
-// convertValueToIndex converts various types to integer index
 func convertValueToIndex(v interface{}) int {
 	if idx, ok := convertIntType(v); ok {
 		return idx
@@ -347,7 +322,6 @@ func convertValueToIndex(v interface{}) int {
 	return -1
 }
 
-// mapEnumValue maps a single value using enum slice
 func mapEnumValue(v interface{}, enumSlice []interface{}) interface{} {
 	if v == nil {
 		return nil
@@ -360,7 +334,6 @@ func mapEnumValue(v interface{}, enumSlice []interface{}) interface{} {
 	return v
 }
 
-// processEnumColumn processes a column with enum mapping
 func processEnumColumn(dataColumn []interface{}, enumColRaw interface{}) []interface{} {
 	var enumSlice []interface{}
 
@@ -407,7 +380,6 @@ func RestoreCompactData(data *orderedmap.OrderedMap) []*orderedmap.OrderedMap {
 			dataColumn = []interface{}{}
 		}
 
-		// Process enum mapping if available
 		if enumOM != nil {
 			if enumColRaw, ok := enumOM.Get(key); ok {
 				dataColumn = processEnumColumn(dataColumn, enumColRaw)
@@ -444,7 +416,6 @@ func RestoreCompactData(data *orderedmap.OrderedMap) []*orderedmap.OrderedMap {
 	return result
 }
 
-// handleCompactKey processes compact keys in master data
 func handleCompactKey(key string, value any, restoredCompactMaster *orderedmap.OrderedMap) bool {
 	if len(key) >= 7 && key[:7] == "compact" {
 		if vOm, ok := value.(*orderedmap.OrderedMap); ok {
@@ -460,7 +431,6 @@ func handleCompactKey(key string, value any, restoredCompactMaster *orderedmap.O
 	return false
 }
 
-// restoreStructuredData restores data using structure definitions
 func restoreStructuredData(key string, value any, structures *orderedmap.OrderedMap, masterData *orderedmap.OrderedMap) any {
 	structDefVal, exists := structures.Get(key)
 	if !exists {
@@ -487,7 +457,6 @@ func restoreStructuredData(key string, value any, structures *orderedmap.Ordered
 	return any(newArr)
 }
 
-// extractValueIDs extracts IDs from an array of ordered maps
 func extractValueIDs(arr []*orderedmap.OrderedMap, idKey string) map[any]bool {
 	valueIDs := make(map[any]bool, len(arr))
 	for _, item := range arr {
@@ -498,7 +467,6 @@ func extractValueIDs(arr []*orderedmap.OrderedMap, idKey string) map[any]bool {
 	return valueIDs
 }
 
-// convertToOrderedMap converts various types to OrderedMap
 func convertToOrderedMap(x any) *orderedmap.OrderedMap {
 	switch t := x.(type) {
 	case *orderedmap.OrderedMap:
@@ -519,7 +487,6 @@ func convertToOrderedMap(x any) *orderedmap.OrderedMap {
 	return nil
 }
 
-// mergeAndSortData merges new data with existing data and sorts by ID
 func mergeAndSortData(value any, arr []*orderedmap.OrderedMap, valueIDs map[any]bool, idKey string) []*orderedmap.OrderedMap {
 	merged := make([]*orderedmap.OrderedMap, 0)
 	if vs, ok := value.([]interface{}); ok {
@@ -543,7 +510,6 @@ func mergeAndSortData(value any, arr []*orderedmap.OrderedMap, valueIDs map[any]
 	return merged
 }
 
-// handleIDMerging handles merging of data with ID keys
 func handleIDMerging(key string, value any, idKey string, masterData *orderedmap.OrderedMap) {
 	if idKey == "" {
 		return
@@ -582,22 +548,14 @@ func NuverseMasterRestorer(masterData *orderedmap.OrderedMap, nuverseStructureFi
 					panic(fmt.Errorf("error restoring key %s: %v", key, r))
 				}
 			}()
-
-			// Handle compact keys
 			if handleCompactKey(key, value, restoredCompactMaster) {
 				return
 			}
-
-			// Determine ID key for special cases
 			var idKey string
 			if key == "eventCards" {
 				idKey = "cardId"
 			}
-
-			// Restore structured data
 			value = restoreStructuredData(key, value, structures, masterData)
-
-			// Handle ID merging
 			handleIDMerging(key, value, idKey, masterData)
 		}()
 	}

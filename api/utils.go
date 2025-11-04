@@ -9,12 +9,12 @@ import (
 
 	"haruki-sekai-api/utils"
 
-	"github.com/gofiber/fiber/v2"
+	"github.com/gofiber/fiber/v3"
 	"github.com/golang-jwt/jwt/v5"
 	"gorm.io/gorm"
 )
 
-func resolveServerFromCtx(c *fiber.Ctx) (utils.HarukiSekaiServerRegion, error) {
+func resolveServerFromCtx(c fiber.Ctx) (utils.HarukiSekaiServerRegion, error) {
 	s := strings.ToLower(c.Params("server"))
 	if s == "" {
 		return "", fmt.Errorf("missing server")
@@ -22,7 +22,6 @@ func resolveServerFromCtx(c *fiber.Ctx) (utils.HarukiSekaiServerRegion, error) {
 	return utils.ParseSekaiServerRegion(s)
 }
 
-// parseJWTToken parses and validates the JWT token
 func parseJWTToken(tokenStr string) (*jwt.Token, jwt.MapClaims, error) {
 	if HarukiSekaiUserJWTSigningKey == nil || *HarukiSekaiUserJWTSigningKey == "" {
 		return nil, nil, fmt.Errorf("JWT secret not configured")
@@ -42,7 +41,6 @@ func parseJWTToken(tokenStr string) (*jwt.Token, jwt.MapClaims, error) {
 	return token, claims, nil
 }
 
-// checkRedisCache checks if user is cached in Redis
 func checkRedisCache(uid, server string) bool {
 	if HarukiSekaiRedis == nil {
 		return false
@@ -57,7 +55,6 @@ func checkRedisCache(uid, server string) bool {
 	return false
 }
 
-// validateUserInDB validates user credentials in database
 func validateUserInDB(uid, credential, server string) (*SekaiUser, error) {
 	var user SekaiUser
 	if err := HarukiSekaiUserDB.Where("id = ?", uid).Take(&user).Error; err != nil {
@@ -81,7 +78,6 @@ func validateUserInDB(uid, credential, server string) (*SekaiUser, error) {
 	return &user, nil
 }
 
-// cacheUserInRedis caches user in Redis
 func cacheUserInRedis(uid, server string) {
 	if HarukiSekaiRedis == nil {
 		return
@@ -94,7 +90,7 @@ func cacheUserInRedis(uid, server string) {
 }
 
 func validateUserTokenMiddleware() fiber.Handler {
-	return func(c *fiber.Ctx) error {
+	return func(c fiber.Ctx) error {
 		if HarukiSekaiUserDB == nil {
 			return c.Next()
 		}

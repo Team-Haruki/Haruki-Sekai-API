@@ -95,7 +95,6 @@ func (mgr *SekaiClientManager) callAllHarukiAssetUpdater(assetVersion, assetHash
 	wg.Wait()
 }
 
-// checkCPServerVersions checks for CP/EN server version updates
 func (mgr *SekaiClientManager) checkCPServerVersions(loginResponse *utils.HarukiSekaiLoginResponse, currentLocalVersion *orderedmap.OrderedMap) (bool, bool, []string, error) {
 	currentLocalDataVersion := utils.GetString(currentLocalVersion, "dataVersion")
 	currentLocalAssetVersion := utils.GetString(currentLocalVersion, "assetVersion")
@@ -132,7 +131,6 @@ func (mgr *SekaiClientManager) checkCPServerVersions(loginResponse *utils.Haruki
 	return requireUpdateMasterData, requireUpdateAsset, splitMasterDataList, nil
 }
 
-// checkNuverseServerVersions checks for Nuverse server version updates
 func (mgr *SekaiClientManager) checkNuverseServerVersions(loginResponse *utils.HarukiSekaiLoginResponse, currentLocalVersion *orderedmap.OrderedMap) (bool, bool, int) {
 	currentLocalCDNVersion := utils.GetInt(currentLocalVersion, "cdnVersion")
 	currentServerCDNVersion := loginResponse.CDNVersion
@@ -145,7 +143,6 @@ func (mgr *SekaiClientManager) checkNuverseServerVersions(loginResponse *utils.H
 	return false, false, currentServerCDNVersion
 }
 
-// saveVersionFiles saves the version information to files
 func (mgr *SekaiClientManager) saveVersionFiles(currentLocalVersion *orderedmap.OrderedMap, currentServerDataVersion string) error {
 	if err := mgr.saveFile(mgr.ServerConfig.VersionPath, currentLocalVersion); err != nil {
 		mgr.Logger.Errorf("Sekai updater failed to save version file: %v", err)
@@ -303,7 +300,6 @@ func (mgr *SekaiClientManager) updateMasterData(dataVersion string, paths []stri
 	runtime.GC()
 }
 
-// processCPMasterPath processes a single master data path
 func (mgr *SekaiClientManager) processCPMasterPath(ctx context.Context, client *SekaiClient, rawPath string, allErrors *[]error, errorsMu *sync.Mutex) {
 	p := rawPath
 	if !strings.HasPrefix(p, "/") {
@@ -337,7 +333,6 @@ func (mgr *SekaiClientManager) processCPMasterPath(ctx context.Context, client *
 	runtime.GC()
 }
 
-// saveCPMasterFiles saves individual master files from ordered map
 func (mgr *SekaiClientManager) saveCPMasterFiles(om *orderedmap.OrderedMap, path string, allErrors *[]error, errorsMu *sync.Mutex) {
 	keys := om.Keys()
 	var processedFiles sync.Map
@@ -421,7 +416,6 @@ func (mgr *SekaiClientManager) streamCPMasterData(client *SekaiClient, paths []s
 	return nil
 }
 
-// fetchNuverseMasterInfo fetches and unpacks Nuverse master info
 func (mgr *SekaiClientManager) fetchNuverseMasterInfo(client *SekaiClient, cdnVersion int) (*orderedmap.OrderedMap, error) {
 	ctx := context.Background()
 	u := fmt.Sprintf("%s/master-data-%d.info", client.ServerConfig.NuverseMasterDataURL, cdnVersion)
@@ -452,7 +446,6 @@ func (mgr *SekaiClientManager) fetchNuverseMasterInfo(client *SekaiClient, cdnVe
 	return masterOM, nil
 }
 
-// saveNuverseMasterBatch saves a batch of Nuverse master files
 func (mgr *SekaiClientManager) saveNuverseMasterBatch(batchKeys []string, restored *orderedmap.OrderedMap, restoredMu *sync.Mutex, processedFiles *sync.Map, allErrors *[]error, errorsMu *sync.Mutex, savedCount *int32) {
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, 2)
