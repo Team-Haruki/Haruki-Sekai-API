@@ -27,7 +27,7 @@ type BackendConfig struct {
 	AccessLogPath          string   `yaml:"access_log_path"`
 	SekaiUserJWTSigningKey string   `yaml:"sekai_user_jwt_signing_key,omitempty"`
 	EnableTrustProxy       bool     `yaml:"enable_trust_proxy"`
-	TrustProxies           []string `yaml:"trust_proxies"`
+	TrustProxies           []string `yaml:"trusted_proxies"`
 	ProxyHeader            string   `yaml:"proxy_header"`
 }
 
