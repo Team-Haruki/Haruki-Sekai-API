@@ -52,7 +52,6 @@ func (mgr *SekaiClientManager) saveFile(filePath string, data any) error {
 	}
 
 	_, err = file.Write(jsonData)
-	jsonData = nil
 	return err
 }
 
@@ -96,10 +95,74 @@ func (mgr *SekaiClientManager) callAllHarukiAssetUpdater(assetVersion, assetHash
 	wg.Wait()
 }
 
+func (mgr *SekaiClientManager) checkCPServerVersions(loginResponse *utils.HarukiSekaiLoginResponse, currentLocalVersion *orderedmap.OrderedMap) (bool, bool, []string, error) {
+	currentLocalDataVersion := utils.GetString(currentLocalVersion, "dataVersion")
+	currentLocalAssetVersion := utils.GetString(currentLocalVersion, "assetVersion")
+
+	requireUpdateMasterData := false
+	requireUpdateAsset := false
+	var splitMasterDataList []string
+
+	isNewer, err := utils.CompareVersion(loginResponse.DataVersion, currentLocalDataVersion)
+	if err != nil {
+		mgr.Logger.Warnf("Sekai updater failed to compare data version: %v", err)
+		return false, false, nil, err
+	}
+	if isNewer {
+		mgr.Logger.Criticalf("Sekai updater found new master data version: %s", loginResponse.DataVersion)
+		if loginResponse.SuiteMasterSplitPath != nil {
+			splitMasterDataList = loginResponse.SuiteMasterSplitPath
+		} else {
+			mgr.Logger.Warnf("Sekai updater can not found suiteMasterSplitPath")
+		}
+		requireUpdateMasterData = true
+	}
+
+	isNewer, err = utils.CompareVersion(loginResponse.AssetVersion, currentLocalAssetVersion)
+	if err != nil {
+		mgr.Logger.Warnf("Sekai updater failed to compare asset version: %v", err)
+		return false, false, nil, err
+	}
+	if isNewer {
+		mgr.Logger.Criticalf("Sekai updater found new asset version: %s", loginResponse.AssetVersion)
+		requireUpdateAsset = true
+	}
+
+	return requireUpdateMasterData, requireUpdateAsset, splitMasterDataList, nil
+}
+
+func (mgr *SekaiClientManager) checkNuverseServerVersions(loginResponse *utils.HarukiSekaiLoginResponse, currentLocalVersion *orderedmap.OrderedMap) (bool, bool, int) {
+	currentLocalCDNVersion := utils.GetInt(currentLocalVersion, "cdnVersion")
+	currentServerCDNVersion := loginResponse.CDNVersion
+
+	if currentLocalCDNVersion < currentServerCDNVersion {
+		mgr.Logger.Criticalf("Sekai updater found new cdn version: %d", currentServerCDNVersion)
+		return true, true, currentServerCDNVersion
+	}
+
+	return false, false, currentServerCDNVersion
+}
+
+func (mgr *SekaiClientManager) saveVersionFiles(currentLocalVersion *orderedmap.OrderedMap, currentServerDataVersion string) error {
+	if err := mgr.saveFile(mgr.ServerConfig.VersionPath, currentLocalVersion); err != nil {
+		mgr.Logger.Errorf("Sekai updater failed to save version file: %v", err)
+		return err
+	}
+
+	versionDir := filepath.Dir(mgr.ServerConfig.VersionPath)
+	versionedFile := filepath.Join(versionDir, currentServerDataVersion+".json")
+	if err := mgr.saveFile(versionedFile, currentLocalVersion); err != nil {
+		mgr.Logger.Errorf("Sekai updater failed to save version file: %v", err)
+		return err
+	}
+
+	return nil
+}
+
 func (mgr *SekaiClientManager) CheckSekaiMasterUpdate() {
 	ctx := context.Background()
-	var requireUpdateMasterData = false
-	var requireUpdateAsset = false
+	var requireUpdateMasterData bool
+	var requireUpdateAsset bool
 	var currentServerCDNVersion int
 	var splitMasterDataList []string
 
@@ -122,38 +185,14 @@ func (mgr *SekaiClientManager) CheckSekaiMasterUpdate() {
 	currentServerDataVersion := loginResponse.DataVersion
 	currentServerAssetVersion := loginResponse.AssetVersion
 	currentServerAssetHash := loginResponse.AssetHash
+
 	if mgr.Server == utils.HarukiSekaiServerRegionJP || mgr.Server == utils.HarukiSekaiServerRegionEN {
-		currentLocalDataVersion := utils.GetString(currentLocalVersion, "dataVersion")
-		currentLocalAssetVersion := utils.GetString(currentLocalVersion, "assetVersion")
-		isNewer, err := utils.CompareVersion(currentServerDataVersion, currentLocalDataVersion)
+		requireUpdateMasterData, requireUpdateAsset, splitMasterDataList, err = mgr.checkCPServerVersions(loginResponse, currentLocalVersion)
 		if err != nil {
-			mgr.Logger.Warnf("Sekai updater failed to compare data version: %v", err)
 			return
-		} else if isNewer {
-			mgr.Logger.Criticalf("Sekai updater found new master data version: %s", currentServerDataVersion)
-			if loginResponse.SuiteMasterSplitPath != nil {
-				splitMasterDataList = loginResponse.SuiteMasterSplitPath
-			} else {
-				mgr.Logger.Warnf("Sekai updater can not found suiteMasterSplitPath")
-			}
-			requireUpdateMasterData = true
-		}
-		isNewer, err = utils.CompareVersion(currentServerAssetVersion, currentLocalAssetVersion)
-		if err != nil {
-			mgr.Logger.Warnf("Sekai updater failed to compare asset version: %v", err)
-			return
-		} else if isNewer {
-			mgr.Logger.Criticalf("Sekai updater found new asset version: %s", currentServerAssetVersion)
-			requireUpdateAsset = true
 		}
 	} else {
-		currentLocalCDNVersion := utils.GetInt(currentLocalVersion, "cdnVersion")
-		currentServerCDNVersion = loginResponse.CDNVersion
-		if currentLocalCDNVersion < currentServerCDNVersion {
-			mgr.Logger.Criticalf("Sekai updater found new cdn version: %d", currentServerCDNVersion)
-			requireUpdateMasterData = true
-			requireUpdateAsset = true
-		}
+		requireUpdateMasterData, requireUpdateAsset, currentServerCDNVersion = mgr.checkNuverseServerVersions(loginResponse, currentLocalVersion)
 	}
 
 	if requireUpdateAsset {
@@ -173,15 +212,7 @@ func (mgr *SekaiClientManager) CheckSekaiMasterUpdate() {
 			currentLocalVersion.Set("cdnVersion", currentServerCDNVersion)
 		}
 
-		if err := mgr.saveFile(mgr.ServerConfig.VersionPath, currentLocalVersion); err != nil {
-			mgr.Logger.Errorf("Sekai updater failed to save version file: %v", err)
-			return
-		}
-
-		versionDir := filepath.Dir(mgr.ServerConfig.VersionPath)
-		versionedFile := filepath.Join(versionDir, currentServerDataVersion+".json")
-		if err := mgr.saveFile(versionedFile, currentLocalVersion); err != nil {
-			mgr.Logger.Errorf("Sekai updater failed to save version file: %v", err)
+		if err := mgr.saveVersionFiles(currentLocalVersion, currentServerDataVersion); err != nil {
 			return
 		}
 	}
@@ -269,15 +300,95 @@ func (mgr *SekaiClientManager) updateMasterData(dataVersion string, paths []stri
 	runtime.GC()
 }
 
+func (mgr *SekaiClientManager) processCPMasterPath(ctx context.Context, client *SekaiClient, rawPath string, allErrors *[]error, errorsMu *sync.Mutex) {
+	p := rawPath
+	if !strings.HasPrefix(p, "/") {
+		p = "/" + p
+	}
+
+	resp, err := client.Get(ctx, p, nil)
+	if err != nil {
+		errorsMu.Lock()
+		*allErrors = append(*allErrors, fmt.Errorf("failed to get %s: %w", rawPath, err))
+		errorsMu.Unlock()
+		return
+	}
+
+	body := resp.Body()
+	om, err := client.Cryptor.UnpackOrdered(body)
+	if err != nil {
+		errorsMu.Lock()
+		*allErrors = append(*allErrors, fmt.Errorf("unpack master part failed: path=%s, err=%w", rawPath, err))
+		errorsMu.Unlock()
+		return
+	}
+	if om == nil {
+		errorsMu.Lock()
+		*allErrors = append(*allErrors, fmt.Errorf("unexpected master data: nil ordered map at path %s", rawPath))
+		errorsMu.Unlock()
+		return
+	}
+
+	mgr.saveCPMasterFiles(om, rawPath, allErrors, errorsMu)
+	runtime.GC()
+}
+
+func (mgr *SekaiClientManager) saveCPMasterFiles(om *orderedmap.OrderedMap, path string, allErrors *[]error, errorsMu *sync.Mutex) {
+	keys := om.Keys()
+	var processedFiles sync.Map
+	var fileWg sync.WaitGroup
+	fileSem := make(chan struct{}, 2)
+	var hasError bool
+	var savedCount int32
+
+	for _, k := range keys {
+		if _, loaded := processedFiles.LoadOrStore(k, true); loaded {
+			continue
+		}
+		v, ok := om.Get(k)
+		if !ok {
+			mgr.Logger.Warnf("Could not get value for file %s from path %s", k, path)
+			continue
+		}
+		fileWg.Add(1)
+		go func(key string, value any) {
+			defer fileWg.Done()
+			fileSem <- struct{}{}
+			defer func() {
+				<-fileSem
+				value = nil
+			}()
+			filePath := filepath.Join(mgr.ServerConfig.MasterDir, key+".json")
+			saveErr := mgr.saveFile(filePath, value)
+			if saveErr != nil {
+				mgr.Logger.Errorf("Failed to save %s from path %s: %v", key, path, saveErr)
+				errorsMu.Lock()
+				*allErrors = append(*allErrors, fmt.Errorf("failed to save %s from path %s: %w", key, path, saveErr))
+				errorsMu.Unlock()
+				hasError = true
+			} else {
+				atomic.AddInt32(&savedCount, 1)
+			}
+		}(k, v)
+	}
+	fileWg.Wait()
+
+	if hasError {
+		mgr.Logger.Warnf("Processed path %s with errors: saved %d/%d files", path, savedCount, len(keys))
+	}
+}
+
 func (mgr *SekaiClientManager) streamCPMasterData(client *SekaiClient, paths []string) error {
 	if err := os.MkdirAll(mgr.ServerConfig.MasterDir, 0755); err != nil {
 		return fmt.Errorf("failed to create master data directory: %w", err)
 	}
+
 	ctx := context.Background()
 	var allErrors []error
 	var errorsMu sync.Mutex
 	var pathWg sync.WaitGroup
 	pathSem := make(chan struct{}, 2)
+
 	for _, rawPath := range paths {
 		if rawPath == "" {
 			continue
@@ -287,78 +398,11 @@ func (mgr *SekaiClientManager) streamCPMasterData(client *SekaiClient, paths []s
 			defer pathWg.Done()
 			pathSem <- struct{}{}
 			defer func() { <-pathSem }()
-			p := rp
-			if !strings.HasPrefix(p, "/") {
-				p = "/" + p
-			}
-			resp, err := client.Get(ctx, p, nil)
-			if err != nil {
-				errorsMu.Lock()
-				allErrors = append(allErrors, fmt.Errorf("failed to get %s: %w", rp, err))
-				errorsMu.Unlock()
-				return
-			}
-			body := resp.Body()
-			om, err := client.Cryptor.UnpackOrdered(body)
-			body = nil
-			if err != nil {
-				errorsMu.Lock()
-				allErrors = append(allErrors, fmt.Errorf("unpack master part failed: path=%s, err=%w", rp, err))
-				errorsMu.Unlock()
-				return
-			}
-			if om == nil {
-				errorsMu.Lock()
-				allErrors = append(allErrors, fmt.Errorf("unexpected master data: nil ordered map at path %s", rp))
-				errorsMu.Unlock()
-				return
-			}
-			keys := om.Keys()
-			var processedFiles sync.Map
-			var fileWg sync.WaitGroup
-			fileSem := make(chan struct{}, 2)
-			var hasError bool
-			var savedCount int32
-			for _, k := range keys {
-				if _, loaded := processedFiles.LoadOrStore(k, true); loaded {
-					continue
-				}
-				v, ok := om.Get(k)
-				if !ok {
-					mgr.Logger.Warnf("Could not get value for file %s from path %s", k, rp)
-					continue
-				}
-				fileWg.Add(1)
-				go func(key string, value any) {
-					defer fileWg.Done()
-					fileSem <- struct{}{}
-					defer func() {
-						<-fileSem
-						value = nil
-					}()
-					filePath := filepath.Join(mgr.ServerConfig.MasterDir, key+".json")
-					saveErr := mgr.saveFile(filePath, value)
-					if saveErr != nil {
-						mgr.Logger.Errorf("Failed to save %s from path %s: %v", key, rp, saveErr)
-						errorsMu.Lock()
-						allErrors = append(allErrors, fmt.Errorf("failed to save %s from path %s: %w", key, rp, saveErr))
-						errorsMu.Unlock()
-						hasError = true
-					} else {
-						atomic.AddInt32(&savedCount, 1)
-					}
-				}(k, v)
-				v = nil
-			}
-			fileWg.Wait()
-			om = nil
-			if hasError {
-				mgr.Logger.Warnf("Processed path %s with errors: saved %d/%d files", rp, savedCount, len(keys))
-			}
-			runtime.GC()
+			mgr.processCPMasterPath(ctx, client, rp, &allErrors, &errorsMu)
 		}(rawPath)
 	}
 	pathWg.Wait()
+
 	if len(allErrors) > 0 {
 		mgr.Logger.Errorf("Encountered %d errors while processing master data", len(allErrors))
 		for i, err := range allErrors {
@@ -372,10 +416,7 @@ func (mgr *SekaiClientManager) streamCPMasterData(client *SekaiClient, paths []s
 	return nil
 }
 
-func (mgr *SekaiClientManager) streamNuverseMasterData(client *SekaiClient, cdnVersion int) error {
-	if err := os.MkdirAll(mgr.ServerConfig.MasterDir, 0755); err != nil {
-		return fmt.Errorf("failed to create master data directory: %w", err)
-	}
+func (mgr *SekaiClientManager) fetchNuverseMasterInfo(client *SekaiClient, cdnVersion int) (*orderedmap.OrderedMap, error) {
 	ctx := context.Background()
 	u := fmt.Sprintf("%s/master-data-%d.info", client.ServerConfig.NuverseMasterDataURL, cdnVersion)
 	cli := *client.Session
@@ -386,36 +427,88 @@ func (mgr *SekaiClientManager) streamNuverseMasterData(client *SekaiClient, cdnV
 	req.SetContext(ctx)
 	resp, err := req.Get(u)
 	if err != nil {
-		return fmt.Errorf("request error: %w", err)
+		return nil, fmt.Errorf("request error: %w", err)
 	}
 	if resp == nil {
-		return fmt.Errorf("nil response")
+		return nil, fmt.Errorf("nil response")
 	}
 	status := resp.StatusCode()
 	if status < 200 || status >= 300 {
-		return fmt.Errorf("non-success status=%d", status)
+		return nil, fmt.Errorf("non-success status=%d", status)
 	}
 	masterOM, err := client.Cryptor.UnpackOrdered(resp.Body())
 	if err != nil {
-		return fmt.Errorf("unpack nuverse master info failed: %w", err)
+		return nil, fmt.Errorf("unpack nuverse master info failed: %w", err)
 	}
 	if masterOM == nil {
-		return fmt.Errorf("unexpected nuverse master info: nil ordered map")
+		return nil, fmt.Errorf("unexpected nuverse master info: nil ordered map")
 	}
+	return masterOM, nil
+}
+
+func (mgr *SekaiClientManager) saveNuverseMasterBatch(batchKeys []string, restored *orderedmap.OrderedMap, restoredMu *sync.Mutex, processedFiles *sync.Map, allErrors *[]error, errorsMu *sync.Mutex, savedCount *int32) {
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, 2)
+
+	for _, key := range batchKeys {
+		if _, loaded := processedFiles.LoadOrStore(key, true); loaded {
+			continue
+		}
+		restoredMu.Lock()
+		value, ok := restored.Get(key)
+		if ok {
+			restored.Delete(key)
+		}
+		restoredMu.Unlock()
+		if !ok {
+			continue
+		}
+		wg.Add(1)
+		go func(k string, v any) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() {
+				<-sem
+				v = nil
+			}()
+
+			filePath := filepath.Join(mgr.ServerConfig.MasterDir, k+".json")
+			if err := mgr.saveFile(filePath, v); err != nil {
+				mgr.Logger.Errorf("Failed to save %s: %v", k, err)
+				errorsMu.Lock()
+				*allErrors = append(*allErrors, fmt.Errorf("failed to save %s: %w", k, err))
+				errorsMu.Unlock()
+			} else {
+				atomic.AddInt32(savedCount, 1)
+			}
+		}(key, value)
+	}
+	wg.Wait()
+}
+
+func (mgr *SekaiClientManager) streamNuverseMasterData(client *SekaiClient, cdnVersion int) error {
+	if err := os.MkdirAll(mgr.ServerConfig.MasterDir, 0755); err != nil {
+		return fmt.Errorf("failed to create master data directory: %w", err)
+	}
+
+	masterOM, err := mgr.fetchNuverseMasterInfo(client, cdnVersion)
+	if err != nil {
+		return err
+	}
+
 	restored, err := NuverseMasterRestorer(masterOM, client.ServerConfig.NuverseStructureFilePath)
 	if err != nil {
 		return fmt.Errorf("NuverseMasterRestorer error: %w", err)
 	}
-	masterOM = nil
+
 	keys := restored.Keys()
 	var processedFiles sync.Map
-	var wg sync.WaitGroup
-	var mu sync.Mutex
 	var restoredMu sync.Mutex
+	var errorsMu sync.Mutex
 	var allErrors []error
 	var savedCount int32
-	sem := make(chan struct{}, 2)
 	batchSize := 30
+
 	for i := 0; i < len(keys); i += batchSize {
 		end := i + batchSize
 		if end > len(keys) {
@@ -423,51 +516,15 @@ func (mgr *SekaiClientManager) streamNuverseMasterData(client *SekaiClient, cdnV
 		}
 
 		batchKeys := keys[i:end]
+		mgr.saveNuverseMasterBatch(batchKeys, restored, &restoredMu, &processedFiles, &allErrors, &errorsMu, &savedCount)
 
-		for _, key := range batchKeys {
-			if _, loaded := processedFiles.LoadOrStore(key, true); loaded {
-				continue
-			}
-			restoredMu.Lock()
-			value, ok := restored.Get(key)
-			if ok {
-				restored.Delete(key)
-			}
-			restoredMu.Unlock()
-			if !ok {
-				continue
-			}
-			wg.Add(1)
-			go func(k string, v any) {
-				defer wg.Done()
-				sem <- struct{}{}
-				defer func() {
-					<-sem
-					v = nil
-				}()
-
-				filePath := filepath.Join(mgr.ServerConfig.MasterDir, k+".json")
-				if err := mgr.saveFile(filePath, v); err != nil {
-					mgr.Logger.Errorf("Failed to save %s: %v", k, err)
-					mu.Lock()
-					allErrors = append(allErrors, fmt.Errorf("failed to save %s: %w", k, err))
-					mu.Unlock()
-				} else {
-					atomic.AddInt32(&savedCount, 1)
-				}
-			}(key, value)
-
-			value = nil
-		}
-		wg.Wait()
 		if i > 0 && i%30 == 0 || (i+batchSize) >= len(keys) {
 			runtime.GC()
 		}
 	}
-	restored = nil
-	keys = nil
+
 	if len(allErrors) > 0 {
-		mgr.Logger.Errorf("Encountered %d errors while processing nuverse master data (saved %d/%d files)", len(allErrors), savedCount, len(keys))
+		mgr.Logger.Errorf("Encountered %d errors while processing nuverse master data (saved %d files)", len(allErrors), savedCount)
 		for i, err := range allErrors {
 			if i < 10 {
 				mgr.Logger.Errorf("Error %d: %v", i+1, err)

@@ -12,20 +12,70 @@ import (
 	"github.com/google/uuid"
 )
 
+func (c *SekaiClient) prepareLoginRequest() (string, string) {
+	if _, ok := c.Account.(*SekaiAccountCP); ok {
+		loginURL := fmt.Sprintf("%s/api/user/%s/auth?refreshUpdatedResources=False", c.ServerConfig.APIURL, c.Account.GetUserId())
+		return loginURL, "PUT"
+	}
+	loginURL := fmt.Sprintf("%s/api/user/auth", c.ServerConfig.APIURL)
+	return loginURL, "POST"
+}
+
+func validateLoginResponse(retData *utils.HarukiSekaiLoginResponse) error {
+	if retData.SessionToken == "" || retData.DataVersion == "" || retData.AssetVersion == "" {
+		return fmt.Errorf("invalid login response: missing required fields")
+	}
+	return nil
+}
+
+func extractUserID(userID any) (string, error) {
+	switch v := userID.(type) {
+	case string:
+		return v, nil
+	case int64:
+		return strconv.FormatInt(v, 10), nil
+	case uint64:
+		return strconv.FormatUint(v, 10), nil
+	case int:
+		return strconv.Itoa(v), nil
+	case float64:
+		return strconv.FormatInt(int64(v), 10), nil
+	default:
+		return "", fmt.Errorf("unexpected userId type %T", v)
+	}
+}
+
+func (c *SekaiClient) handleNuverseUserID(retData *utils.HarukiSekaiLoginResponse) error {
+	if _, ok := c.Account.(*SekaiAccountNuverse); !ok {
+		return nil
+	}
+
+	uidStr, err := extractUserID(retData.UserRegistration.UserID)
+	if err != nil {
+		return fmt.Errorf("invalid login response: %w", err)
+	}
+	if uidStr == "" {
+		return fmt.Errorf("invalid login response: missing user ID")
+	}
+	c.Account.SetUserId(uidStr)
+	return nil
+}
+
+func (c *SekaiClient) updateHeadersFromLogin(retData *utils.HarukiSekaiLoginResponse) {
+	c.HeaderLock.Lock()
+	c.Headers["X-Session-Token"] = retData.SessionToken
+	c.Headers["X-Data-Version"] = retData.DataVersion
+	c.Headers["X-Asset-Version"] = retData.AssetVersion
+	c.HeaderLock.Unlock()
+}
+
 func (c *SekaiClient) Login(ctx context.Context) (*utils.HarukiSekaiLoginResponse, error) {
 	loginMsgpack, err := c.Account.Dump()
 	if err != nil {
 		return nil, err
 	}
 
-	var loginURL, method string
-	if _, ok := c.Account.(*SekaiAccountCP); ok {
-		loginURL = fmt.Sprintf("%s/api/user/%s/auth?refreshUpdatedResources=False", c.ServerConfig.APIURL, c.Account.GetUserId())
-		method = "PUT"
-	} else {
-		loginURL = fmt.Sprintf("%s/api/user/auth", c.ServerConfig.APIURL)
-		method = "POST"
-	}
+	loginURL, method := c.prepareLoginRequest()
 
 	encBody, err := c.Cryptor.Pack(loginMsgpack)
 	if err != nil {
@@ -45,10 +95,12 @@ func (c *SekaiClient) Login(ctx context.Context) (*utils.HarukiSekaiLoginRespons
 	if err != nil {
 		return nil, err
 	}
+
 	parsedStatusCode, err := ParseSekaiApiHttpStatus(resp.StatusCode())
 	if err != nil {
 		return nil, NewSekaiUnknownClientException(resp.StatusCode(), string(resp.Body()))
 	}
+
 	switch parsedStatusCode {
 	case SekaiApiHttpStatusGameUpgrade:
 		c.Logger.Warnf("Game upgrade required. (Current version: %s)", c.Headers["X-App-Version"])
@@ -56,43 +108,21 @@ func (c *SekaiClient) Login(ctx context.Context) (*utils.HarukiSekaiLoginRespons
 	case SekaiApiHttpStatusUnderMaintenance:
 		return nil, NewUnderMaintenanceError()
 	case SekaiApiHttpStatusOk:
-
 		retData, err := UnpackInto[utils.HarukiSekaiLoginResponse](c.Cryptor, resp.Body())
 		if err != nil {
 			c.Logger.Errorf("Unpack login response error : %v", err)
 			return nil, err
 		}
 
-		if retData.SessionToken == "" || retData.DataVersion == "" || retData.AssetVersion == "" {
-			return nil, fmt.Errorf("invalid login response: missing required fields")
+		if err := validateLoginResponse(retData); err != nil {
+			return nil, err
 		}
 
-		if _, ok := c.Account.(*SekaiAccountNuverse); ok {
-			var uidStr string
-			switch v := retData.UserRegistration.UserID.(type) {
-			case string:
-				uidStr = v
-			case int64:
-				uidStr = strconv.FormatInt(v, 10)
-			case uint64:
-				uidStr = strconv.FormatUint(v, 10)
-			case int:
-				uidStr = strconv.Itoa(v)
-			case float64:
-				uidStr = strconv.FormatInt(int64(v), 10)
-			default:
-				return nil, fmt.Errorf("invalid login response: unexpected userId type %T", v)
-			}
-			if uidStr == "" {
-				return nil, fmt.Errorf("invalid login response: missing user ID")
-			}
-			c.Account.SetUserId(uidStr)
+		if err := c.handleNuverseUserID(retData); err != nil {
+			return nil, err
 		}
-		c.HeaderLock.Lock()
-		c.Headers["X-Session-Token"] = retData.SessionToken
-		c.Headers["X-Data-Version"] = retData.DataVersion
-		c.Headers["X-Asset-Version"] = retData.AssetVersion
-		c.HeaderLock.Unlock()
+
+		c.updateHeadersFromLogin(retData)
 
 		c.Logger.Infof("Login successfully, User ID: %s", c.Account.GetUserId())
 		return retData, nil

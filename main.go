@@ -9,8 +9,9 @@ import (
 	"haruki-sekai-api/config"
 	harukiLogger "haruki-sekai-api/utils/logger"
 
-	"github.com/gofiber/fiber/v2"
-	"github.com/gofiber/fiber/v2/middleware/logger"
+	"github.com/bytedance/sonic"
+	"github.com/gofiber/fiber/v3"
+	"github.com/gofiber/fiber/v3/middleware/logger"
 )
 
 func main() {
@@ -37,7 +38,9 @@ func main() {
 		os.Exit(1)
 	}
 	app := fiber.New(fiber.Config{
-		BodyLimit: 30 * 1024 * 1024,
+		BodyLimit:   30 * 1024 * 1024,
+		JSONEncoder: sonic.Marshal,
+		JSONDecoder: sonic.Unmarshal,
 	})
 
 	if config.Cfg.Backend.AccessLog != "" {
@@ -51,7 +54,7 @@ func main() {
 			defer func(accessLogFile *os.File) {
 				_ = accessLogFile.Close()
 			}(accessLogFile)
-			logCfg.Output = accessLogFile
+			logCfg.Stream = accessLogFile
 		}
 		app.Use(logger.New(logCfg))
 	}
@@ -60,12 +63,18 @@ func main() {
 
 	addr := fmt.Sprintf("%s:%d", config.Cfg.Backend.Host, config.Cfg.Backend.Port)
 	if config.Cfg.Backend.SSL {
-		if err := app.ListenTLS(addr, config.Cfg.Backend.SSLCert, config.Cfg.Backend.SSLKey); err != nil {
+		mainLogger.Infof("SSL enabled, starting HTTPS server at %s", addr)
+		if err := app.Listen(addr, fiber.ListenConfig{
+			CertFile:              config.Cfg.Backend.SSLCert,
+			CertKeyFile:           config.Cfg.Backend.SSLKey,
+			DisableStartupMessage: true,
+		}); err != nil {
 			mainLogger.Errorf("failed to start HTTPS server: %v", err)
 			os.Exit(1)
 		}
 	} else {
-		if err := app.Listen(addr); err != nil {
+		mainLogger.Infof("Starting HTTP server at %s", addr)
+		if err := app.Listen(addr, fiber.ListenConfig{DisableStartupMessage: true}); err != nil {
 			mainLogger.Errorf("failed to start HTTP server: %v", err)
 			os.Exit(1)
 		}
