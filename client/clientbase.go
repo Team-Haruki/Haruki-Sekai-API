@@ -122,7 +122,7 @@ func (c *SekaiClient) handleResponse(response resty.Response) (any, error) {
 	contentType := strings.ToLower(response.Header().Get("Content-Type"))
 
 	if lo.Contains([]string{"application/octet-stream", "binary/octet-stream"}, contentType) {
-		unpackResponse, err := c.Cryptor.Unpack(response.Body())
+		unpackResponse, err := c.Cryptor.UnpackOrdered(response.Body())
 		if err != nil {
 			c.Logger.Errorf("Unpack response error : %v", err)
 			return nil, err

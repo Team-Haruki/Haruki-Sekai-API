@@ -329,9 +329,6 @@ func (mgr *SekaiClientManager) processSuccessResponse(client *SekaiClient, respo
 		}
 		return resp, statusCode, err
 	}
-	if m, ok := result.(map[string]any); ok {
-		return m, statusCode, nil
-	}
 	return result, statusCode, nil
 }
 
