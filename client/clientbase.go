@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/bytedance/sonic"
 	"github.com/go-resty/resty/v2"
 	"github.com/google/uuid"
 	"github.com/jtacoma/uritemplates"
@@ -45,6 +46,12 @@ func NewSekaiClient(
 	if err != nil {
 		panic(err)
 	}
+
+	headers := make(map[string]string, len(serverConfig.Headers))
+	for k, v := range serverConfig.Headers {
+		headers[k] = v
+	}
+
 	return &SekaiClient{
 		Server:        server,
 		ServerConfig:  serverConfig,
@@ -53,7 +60,7 @@ func NewSekaiClient(
 		VersionHelper: versionHelper,
 		Proxy:         proxy,
 		Cryptor:       cryptor,
-		Headers:       serverConfig.Headers,
+		Headers:       headers,
 		APILock:       &sync.Mutex{},
 		HeaderLock:    &sync.Mutex{},
 	}
@@ -103,7 +110,7 @@ func (c *SekaiClient) Init() error {
 	if c.Proxy != "" {
 		c.Session.SetProxy(c.Proxy)
 	}
-	c.Logger = logger.NewLogger(fmt.Sprintf("SekaiClient%s", strings.ToUpper(string(c.Server))), "DEBUG", nil)
+	c.Logger = logger.NewLogger(fmt.Sprintf("SekaiClient%s", strings.ToUpper(string(c.Server))), "INFO", nil)
 	if err := c.ParseCookies(context.Background()); err != nil {
 		return err
 	}
@@ -140,7 +147,8 @@ func (c *SekaiClient) handleResponse(response resty.Response) (any, error) {
 		case SekaiApiHttpStatusUnderMaintenance:
 			return nil, NewUnderMaintenanceError()
 		default:
-			return nil, NewSekaiUnknownClientException(response.StatusCode(), string(response.Body()))
+			resp, _ := sonic.Marshal(unpackResponse)
+			return nil, NewSekaiUnknownClientException(response.StatusCode(), string(resp))
 		}
 	} else {
 		if statusCode == SekaiApiHttpStatusServerError {
@@ -156,7 +164,15 @@ func (c *SekaiClient) handleResponse(response resty.Response) (any, error) {
 func (c *SekaiClient) prepareRequest(ctx context.Context, data any, params map[string]any) (*resty.Request, error) {
 	req := c.Session.R()
 	req.SetContext(ctx)
+
+	c.HeaderLock.Lock()
 	req.SetHeaders(c.Headers)
+	currentToken := c.Headers["X-Session-Token"]
+	c.HeaderLock.Unlock()
+	c.Logger.Debugf("account #%s using session token: %s...",
+		c.Account.GetUserId(),
+		truncateString(currentToken, 80))
+
 	req.Header.Set("X-Request-Id", uuid.New().String())
 
 	if params != nil {
@@ -190,8 +206,15 @@ func (c *SekaiClient) handleExecutionError(execErr error, attempt int) error {
 func (c *SekaiClient) updateSessionToken(response *resty.Response) {
 	if v := response.Header().Get("X-Session-Token"); v != "" {
 		c.HeaderLock.Lock()
+		oldToken := c.Headers["X-Session-Token"]
 		c.Headers["X-Session-Token"] = v
+		c.Logger.Debugf("account #%s session token updated (old: %s..., new: %s...)",
+			c.Account.GetUserId(),
+			truncateString(oldToken, 80),
+			truncateString(v, 80))
 		c.HeaderLock.Unlock()
+	} else {
+		c.Logger.Debugf("account #%s no session token in response header", c.Account.GetUserId())
 	}
 }
 
@@ -201,7 +224,7 @@ func (c *SekaiClient) handleSessionError() error {
 		c.Logger.Errorf("re-login failed: %v", err)
 		return err
 	}
-	return NewSessionError()
+	return nil
 }
 
 func (c *SekaiClient) handleCookieExpiredError(ctx context.Context) error {
@@ -210,7 +233,7 @@ func (c *SekaiClient) handleCookieExpiredError(ctx context.Context) error {
 		c.Logger.Errorf("parse cookies failed: %v", err)
 		return err
 	}
-	return NewCookieExpiredError()
+	return nil
 }
 
 func (c *SekaiClient) handleUpgradeError(ctx context.Context) error {
@@ -223,7 +246,7 @@ func (c *SekaiClient) handleUpgradeError(ctx context.Context) error {
 		c.Logger.Errorf("re-login failed: %v", err)
 		return err
 	}
-	return NewSessionError()
+	return nil
 }
 
 func (c *SekaiClient) handleResponseError(ctx context.Context, respErr error, response *resty.Response, attempt int) (error, bool) {
@@ -236,19 +259,26 @@ func (c *SekaiClient) handleResponseError(ctx context.Context, respErr error, re
 
 	switch {
 	case errors.As(respErr, &se):
-		return c.handleSessionError(), false
-	case errors.As(respErr, &ce):
-		err := c.handleCookieExpiredError(ctx)
-		if err != nil && err.Error() != "cookie expired" {
+		err := c.handleSessionError()
+		if err != nil {
 			return err, true
 		}
-		return err, false
+		return nil, false
+	case errors.As(respErr, &ce):
+		err := c.handleCookieExpiredError(ctx)
+		if err != nil {
+			return err, true
+		}
+		return nil, false
 	case errors.As(respErr, &ue):
 		err := c.handleUpgradeError(ctx)
 		if c.Server == utils.HarukiSekaiServerRegionJP || c.Server == utils.HarukiSekaiServerRegionEN {
 			return err, true
 		}
-		return err, false
+		if err != nil {
+			return err, true
+		}
+		return nil, false
 	case errors.As(respErr, &me):
 		c.Logger.Warnf("server is under maintenance")
 		return me, true
@@ -262,6 +292,14 @@ func (c *SekaiClient) handleResponseError(ctx context.Context, respErr error, re
 }
 
 func (c *SekaiClient) CallAPI(ctx context.Context, path string, method string, data any, params map[string]any) (*resty.Response, error) {
+	c.Logger.Debugf("account #%s attempting to acquire API lock for %s %s", c.Account.GetUserId(), strings.ToUpper(method), path)
+	c.APILock.Lock()
+	c.Logger.Debugf("account #%s acquired API lock for %s %s", c.Account.GetUserId(), strings.ToUpper(method), path)
+	defer func() {
+		c.APILock.Unlock()
+		c.Logger.Debugf("account #%s released API lock for %s %s", c.Account.GetUserId(), strings.ToUpper(method), path)
+	}()
+
 	uri := fmt.Sprintf("%s/api%s", c.ServerConfig.APIURL, path)
 
 	template, err := uritemplates.Parse(uri)
@@ -283,7 +321,13 @@ func (c *SekaiClient) CallAPI(ctx context.Context, path string, method string, d
 	}
 
 	var lastErr error
-	for attempt := 1; attempt <= 4; attempt++ {
+	maxRetries := 4
+	retryCount := 0
+
+	for retryCount < maxRetries {
+		retryCount++
+		attemptNum := retryCount
+
 		req, err := c.prepareRequest(ctx, data, params)
 		if err != nil {
 			return nil, err
@@ -291,14 +335,17 @@ func (c *SekaiClient) CallAPI(ctx context.Context, path string, method string, d
 
 		response, execErr := req.Execute(strings.ToUpper(method), url)
 		if execErr != nil {
-			lastErr = c.handleExecutionError(execErr, attempt)
+			lastErr = c.handleExecutionError(execErr, attemptNum)
 		} else {
 			c.updateSessionToken(response)
-
 			if _, respErr := c.handleResponse(*response); respErr != nil {
-				err, shouldReturn := c.handleResponseError(ctx, respErr, response, attempt)
+				err, shouldReturn := c.handleResponseError(ctx, respErr, response, attemptNum)
 				if shouldReturn {
 					return nil, err
+				}
+				if err == nil {
+					retryCount--
+					continue
 				}
 				lastErr = err
 			} else {
@@ -306,7 +353,7 @@ func (c *SekaiClient) CallAPI(ctx context.Context, path string, method string, d
 			}
 		}
 
-		if attempt < 4 {
+		if retryCount < maxRetries {
 			time.Sleep(time.Second)
 		}
 	}

@@ -63,9 +63,14 @@ func (c *SekaiClient) handleNuverseUserID(retData *utils.HarukiSekaiLoginRespons
 
 func (c *SekaiClient) updateHeadersFromLogin(retData *utils.HarukiSekaiLoginResponse) {
 	c.HeaderLock.Lock()
+	oldToken := c.Headers["X-Session-Token"]
 	c.Headers["X-Session-Token"] = retData.SessionToken
 	c.Headers["X-Data-Version"] = retData.DataVersion
 	c.Headers["X-Asset-Version"] = retData.AssetVersion
+	c.Logger.Debugf("account #%s login updated session token (old: %s..., new: %s...)",
+		c.Account.GetUserId(),
+		truncateString(oldToken, 80),
+		truncateString(retData.SessionToken, 80))
 	c.HeaderLock.Unlock()
 }
 
@@ -88,7 +93,9 @@ func (c *SekaiClient) Login(ctx context.Context) (*utils.HarukiSekaiLoginRespons
 
 	req := c.Session.R()
 	req.SetContext(ctxTimeout)
+	c.HeaderLock.Lock()
 	req.SetHeaders(c.Headers)
+	c.HeaderLock.Unlock()
 	req.Header.Set("X-Request-Id", uuid.New().String())
 	req.SetBody(encBody)
 	resp, err := req.Execute(method, loginURL)
@@ -137,6 +144,8 @@ func (c *SekaiClient) Login(ctx context.Context) (*utils.HarukiSekaiLoginRespons
 }
 
 func (c *SekaiClient) GetCPMySekaiImage(path string) ([]byte, error) {
+	c.APILock.Lock()
+	defer c.APILock.Unlock()
 	ctx := context.Background()
 	pathNew := strings.TrimPrefix(path, "/")
 	imageURL := fmt.Sprintf("%s/image/mysekai-photo/%s", c.ServerConfig.APIURL, pathNew)

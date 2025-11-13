@@ -92,3 +92,10 @@ func (h *SekaiVersionHelper) GetAppVersion() error {
 	h.AssetVersion = v.AssetVersion
 	return nil
 }
+
+func truncateString(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen]
+}

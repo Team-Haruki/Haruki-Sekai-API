@@ -176,7 +176,9 @@ func (mgr *SekaiClientManager) CheckSekaiMasterUpdate() {
 		mgr.Logger.Errorf("Sekai updater failed to initialize client, skipped.")
 		return
 	}
+	sekaiClient.APILock.Lock()
 	loginResponse, err := sekaiClient.Login(ctx)
+	sekaiClient.APILock.Unlock()
 	if err != nil {
 		mgr.Logger.Errorf("Sekai updater failed to login: %v", err)
 		return
