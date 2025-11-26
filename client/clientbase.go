@@ -288,7 +288,7 @@ func (c *SekaiClient) handleResponseError(ctx context.Context, respErr error, re
 	default:
 		if sc := response.StatusCode(); sc >= 500 {
 			c.Logger.Warnf("server error %d on attempt %d", sc, attempt)
-			return NewSekaiUnknownClientException(sc, string(response.Body())), false
+			return NewSekaiUnknownClientException(sc, string(response.Body())), true
 		}
 		return respErr, true
 	}
