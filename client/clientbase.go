@@ -151,6 +151,9 @@ func (c *SekaiClient) handleResponse(response resty.Response) (any, error) {
 			return nil, NewSekaiUnknownClientException(response.StatusCode(), string(resp))
 		}
 	} else {
+		if statusCode == SekaiApiHttpStatusUnderMaintenance {
+            return nil, NewUnderMaintenanceError()
+		}
 		if statusCode == SekaiApiHttpStatusServerError {
 			return nil, NewSekaiUnknownClientException(response.StatusCode(), string(response.Body()))
 		}
