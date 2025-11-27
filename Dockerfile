@@ -6,7 +6,7 @@ RUN go mod download
 COPY . .
 ARG VERSION
 RUN CGO_ENABLED=0 GOOS=linux go build \
-    -ldflags "-X haruki-sekai-api/config.Version=${VERSION}" \
+    -ldflags "-s -w -X haruki-sekai-api/config.Version=${VERSION}" \
     -o haruki-sekai-api \
     -trimpath \
     -tags netgo \
