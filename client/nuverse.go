@@ -416,21 +416,6 @@ func RestoreCompactData(data *orderedmap.OrderedMap) []*orderedmap.OrderedMap {
 	return result
 }
 
-func handleCompactKey(key string, value any, restoredCompactMaster *orderedmap.OrderedMap) bool {
-	if len(key) >= 7 && key[:7] == "compact" {
-		if vOm, ok := value.(*orderedmap.OrderedMap); ok {
-			data := RestoreCompactData(vOm)
-			newKeyOriginal := key[7:]
-			if len(newKeyOriginal) > 0 {
-				newKey := string(newKeyOriginal[0]+32) + newKeyOriginal[1:]
-				restoredCompactMaster.Set(newKey, data)
-			}
-		}
-		return true
-	}
-	return false
-}
-
 func restoreStructuredData(key string, value any, structures *orderedmap.OrderedMap, masterData *orderedmap.OrderedMap) any {
 	structDefVal, exists := structures.Get(key)
 	if !exists {
@@ -536,7 +521,6 @@ func NuverseMasterRestorer(masterData *orderedmap.OrderedMap, nuverseStructureFi
 	if err != nil {
 		return nil, fmt.Errorf("failed to load nuverve master structure: %v", err)
 	}
-
 	for _, key := range masterData.Keys() {
 		value, _ := masterData.Get(key)
 		if len(key) == 0 {
@@ -548,7 +532,16 @@ func NuverseMasterRestorer(masterData *orderedmap.OrderedMap, nuverseStructureFi
 					panic(fmt.Errorf("error restoring key %s: %v", key, r))
 				}
 			}()
-			if handleCompactKey(key, value, restoredCompactMaster) {
+			if len(key) >= 7 && key[:7] == "compact" {
+				if vOm, ok := value.(*orderedmap.OrderedMap); ok {
+					data := RestoreCompactData(vOm)
+					newKeyOriginal := key[7:]
+					if len(newKeyOriginal) > 0 {
+						newKey := string(newKeyOriginal[0]+32) + newKeyOriginal[1:]
+						restoredCompactMaster.Set(newKey, data)
+						restoredCompactMaster.Set(key, value)
+					}
+				}
 				return
 			}
 			var idKey string
@@ -559,12 +552,13 @@ func NuverseMasterRestorer(masterData *orderedmap.OrderedMap, nuverseStructureFi
 			handleIDMerging(key, value, idKey, masterData)
 		}()
 	}
-
 	for _, k := range masterData.Keys() {
+		if len(k) >= 7 && k[:7] == "compact" {
+			continue
+		}
 		v, _ := masterData.Get(k)
 		restoredCompactMaster.Set(k, v)
 	}
-
 	return restoredCompactMaster, nil
 }
 
