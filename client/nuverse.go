@@ -438,6 +438,13 @@ func restoreStructuredData(key string, value any, structures *orderedmap.Ordered
 			newArr = append(newArr, RestoreDict(subArr, def))
 		}
 	}
+
+	// Only update masterData if we successfully restored some elements
+	// If newArr is empty but original arr was not, keep the original value
+	if len(newArr) == 0 && len(arr) > 0 {
+		return value
+	}
+
 	masterData.Set(key, newArr)
 	return any(newArr)
 }
@@ -521,9 +528,14 @@ func NuverseMasterRestorer(masterData *orderedmap.OrderedMap, nuverseStructureFi
 	if err != nil {
 		return nil, fmt.Errorf("failed to load nuverve master structure: %v", err)
 	}
-	for _, key := range masterData.Keys() {
+	restoredFromCompact := make(map[string]bool)
+	masterDataKeys := masterData.Keys()
+	for _, key := range masterDataKeys {
 		value, _ := masterData.Get(key)
 		if len(key) == 0 {
+			continue
+		}
+		if len(key) < 7 || key[:7] != "compact" {
 			continue
 		}
 		func() {
@@ -532,32 +544,58 @@ func NuverseMasterRestorer(masterData *orderedmap.OrderedMap, nuverseStructureFi
 					panic(fmt.Errorf("error restoring key %s: %v", key, r))
 				}
 			}()
-			if len(key) >= 7 && key[:7] == "compact" {
-				if vOm, ok := value.(*orderedmap.OrderedMap); ok {
-					data := RestoreCompactData(vOm)
-					newKeyOriginal := key[7:]
-					if len(newKeyOriginal) > 0 {
-						newKey := string(newKeyOriginal[0]+32) + newKeyOriginal[1:]
-						restoredCompactMaster.Set(newKey, data)
-						restoredCompactMaster.Set(key, value)
+			restoredCompactMaster.Set(key, value)
+			if vOm, ok := value.(*orderedmap.OrderedMap); ok {
+				data := RestoreCompactData(vOm)
+				newKeyOriginal := key[7:]
+				if len(newKeyOriginal) > 0 {
+					newKey := string(newKeyOriginal[0]+32) + newKeyOriginal[1:]
+					var structuredData any = data
+					var idKey string
+					if newKey == "eventCards" {
+						idKey = "cardId"
 					}
+					if idKey != "" {
+						masterData.Set(newKey, data)
+						handleIDMerging(newKey, structuredData, idKey, masterData)
+						structuredData, _ = masterData.Get(newKey)
+					}
+					restoredCompactMaster.Set(newKey, structuredData)
+					restoredFromCompact[newKey] = true
 				}
-				return
 			}
+		}()
+	}
+	for _, key := range masterDataKeys {
+		value, _ := masterData.Get(key)
+		if len(key) == 0 {
+			continue
+		}
+		if len(key) >= 7 && key[:7] == "compact" {
+			continue
+		}
+		if restoredFromCompact[key] {
+			continue
+		}
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					panic(fmt.Errorf("error restoring key %s: %v", key, r))
+				}
+			}()
 			var idKey string
 			if key == "eventCards" {
 				idKey = "cardId"
 			}
-			value = restoreStructuredData(key, value, structures, masterData)
-			handleIDMerging(key, value, idKey, masterData)
+			restoredValue := restoreStructuredData(key, value, structures, masterData)
+			handleIDMerging(key, restoredValue, idKey, masterData)
+			finalValue, exists := masterData.Get(key)
+			if exists {
+				restoredCompactMaster.Set(key, finalValue)
+			} else {
+				restoredCompactMaster.Set(key, restoredValue)
+			}
 		}()
-	}
-	for _, k := range masterData.Keys() {
-		if len(k) >= 7 && k[:7] == "compact" {
-			continue
-		}
-		v, _ := masterData.Get(k)
-		restoredCompactMaster.Set(k, v)
 	}
 	return restoredCompactMaster, nil
 }

@@ -448,83 +448,54 @@ func (mgr *SekaiClientManager) fetchNuverseMasterInfo(client *SekaiClient, cdnVe
 	return masterOM, nil
 }
 
-func (mgr *SekaiClientManager) saveNuverseMasterBatch(batchKeys []string, restored *orderedmap.OrderedMap, restoredMu *sync.Mutex, processedFiles *sync.Map, allErrors *[]error, errorsMu *sync.Mutex, savedCount *int32) {
+func (mgr *SekaiClientManager) streamNuverseMasterData(client *SekaiClient, cdnVersion int) error {
+	if err := os.MkdirAll(mgr.ServerConfig.MasterDir, 0755); err != nil {
+		return fmt.Errorf("failed to create master data directory: %w", err)
+	}
+	masterOM, err := mgr.fetchNuverseMasterInfo(client, cdnVersion)
+	if err != nil {
+		return err
+	}
+	restored, err := NuverseMasterRestorer(masterOM, client.ServerConfig.NuverseStructureFilePath)
+	if err != nil {
+		return fmt.Errorf("NuverseMasterRestorer error: %w", err)
+	}
+	keys := restored.Keys()
+	var allErrors []error
+	var savedCount int32
+	var skippedCount int32
 	var wg sync.WaitGroup
-	sem := make(chan struct{}, 2)
-
-	for _, key := range batchKeys {
-		if _, loaded := processedFiles.LoadOrStore(key, true); loaded {
+	var errorsMu sync.Mutex
+	sem := make(chan struct{}, 5)
+	for _, key := range keys {
+		value, ok := restored.Get(key)
+		if !ok {
+			skippedCount++
+			mgr.Logger.Warnf("Key %s not found in restored map", key)
 			continue
 		}
-		restoredMu.Lock()
-		value, ok := restored.Get(key)
-		if ok {
-			restored.Delete(key)
-		}
-		restoredMu.Unlock()
-		if !ok {
+		if value == nil {
+			skippedCount++
+			mgr.Logger.Warnf("Key %s has nil value", key)
 			continue
 		}
 		wg.Add(1)
 		go func(k string, v any) {
 			defer wg.Done()
 			sem <- struct{}{}
-			defer func() {
-				<-sem
-				v = nil
-			}()
-
+			defer func() { <-sem }()
 			filePath := filepath.Join(mgr.ServerConfig.MasterDir, k+".json")
 			if err := mgr.saveFile(filePath, v); err != nil {
 				mgr.Logger.Errorf("Failed to save %s: %v", k, err)
 				errorsMu.Lock()
-				*allErrors = append(*allErrors, fmt.Errorf("failed to save %s: %w", k, err))
+				allErrors = append(allErrors, fmt.Errorf("failed to save %s: %w", k, err))
 				errorsMu.Unlock()
 			} else {
-				atomic.AddInt32(savedCount, 1)
+				atomic.AddInt32(&savedCount, 1)
 			}
 		}(key, value)
 	}
 	wg.Wait()
-}
-
-func (mgr *SekaiClientManager) streamNuverseMasterData(client *SekaiClient, cdnVersion int) error {
-	if err := os.MkdirAll(mgr.ServerConfig.MasterDir, 0755); err != nil {
-		return fmt.Errorf("failed to create master data directory: %w", err)
-	}
-
-	masterOM, err := mgr.fetchNuverseMasterInfo(client, cdnVersion)
-	if err != nil {
-		return err
-	}
-
-	restored, err := NuverseMasterRestorer(masterOM, client.ServerConfig.NuverseStructureFilePath)
-	if err != nil {
-		return fmt.Errorf("NuverseMasterRestorer error: %w", err)
-	}
-
-	keys := restored.Keys()
-	var processedFiles sync.Map
-	var restoredMu sync.Mutex
-	var errorsMu sync.Mutex
-	var allErrors []error
-	var savedCount int32
-	batchSize := 30
-
-	for i := 0; i < len(keys); i += batchSize {
-		end := i + batchSize
-		if end > len(keys) {
-			end = len(keys)
-		}
-
-		batchKeys := keys[i:end]
-		mgr.saveNuverseMasterBatch(batchKeys, restored, &restoredMu, &processedFiles, &allErrors, &errorsMu, &savedCount)
-
-		if i > 0 && i%30 == 0 || (i+batchSize) >= len(keys) {
-			runtime.GC()
-		}
-	}
-
 	if len(allErrors) > 0 {
 		mgr.Logger.Errorf("Encountered %d errors while processing nuverse master data (saved %d files)", len(allErrors), savedCount)
 		for i, err := range allErrors {
