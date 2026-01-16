@@ -47,12 +47,7 @@ func getUserProfile(c fiber.Ctx) error {
 	if userID == "" || !digitsRe.MatchString(userID) {
 		return fiber.NewError(fiber.StatusBadRequest, "user_id must be numeric")
 	}
-	var path string
-	if region == utils.HarukiSekaiServerRegionEN {
-		path = fmt.Sprintf("/user/%s/profile", userID)
-	} else {
-		path = fmt.Sprintf("/user/{userId}/%s/profile", userID)
-	}
+	path := fmt.Sprintf("/user/{userId}/%s/profile", userID)
 	return proxyGameAPI(c, path, nil)
 }
 
