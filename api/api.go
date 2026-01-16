@@ -39,10 +39,6 @@ func proxyGameAPI(c fiber.Ctx, path string, params map[string]any) error {
 }
 
 func getUserProfile(c fiber.Ctx) error {
-	region, _, err := getMgr(c)
-	if err != nil {
-		return err
-	}
 	userID := c.Params("user_id")
 	if userID == "" || !digitsRe.MatchString(userID) {
 		return fiber.NewError(fiber.StatusBadRequest, "user_id must be numeric")
