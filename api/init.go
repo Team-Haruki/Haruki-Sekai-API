@@ -17,6 +17,7 @@ import (
 	"github.com/go-co-op/gocron/v2"
 	"github.com/redis/go-redis/v9"
 	"gorm.io/driver/mysql"
+	"github.com/redis/go-redis/v9/maintnotifications"
 	"gorm.io/driver/postgres"
 	"gorm.io/driver/sqlite"
 	"gorm.io/driver/sqlserver"
@@ -118,6 +119,9 @@ func openRedis(cfg config.RedisConfig) (*redis.Client, error) {
 		Addr:     addr,
 		Password: cfg.Password,
 		DB:       0,
+		MaintNotificationsConfig: &maintnotifications.Config{
+			Mode: maintnotifications.ModeDisabled,
+		},
 	})
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
