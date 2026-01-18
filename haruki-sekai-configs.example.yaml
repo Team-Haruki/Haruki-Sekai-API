@@ -8,10 +8,10 @@ git:
   password: ""
 
 redis:
-  enabled: true
+  enabled: true # set it to false if not using redis
   host: "127.0.0.1"
   port: 6379
-  password: ""          # keep it empty if no password
+  password: "" # keep it empty if no password
 
 backend:
   host: "0.0.0.0"
@@ -20,7 +20,7 @@ backend:
   ssl_cert: ""
   ssl_key: ""
   log_level: "INFO"
-  main_log_file: "./main.log"     # output to console if empty
+  main_log_file: "./main.log" # output to console if empty
   access_log: "${time} ${ip} ${status} ${method} ${path}\n"
   access_log_path: "./access.log" # output to console if empty
   sekai_user_jwt_signing_key: ""
@@ -34,23 +34,11 @@ backend:
     - "10.0.0.0/8"
   proxy_header: "X-Forwarded-For"
 
-gorm:
-  enabled: true                   # set it to false if not using database
-  dialect: "mysql"                # database type: mysql | postgres | sqlite | sqlserver
-  dsn: "user:pass@tcp(ip:host)/database?charset=utf8mb4&parseTime=True&loc=UTC"  # gorm data source name
-  max_open_conns: 25
-  max_idle_conns: 10
-  conn_max_lifetime: "1h"
-  prepare_stmt: true
-  disable_fk_migrate: false
-  logger:
-    level: "warn"                 # logging level: silent | error | warn | info
-    slow_threshold: "200ms"
-    ignore_record_not_found_error: true
-    colorful: false
-  naming:
-    table_prefix: ""
-    singular_table: false
+database:
+  enabled: true # set it to false if not using database
+  driver: "postgres" # sqlite | mysql | postgres
+  dsn: "postgres://user:pass@host:port/database?sslmode=disable"
+  max_connections: 25
 
 apphash_sources: # sources for apphash, to update apphash values periodically
   # - type: file

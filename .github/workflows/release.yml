@@ -5,119 +5,146 @@ on:
     tags:
       - 'v*'
 
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
       matrix:
         include:
-          - os: windows-latest
-            arch: amd64
-            name: windows-x64
           - os: ubuntu-latest
-            arch: amd64
+            target: x86_64-unknown-linux-gnu
             name: linux-amd64
-          - os: ubuntu-latest
-            arch: arm64
-            name: linux-arm64
+            binary_name: haruki-sekai-api
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            name: windows-amd64
+            binary_name: haruki-sekai-api.exe
           - os: macos-latest
-            arch: arm64
+            target: x86_64-apple-darwin
+            name: macos-amd64
+            binary_name: haruki-sekai-api
+          - os: macos-latest
+            target: aarch64-apple-darwin
             name: macos-arm64
+            binary_name: haruki-sekai-api
 
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
-      with:
-        fetch-depth: 0
 
-    - name: Set up Go
-      uses: actions/setup-go@v4
-      with:
-        go-version: '1.25.3'
-
-    - name: Get version
+    - name: Extract version from tag
       id: version
+      shell: bash
       run: |
-        # Prefer the pushed tag (refs/tags/vX.Y.Z -> vX.Y.Z)
-        VERSION="${GITHUB_REF##*/}"
-        # Fallback to the source placeholder if not running for a tag
-        if [ -z "$VERSION" ] || [ "$VERSION" = "refs/tags/" ]; then
-          VERSION=$(grep 'var Version' config/config.go | cut -d'"' -f2)
-        fi
-        echo "version=$VERSION" >> $GITHUB_OUTPUT
-        echo "Version: $VERSION"
+        # Extract version from tag (remove 'v' prefix if present)
+        TAG="${GITHUB_REF_NAME}"
+        VERSION="${TAG#v}"
+        echo "version=${VERSION}" >> $GITHUB_OUTPUT
+        echo "Building version: ${VERSION}"
 
-    - name: Build for ${{ matrix.name }}
-      env:
-        GOOS: ${{ matrix.os == 'windows-latest' && 'windows' || matrix.os == 'ubuntu-latest' && 'linux' || 'darwin' }}
-        GOARCH: ${{ matrix.arch }}
-        CGO_ENABLED: 0
+    - name: Update Cargo.toml version
+      shell: bash
       run: |
-        BINARY_NAME="HarukiSekaiAPI"
-        if [ "$GOOS" = "windows" ]; then
-          BINARY_NAME="${BINARY_NAME}.exe"
-        fi
-        
-        mkdir -p dist
-        
-        MODULE=$(go list -m)
-        go build -ldflags "-s -w -X ${MODULE}/config.Version=${{ steps.version.outputs.version }}" \
-                 -o "dist/${BINARY_NAME}" \
-                 -trimpath \
-                 -tags netgo \
-                 .
-        
-        cd dist
-        if [ "$GOOS" = "windows" ]; then
-          zip "HarukiSekaiAPI-${{ matrix.name }}.zip" "$BINARY_NAME"
+        VERSION="${{ steps.version.outputs.version }}"
+        # Update version in Cargo.toml using sed
+        if [[ "$OSTYPE" == "darwin"* ]]; then
+          sed -i '' "s/^version = \".*\"/version = \"${VERSION}\"/" Cargo.toml
         else
-          tar -czf "HarukiSekaiAPI-${{ matrix.name }}.tar.gz" "$BINARY_NAME"
+          sed -i "s/^version = \".*\"/version = \"${VERSION}\"/" Cargo.toml
+        fi
+        echo "Updated Cargo.toml:"
+        head -10 Cargo.toml
+
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        targets: ${{ matrix.target }}
+
+    - name: Cache cargo registry
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          target
+        key: ${{ runner.os }}-${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-${{ matrix.target }}-cargo-
+
+    - name: Build
+      run: cargo build --release --target ${{ matrix.target }}
+
+    - name: Compress artifacts
+      shell: bash
+      run: |
+        mkdir -p dist
+        cd target/${{ matrix.target }}/release
+        
+        # Archive name with version
+        VERSION="${{ steps.version.outputs.version }}"
+        ARCHIVE_NAME="haruki-sekai-api-${VERSION}-${{ matrix.name }}"
+        
+        if [ "${{ matrix.os }}" == "windows-latest" ]; then
+          7z a "../../../dist/${ARCHIVE_NAME}.zip" "${{ matrix.binary_name }}"
+        else
+          tar -czf "../../../dist/${ARCHIVE_NAME}.tar.gz" "${{ matrix.binary_name }}"
         fi
 
     - name: Upload artifacts
       uses: actions/upload-artifact@v4
       with:
         name: ${{ matrix.name }}
-        path: dist/HarukiSekaiAPI-${{ matrix.name }}.*
+        path: dist/*
 
   release:
     needs: build
     runs-on: ubuntu-latest
     permissions:
       contents: write
-    concurrency:
-      group: release-${{ github.ref_name }}
-      cancel-in-progress: false
-    if: github.event_name == 'push' && contains(github.ref, 'refs/tags/')
+      packages: write
+    if: startsWith(github.ref, 'refs/tags/')
 
     steps:
     - name: Checkout repo
       uses: actions/checkout@v4
-      with:
-        fetch-depth: 0
 
-    - name: Download all artifacts
+    - name: Extract version from tag
+      id: version
+      run: |
+        TAG="${GITHUB_REF_NAME}"
+        VERSION="${TAG#v}"
+        echo "version=${VERSION}" >> $GITHUB_OUTPUT
+
+    - name: Download artifacts
       uses: actions/download-artifact@v4
       with:
         path: artifacts
+        merge-multiple: true
 
-    - name: Create or update Release (idempotent)
+    - name: Create or update Release
       env:
         GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: |
         TAG="${GITHUB_REF_NAME}"
-        TITLE="Release ${TAG}"
+        VERSION="${{ steps.version.outputs.version }}"
+        TITLE="Haruki Sekai API v${VERSION}"
         REPO="${GITHUB_REPOSITORY}"
+        
         if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+          echo "Updating existing release $TAG"
           gh release edit "$TAG" --repo "$REPO" --title "$TITLE" --latest
         else
+          echo "Creating new release $TAG"
           gh release create "$TAG" --repo "$REPO" --title "$TITLE" --generate-notes --latest
         fi
 
-    - name: Upload Release Assets (overwrite)
+    - name: Upload Release Assets
       env:
         GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: |
         TAG="${GITHUB_REF_NAME}"
         REPO="${GITHUB_REPOSITORY}"
-        gh release upload "$TAG" artifacts/**/* --repo "$REPO" --clobber
+        gh release upload "$TAG" artifacts/* --repo "$REPO" --clobber

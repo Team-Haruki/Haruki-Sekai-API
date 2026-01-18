@@ -1,24 +1,30 @@
-FROM golang:1.25.3-alpine3.22 AS builder
-
+FROM rust:1.92-alpine AS builder
+RUN apk add --no-cache musl-dev openssl-dev openssl-libs-static
 WORKDIR /app
-COPY go.mod go.sum ./
-RUN go mod download
-COPY . .
-ARG VERSION
-RUN CGO_ENABLED=0 GOOS=linux go build \
-    -ldflags "-s -w -X haruki-sekai-api/config.Version=${VERSION}" \
-    -o haruki-sekai-api \
-    -trimpath \
-    -tags netgo \
-    .
+COPY Cargo.toml Cargo.lock* ./
+RUN mkdir src && echo "fn main() {}" > src/main.rs
+RUN cargo build --release || true
+RUN rm -rf src
+COPY src ./src
+ARG VERSION=dev
+RUN if [ "$VERSION" != "dev" ]; then \
+    CLEAN_VERSION=$(echo "$VERSION" | sed 's/^v//'); \
+    sed -i "s/^version = \".*\"/version = \"${CLEAN_VERSION}\"/" Cargo.toml; \
+    echo "Building version: ${CLEAN_VERSION}"; \
+    cat Cargo.toml | head -10; \
+    fi
+RUN RUSTFLAGS="-C target-feature=-crt-static" cargo build --release
 
-FROM alpine:latest
-RUN apk --no-cache add ca-certificates tzdata
+FROM alpine:3.22
+RUN apk --no-cache add ca-certificates tzdata git
 WORKDIR /app
-COPY --from=builder /app/haruki-sekai-api .
-COPY --from=builder /app/Data ./Data
+COPY --from=builder /app/target/release/haruki-sekai-api .
+COPY Data ./Data
 RUN mkdir -p logs
 EXPOSE 9999
 ENV TZ=Asia/Shanghai
+ENV RUST_LOG=info
+ARG VERSION=dev
+LABEL org.opencontainers.image.version="${VERSION}"
 
 CMD ["./haruki-sekai-api"]
