@@ -73,38 +73,73 @@ impl GitHelper {
         let branch = self.run_git(repo_path, &["rev-parse", "--abbrev-ref", "HEAD"])?;
         let branch = branch.trim();
         if !self.password.is_empty() {
-            let askpass_script =
-                format!("#!/bin/sh\necho '{}'", self.password.replace("'", "'\\''"));
-            let askpass_path = "/tmp/git-askpass.sh";
-            std::fs::write(askpass_path, &askpass_script)
-                .map_err(|e| AppError::ParseError(format!("Failed to write askpass: {}", e)))?;
-            std::fs::set_permissions(
-                askpass_path,
-                std::os::unix::fs::PermissionsExt::from_mode(0o700),
-            )
-            .map_err(|e| AppError::ParseError(format!("Failed to set permissions: {}", e)))?;
-            let mut cmd = Command::new("git");
-            cmd.current_dir(repo_path)
-                .args(["push", "origin", branch])
-                .env("GIT_ASKPASS", askpass_path);
-            if let Some(ref proxy) = self.proxy {
-                if !proxy.is_empty() {
-                    cmd.env("HTTP_PROXY", proxy).env("HTTPS_PROXY", proxy);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let askpass_script =
+                    format!("#!/bin/sh\necho '{}'", self.password.replace("'", "'\\''"));
+                let askpass_path = "/tmp/git-askpass.sh";
+                std::fs::write(askpass_path, &askpass_script)
+                    .map_err(|e| AppError::ParseError(format!("Failed to write askpass: {}", e)))?;
+                std::fs::set_permissions(askpass_path, std::fs::Permissions::from_mode(0o700))
+                    .map_err(|e| {
+                        AppError::ParseError(format!("Failed to set permissions: {}", e))
+                    })?;
+                let mut cmd = Command::new("git");
+                cmd.current_dir(repo_path)
+                    .args(["push", "origin", branch])
+                    .env("GIT_ASKPASS", askpass_path);
+                if let Some(ref proxy) = self.proxy {
+                    if !proxy.is_empty() {
+                        cmd.env("HTTP_PROXY", proxy).env("HTTPS_PROXY", proxy);
+                    }
+                }
+                let output = cmd.output().map_err(|e| {
+                    AppError::NetworkError(format!("Failed to run git push: {}", e))
+                })?;
+                let _ = std::fs::remove_file(askpass_path);
+                if !output.status.success() {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    if !stderr.contains("already up-to-date")
+                        && !stderr.contains("Everything up-to-date")
+                    {
+                        return Err(AppError::NetworkError(format!(
+                            "Git push failed: {}",
+                            stderr
+                        )));
+                    }
                 }
             }
-            let output = cmd
-                .output()
-                .map_err(|e| AppError::NetworkError(format!("Failed to run git push: {}", e)))?;
-            let _ = std::fs::remove_file(askpass_path);
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                if !stderr.contains("already up-to-date")
-                    && !stderr.contains("Everything up-to-date")
-                {
-                    return Err(AppError::NetworkError(format!(
-                        "Git push failed: {}",
-                        stderr
-                    )));
+            #[cfg(windows)]
+            {
+                // On Windows, use GIT_ASKPASS with a batch script
+                let askpass_script = format!("@echo off\necho {}", self.password);
+                let askpass_path = std::env::temp_dir().join("git-askpass.bat");
+                std::fs::write(&askpass_path, &askpass_script)
+                    .map_err(|e| AppError::ParseError(format!("Failed to write askpass: {}", e)))?;
+                let mut cmd = Command::new("git");
+                cmd.current_dir(repo_path)
+                    .args(["push", "origin", branch])
+                    .env("GIT_ASKPASS", &askpass_path);
+                if let Some(ref proxy) = self.proxy {
+                    if !proxy.is_empty() {
+                        cmd.env("HTTP_PROXY", proxy).env("HTTPS_PROXY", proxy);
+                    }
+                }
+                let output = cmd.output().map_err(|e| {
+                    AppError::NetworkError(format!("Failed to run git push: {}", e))
+                })?;
+                let _ = std::fs::remove_file(&askpass_path);
+                if !output.status.success() {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    if !stderr.contains("already up-to-date")
+                        && !stderr.contains("Everything up-to-date")
+                    {
+                        return Err(AppError::NetworkError(format!(
+                            "Git push failed: {}",
+                            stderr
+                        )));
+                    }
                 }
             }
         } else {
