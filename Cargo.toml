@@ -11,7 +11,7 @@ tokio = { version = "1.49.0", features = ["full"] }
 futures = "0.3.31"
 axum = { version = "0.8.8", features = ["macros"] }
 tower-http = { version = "0.6.8", features = ["cors", "trace"] }
-reqwest = { version = "0.13.1", default-features = false, features = ["native-tls", "json", "gzip", "brotli", "query", "http2"] }
+reqwest = { version = "0.13.1", default-features = false, features = ["rustls", "json", "gzip", "brotli", "query", "http2"] }
 sonic-rs = "0.5.6"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_yaml = "0.9.33"

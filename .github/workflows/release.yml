@@ -14,22 +14,36 @@ jobs:
     strategy:
       matrix:
         include:
+          # Linux AMD64 - Static musl build
           - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
+            target: x86_64-unknown-linux-musl
             name: linux-amd64
             binary_name: haruki-sekai-api
+            static: true
+          # Linux ARM64 - Static musl build
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            name: linux-arm64
+            binary_name: haruki-sekai-api
+            static: true
+          # Windows AMD64
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             name: windows-amd64
             binary_name: haruki-sekai-api.exe
+            static: false
+          # macOS AMD64
           - os: macos-latest
             target: x86_64-apple-darwin
             name: macos-amd64
             binary_name: haruki-sekai-api
+            static: false
+          # macOS ARM64
           - os: macos-latest
             target: aarch64-apple-darwin
             name: macos-arm64
             binary_name: haruki-sekai-api
+            static: false
 
     steps:
     - name: Checkout code
@@ -39,7 +53,6 @@ jobs:
       id: version
       shell: bash
       run: |
-        # Extract version from tag (remove 'v' prefix if present)
         TAG="${GITHUB_REF_NAME}"
         VERSION="${TAG#v}"
         echo "version=${VERSION}" >> $GITHUB_OUTPUT
@@ -49,7 +62,6 @@ jobs:
       shell: bash
       run: |
         VERSION="${{ steps.version.outputs.version }}"
-        # Update version in Cargo.toml using sed
         if [[ "$OSTYPE" == "darwin"* ]]; then
           sed -i '' "s/^version = \".*\"/version = \"${VERSION}\"/" Cargo.toml
         else
@@ -57,6 +69,12 @@ jobs:
         fi
         echo "Updated Cargo.toml:"
         head -10 Cargo.toml
+
+    - name: Install musl tools (Linux)
+      if: matrix.static == true
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y musl-tools
 
     - name: Install Rust
       uses: dtolnay/rust-toolchain@stable
@@ -83,7 +101,6 @@ jobs:
         mkdir -p dist
         cd target/${{ matrix.target }}/release
         
-        # Archive name with version
         VERSION="${{ steps.version.outputs.version }}"
         ARCHIVE_NAME="haruki-sekai-api-${VERSION}-${{ matrix.name }}"
         
