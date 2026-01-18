@@ -1,4 +1,4 @@
-FROM rust:nightly-alpine AS builder
+FROM rust:1.92-alpine AS builder
 RUN apk add --no-cache musl-dev openssl-dev openssl-libs-static
 WORKDIR /app
 COPY . .
@@ -8,7 +8,7 @@ RUN if [ "$VERSION" != "dev" ]; then \
     sed -i "s/^version = \".*\"/version = \"${CLEAN_VERSION}\"/" Cargo.toml; \
     echo "Building version: ${CLEAN_VERSION}"; \
     fi
-RUN RUSTFLAGS="-C target-feature=-crt-static" cargo build --release
+RUN cargo build --release
 
 FROM alpine:3.22
 RUN apk --no-cache add ca-certificates tzdata git
