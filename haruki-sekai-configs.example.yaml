@@ -1,0 +1,147 @@
+proxy: ""
+jp_sekai_cookie_url: ""
+
+git:
+  enabled: false
+  username: ""
+  email: "@users.noreply.github.com"
+  password: ""
+
+redis:
+  enabled: true # set it to false if not using redis
+  host: "127.0.0.1"
+  port: 6379
+  password: "" # keep it empty if no password
+
+backend:
+  host: "0.0.0.0"
+  port: 9999
+  ssl: false
+  ssl_cert: ""
+  ssl_key: ""
+  log_level: "INFO"
+  main_log_file: "./main.log" # output to console if empty
+  access_log: "${time} ${ip} ${status} ${method} ${path}\n"
+  access_log_path: "./access.log" # output to console if empty
+  sekai_user_jwt_signing_key: ""
+  enable_trust_proxy: true
+  trusted_proxies:
+    - "127.0.0.0/8"
+    - "::1/128"
+    - "192.168.0.0/16"
+    - "172.16.0.0/12"
+    - "100.64.0.0/10"
+    - "10.0.0.0/8"
+  proxy_header: "X-Forwarded-For"
+
+database:
+  enabled: true # set it to false if not using database
+  driver: "postgres" # sqlite | mysql | postgres
+  dsn: "postgres://user:pass@host:port/database?sslmode=disable"
+  max_connections: 25
+
+apphash_sources: # sources for apphash, to update apphash values periodically
+  # - type: file
+  #   dir: "/path/to/your/local/apphash_json/directory"
+  - type: "url"
+    url: "https://apphash.provider.com/apphash_json"
+
+asset_updater_servers: # Haruki Sekai Asset Updater server instances
+  - url: "http://127.0.0.1:12345/update_asset"
+    authorization: ""
+
+servers:
+  jp:
+    enabled: false
+    api_url: ""
+    require_cookies: true
+    headers:
+      Host: ""
+      # fill in other headers as needed
+    aes_key_hex: ""
+    aes_iv_hex: ""
+    account_dir: ""
+    master_dir: ""
+    version_path: ""
+    nuverse_master_data_url: ""
+    nuverse_structure_file_path: ""
+    enable_master_updater: true # check for master data updates periodically
+    master_updater_cron: "7 * * * * *" # cron expression, this mean "execute it at every minute at second 7"
+    enable_app_hash_updater: true # check for app hash updates periodically
+    app_hash_updater_cron: "30 * * * * *" # cron expression, this mean "execute it at every minute at second 30"
+
+  en:
+    enabled: false
+    api_url: ""
+    require_cookies: false
+    headers:
+      Host: ""
+      # fill in other headers as needed
+    aes_key_hex: ""
+    aes_iv_hex: ""
+    account_dir: ""
+    master_dir: ""
+    version_path: ""
+    nuverse_master_data_url: ""
+    nuverse_structure_file_path: ""
+    enable_master_updater: true # check for master data updates periodically
+    master_updater_cron: "7 * * * * *" # cron expression, this mean "execute it at every minute at second 7"
+    enable_app_hash_updater: true # check for app hash updates periodically
+    app_hash_updater_cron: "30 * * * * *" # cron expression, this mean "execute it at every minute at second 30"
+
+  tw:
+    enabled: false
+    api_url: ""
+    require_cookies: false
+    headers:
+      Host: ""
+      # fill in other headers as needed
+    aes_key_hex: ""
+    aes_iv_hex: ""
+    account_dir: ""
+    master_dir: ""
+    version_path: ""
+    nuverse_master_data_url: ""
+    nuverse_structure_file_path: ""
+    enable_master_updater: true # check for master data updates periodically
+    master_updater_cron: "7 * * * * *" # cron expression, this mean "execute it at every minute at second 7"
+    enable_app_hash_updater: true # check for app hash updates periodically
+    app_hash_updater_cron: "30 * * * * *" # cron expression, this mean "execute it at every minute at second 30"
+
+  kr:
+    enabled: false
+    api_url: ""
+    require_cookies: false
+    headers:
+      Host: ""
+      # fill in other headers as needed
+    aes_key_hex: ""
+    aes_iv_hex: ""
+    account_dir: ""
+    master_dir: ""
+    version_path: ""
+    nuverse_master_data_url: ""
+    nuverse_structure_file_path: ""
+    enable_master_updater: true # check for master data updates periodically
+    master_updater_cron: "7 * * * * *" # cron expression, this mean "execute it at every minute at second 7"
+    enable_app_hash_updater: true # check for app hash updates periodically
+    app_hash_updater_cron: "30 * * * * *" # cron expression, this mean "execute it at every minute at second 30"
+
+  cn:
+    enabled: false
+    api_url: ""
+    require_cookies: false
+    headers:
+      Host: ""
+      # fill in other headers as needed
+    aes_key_hex: ""
+    aes_iv_hex: ""
+    account_dir: ""
+    master_dir: ""
+    version_path: ""
+    nuverse_master_data_url: ""
+    nuverse_structure_file_path: ""
+    enable_master_updater: true # check for master data updates periodically
+    master_updater_cron: "7 * * * * *" # cron expression, this mean "execute it at every minute at second 7"
+    enable_app_hash_updater: true # check for app hash updates periodically
+    app_hash_updater_cron: "30 * * * * *" # cron expression, this mean "execute it at every minute at second 30"
