@@ -5,6 +5,7 @@ mod crypto;
 mod db;
 mod error;
 mod updater;
+mod utils;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -14,13 +15,13 @@ use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 
 use crate::api::create_router;
-use crate::client::SekaiClientManager;
+use crate::client::SekaiClient;
 use crate::config::Config;
 use crate::error::AppError;
 
 pub struct AppState {
     pub config: Config,
-    pub managers: std::collections::HashMap<config::ServerRegion, Arc<SekaiClientManager>>,
+    pub clients: std::collections::HashMap<config::ServerRegion, Arc<SekaiClient>>,
     pub db: Option<sea_orm::DatabaseConnection>,
     pub redis: Option<redis::aio::ConnectionManager>,
     pub jwt_secret: Option<String>,
@@ -70,7 +71,7 @@ async fn main() -> anyhow::Result<()> {
         }
     };
     let app = create_router(state.clone());
-    let _scheduler = match updater::start_scheduler(&state.managers, &state.config).await {
+    let _scheduler = match updater::start_scheduler(&state.clients, &state.config).await {
         Ok(s) => Some(s),
         Err(e) => {
             error!("Failed to start scheduler: {}", e);
@@ -94,7 +95,7 @@ async fn main() -> anyhow::Result<()> {
 
 async fn init_app_state(config: Config) -> anyhow::Result<AppState> {
     use std::collections::HashMap;
-    let mut managers = HashMap::new();
+    let mut clients = HashMap::new();
     let jp_cookie_url = if config.jp_sekai_cookie_url.is_empty() {
         None
     } else {
@@ -114,18 +115,17 @@ async fn init_app_state(config: Config) -> anyhow::Result<AppState> {
 
             init_tasks.push(tokio::spawn(async move {
                 info!("Initializing {} server...", region.as_str().to_uppercase());
-                let mut manager =
-                    SekaiClientManager::new(region, server_config, proxy, jp_cookie_url).await?;
-                manager.init().await?;
-                Ok::<_, AppError>((region, Arc::new(manager)))
+                let client = SekaiClient::new(region, server_config, proxy, jp_cookie_url).await?;
+                client.init().await?;
+                Ok::<_, AppError>((region, Arc::new(client)))
             }));
         }
     }
     let results = futures::future::join_all(init_tasks).await;
     for result in results {
         match result {
-            Ok(Ok((region, manager))) => {
-                managers.insert(region, manager);
+            Ok(Ok((region, client))) => {
+                clients.insert(region, client);
             }
             Ok(Err(e)) => {
                 error!("Failed to initialize server: {}", e);
@@ -152,7 +152,7 @@ async fn init_app_state(config: Config) -> anyhow::Result<AppState> {
     };
     Ok(AppState {
         config,
-        managers,
+        clients,
         db,
         redis,
         jwt_secret,

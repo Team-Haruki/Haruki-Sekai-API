@@ -29,27 +29,20 @@ pub async fn init_db(config: &DatabaseConfig) -> Result<DatabaseConnection, AppE
 async fn create_tables(db: &DatabaseConnection) -> Result<(), AppError> {
     let backend = db.get_database_backend();
     let schema = Schema::new(backend);
-    let stmt = schema.create_table_from_entity(entity::SekaiUser);
-    if let Err(e) = db.execute(&stmt).await {
-        let err_str = e.to_string();
-        if !err_str.contains("already exists") && !err_str.contains("duplicate") {
-            return Err(AppError::DatabaseError(format!(
-                "Failed to create sekai_users table: {}",
-                e
-            )));
-        }
-    }
-    let stmt = schema.create_table_from_entity(entity::SekaiUserServer);
-    if let Err(e) = db.execute(&stmt).await {
-        let err_str = e.to_string();
-        if !err_str.contains("already exists") && !err_str.contains("duplicate") {
-            return Err(AppError::DatabaseError(format!(
-                "Failed to create sekai_user_servers table: {}",
-                e
-            )));
-        }
-    }
-
+    let stmt = schema
+        .create_table_from_entity(entity::SekaiUser)
+        .if_not_exists()
+        .to_owned();
+    db.execute(&stmt)
+        .await
+        .map_err(|e| AppError::DatabaseError(format!("Failed to create sekai_users: {}", e)))?;
+    let stmt = schema
+        .create_table_from_entity(entity::SekaiUserServer)
+        .if_not_exists()
+        .to_owned();
+    db.execute(&stmt).await.map_err(|e| {
+        AppError::DatabaseError(format!("Failed to create sekai_user_servers: {}", e))
+    })?;
     Ok(())
 }
 

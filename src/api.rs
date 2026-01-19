@@ -1,4 +1,4 @@
-mod api;
+mod apis;
 mod image;
 mod middleware;
 mod routes;

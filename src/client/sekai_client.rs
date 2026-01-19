@@ -1,11 +1,15 @@
 use std::collections::HashMap;
+use std::fs;
+use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use indexmap::IndexMap;
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
 use reqwest::{Client, Response};
 use serde::de::DeserializeOwned;
+use serde_json::Value as JsonValue;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
@@ -13,31 +17,30 @@ use crate::config::{ServerConfig, ServerRegion};
 use crate::crypto::SekaiCryptor;
 use crate::error::{AppError, SekaiHttpStatus};
 
-use super::account::{AccountType, SekaiAccount};
+use super::account::{AccountType, SekaiAccount, SekaiAccountCP, SekaiAccountNuverse};
 use super::helper::{CookieHelper, VersionHelper, VersionInfo};
+use super::session::AccountSession;
 
 pub struct SekaiClient {
     pub region: ServerRegion,
     pub config: ServerConfig,
-    pub account: Arc<Mutex<AccountType>>,
     pub cookie_helper: Option<Arc<CookieHelper>>,
     pub version_helper: Arc<VersionHelper>,
     pub proxy: Option<String>,
     pub cryptor: SekaiCryptor,
     pub headers: Arc<Mutex<HashMap<String, String>>>,
-    pub session_token: Arc<Mutex<Option<String>>>,
     pub http_client: Client,
-    api_lock: Arc<tokio::sync::Mutex<()>>,
+
+    sessions: Arc<RwLock<Vec<Arc<AccountSession>>>>,
+    session_index: AtomicUsize,
 }
 
 impl SekaiClient {
-    pub fn new(
+    pub async fn new(
         region: ServerRegion,
         config: ServerConfig,
-        account: AccountType,
-        cookie_helper: Option<Arc<CookieHelper>>,
-        version_helper: Arc<VersionHelper>,
         proxy: Option<String>,
+        jp_cookie_url: Option<String>,
     ) -> Result<Self, AppError> {
         let cryptor = SekaiCryptor::from_hex(&config.aes_key_hex, &config.aes_iv_hex)?;
         let mut headers = HashMap::new();
@@ -61,28 +64,76 @@ impl SekaiClient {
         let http_client = client_builder
             .build()
             .map_err(|e| AppError::NetworkError(e.to_string()))?;
-        Ok(Self {
+        let version_helper = Arc::new(VersionHelper::new(&config.version_path));
+        let cookie_helper = if region == ServerRegion::Jp && config.require_cookies {
+            jp_cookie_url
+                .filter(|url| !url.is_empty())
+                .map(|url| Arc::new(CookieHelper::new(&url)))
+        } else {
+            None
+        };
+        let client = Self {
             region,
             config,
-            account: Arc::new(Mutex::new(account)),
             cookie_helper,
             version_helper,
             proxy,
             cryptor,
             headers: Arc::new(Mutex::new(headers)),
-            session_token: Arc::new(Mutex::new(None)),
             http_client,
-            api_lock: Arc::new(tokio::sync::Mutex::new(())),
-        })
+            sessions: Arc::new(RwLock::new(Vec::new())),
+            session_index: AtomicUsize::new(0),
+        };
+        Ok(client)
     }
 
     pub async fn init(&self) -> Result<(), AppError> {
+        info!(
+            "{} Initializing client...",
+            self.region.as_str().to_uppercase()
+        );
         if let Some(ref helper) = self.cookie_helper {
             let cookie = helper.get_cookies(self.proxy.as_deref()).await?;
             self.headers.lock().insert("Cookie".to_string(), cookie);
         }
         let version = self.version_helper.load().await?;
         self.update_version_headers(&version);
+        let accounts = self.parse_accounts()?;
+        if accounts.is_empty() {
+            warn!(
+                "{} No accounts found in {}",
+                self.region.as_str().to_uppercase(),
+                self.config.account_dir
+            );
+            return Ok(());
+        }
+        for account in accounts {
+            if self.region.is_cp_server() && account.user_id().is_empty() {
+                warn!(
+                    "{} Skipping account with empty user_id",
+                    self.region.as_str().to_uppercase()
+                );
+                continue;
+            }
+            let session = Arc::new(AccountSession::new(account));
+            match self.login(&session).await {
+                Ok(_) => {
+                    self.sessions.write().push(session);
+                }
+                Err(e) => {
+                    error!(
+                        "{} Failed to login account: {}",
+                        self.region.as_str().to_uppercase(),
+                        e
+                    );
+                }
+            }
+        }
+        info!(
+            "{} Client initialized with {} sessions",
+            self.region.as_str().to_uppercase(),
+            self.sessions.read().len()
+        );
         Ok(())
     }
 
@@ -108,7 +159,109 @@ impl SekaiClient {
         Ok(())
     }
 
-    fn prepare_request(&self, method: reqwest::Method, url: &str) -> reqwest::RequestBuilder {
+    fn parse_accounts(&self) -> Result<Vec<AccountType>, AppError> {
+        let mut accounts = Vec::new();
+        let account_dir = Path::new(&self.config.account_dir);
+        if !account_dir.exists() {
+            return Ok(accounts);
+        }
+        let entries = fs::read_dir(account_dir)
+            .map_err(|e| AppError::ParseError(format!("Failed to read account dir: {}", e)))?;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                continue;
+            }
+            let data = match fs::read(&path) {
+                Ok(d) => d,
+                Err(e) => {
+                    warn!("Failed to read {}: {}", path.display(), e);
+                    continue;
+                }
+            };
+            match self.parse_account_file(&path, &data) {
+                Ok(mut accs) => accounts.append(&mut accs),
+                Err(e) => {
+                    warn!("Failed to parse {}: {}", path.display(), e);
+                }
+            }
+        }
+        Ok(accounts)
+    }
+
+    fn parse_account_file(&self, path: &Path, data: &[u8]) -> Result<Vec<AccountType>, AppError> {
+        let value: serde_json::Value = sonic_rs::from_slice(data)
+            .map_err(|e| AppError::ParseError(format!("JSON parse error: {}", e)))?;
+        let mut accounts = Vec::new();
+        match value {
+            serde_json::Value::Array(arr) => {
+                for (idx, item) in arr.into_iter().enumerate() {
+                    if let Some(acc) = self.parse_account_value(item, path, Some(idx)) {
+                        accounts.push(acc);
+                    }
+                }
+            }
+            serde_json::Value::Object(_) => {
+                if let Some(acc) = self.parse_account_value(value, path, None) {
+                    accounts.push(acc);
+                }
+            }
+            _ => {}
+        }
+        Ok(accounts)
+    }
+
+    fn parse_account_value(
+        &self,
+        value: serde_json::Value,
+        path: &Path,
+        idx: Option<usize>,
+    ) -> Option<AccountType> {
+        if self.region.is_cp_server() {
+            let json_str = serde_json::to_string(&value).ok()?;
+            match sonic_rs::from_str::<SekaiAccountCP>(&json_str) {
+                Ok(acc) => Some(AccountType::CP(acc)),
+                Err(e) => {
+                    if let Some(i) = idx {
+                        warn!("[{}][{}] CP unmarshal error: {}", path.display(), i, e);
+                    } else {
+                        warn!("[{}] CP unmarshal error: {}", path.display(), e);
+                    }
+                    None
+                }
+            }
+        } else {
+            let json_str = serde_json::to_string(&value).ok()?;
+            match sonic_rs::from_str::<SekaiAccountNuverse>(&json_str) {
+                Ok(acc) => Some(AccountType::Nuverse(acc)),
+                Err(e) => {
+                    if let Some(i) = idx {
+                        warn!("[{}][{}] Nuverse unmarshal error: {}", path.display(), i, e);
+                    } else {
+                        warn!("[{}] Nuverse unmarshal error: {}", path.display(), e);
+                    }
+                    None
+                }
+            }
+        }
+    }
+
+    #[must_use]
+    pub fn get_session(&self) -> Option<Arc<AccountSession>> {
+        let sessions = self.sessions.read();
+        if sessions.is_empty() {
+            return None;
+        }
+        let idx = self.session_index.fetch_add(1, Ordering::SeqCst) % sessions.len();
+        Some(sessions[idx].clone())
+    }
+
+    fn prepare_request(
+        &self,
+        session: &AccountSession,
+        method: reqwest::Method,
+        url: &str,
+    ) -> reqwest::RequestBuilder {
         let mut req = self.http_client.request(method, url);
         let headers = self.headers.lock();
         for (k, v) in headers.iter() {
@@ -116,22 +269,21 @@ impl SekaiClient {
                 req = req.header(k, v);
             }
         }
-        if let Some(ref token) = *self.session_token.lock() {
+        if let Some(ref token) = session.get_session_token() {
             req = req.header("X-Session-Token", token);
         }
         req = req.header("X-Request-Id", Uuid::new_v4().to_string());
-
         req
     }
 
-    fn update_session_token(&self, resp: &Response) {
+    fn update_session_token(&self, session: &AccountSession, resp: &Response) {
         if let Some(token) = resp.headers().get("x-session-token") {
             if let Ok(token_str) = token.to_str() {
-                let old_token = self.session_token.lock().clone();
-                *self.session_token.lock() = Some(token_str.to_string());
+                let old_token = session.get_session_token();
+                session.set_session_token(Some(token_str.to_string()));
                 debug!(
                     "Account #{} session token updated (old: {:?}, new: {}...)",
-                    self.account.lock().user_id(),
+                    session.user_id(),
                     old_token.as_deref().map(|s| &s[..s.len().min(40)]),
                     &token_str[..token_str.len().min(40)]
                 );
@@ -141,13 +293,14 @@ impl SekaiClient {
 
     pub async fn call_api<T: serde::Serialize>(
         &self,
+        session: &AccountSession,
         method: &str,
         path: &str,
         data: Option<&T>,
         params: Option<&HashMap<String, String>>,
     ) -> Result<Response, AppError> {
-        let _lock = self.api_lock.lock().await;
-        let user_id = self.account.lock().user_id().to_string();
+        let _lock = session.lock_api().await;
+        let user_id = session.user_id().to_string();
         let url = format!("{}/api{}", self.config.api_url, path).replace("{userId}", &user_id);
         info!("Account #{} {} {}", user_id, method.to_uppercase(), path);
         let max_retries = 4;
@@ -161,7 +314,7 @@ impl SekaiClient {
                 "PATCH" => reqwest::Method::PATCH,
                 _ => reqwest::Method::GET,
             };
-            let mut req = self.prepare_request(method_enum, &url);
+            let mut req = self.prepare_request(session, method_enum, &url);
             if let Some(p) = params {
                 req = req.query(p);
             }
@@ -171,14 +324,14 @@ impl SekaiClient {
             }
             match req.send().await {
                 Ok(resp) => {
-                    self.update_session_token(&resp);
+                    self.update_session_token(session, &resp);
                     return Ok(resp);
                 }
                 Err(e) => {
                     if e.is_timeout() {
                         warn!(
                             "Account #{} request timed out (attempt {}), retrying...",
-                            self.account.lock().user_id(),
+                            session.user_id(),
                             attempt
                         );
                     } else {
@@ -203,19 +356,22 @@ impl SekaiClient {
 
     pub async fn get(
         &self,
+        session: &AccountSession,
         path: &str,
         params: Option<&HashMap<String, String>>,
     ) -> Result<Response, AppError> {
-        self.call_api::<()>("GET", path, None, params).await
+        self.call_api::<()>(session, "GET", path, None, params)
+            .await
     }
 
     pub async fn post<T: serde::Serialize>(
         &self,
+        session: &AccountSession,
         path: &str,
         data: Option<&T>,
         params: Option<&HashMap<String, String>>,
     ) -> Result<Response, AppError> {
-        self.call_api("POST", path, data, params).await
+        self.call_api(session, "POST", path, data, params).await
     }
 
     pub async fn handle_response<T: DeserializeOwned>(
@@ -229,10 +385,12 @@ impl SekaiClient {
             .and_then(|h| h.to_str().ok())
             .unwrap_or("")
             .to_lowercase();
+
         let body = resp
             .bytes()
             .await
             .map_err(|e| AppError::NetworkError(e.to_string()))?;
+
         if content_type.contains("octet-stream") || content_type.contains("binary") {
             let sekai_status = SekaiHttpStatus::from_code(status)?;
             match sekai_status {
@@ -284,7 +442,6 @@ impl SekaiClient {
             .map_err(|e| AppError::NetworkError(e.to_string()))?;
         if content_type.contains("octet-stream") || content_type.contains("binary") {
             let sekai_status = SekaiHttpStatus::from_code(status)?;
-
             match sekai_status {
                 SekaiHttpStatus::Ok
                 | SekaiHttpStatus::ClientError
@@ -306,39 +463,39 @@ impl SekaiClient {
         }
     }
 
-    #[tracing::instrument(skip(self), fields(user_id = %self.account.lock().user_id()))]
-    pub async fn login(&self) -> Result<LoginResponse, AppError> {
-        let payload = self.account.lock().dump()?;
+    #[tracing::instrument(skip(self, session), fields(user_id = %session.user_id()))]
+    pub async fn login(&self, session: &AccountSession) -> Result<LoginResponse, AppError> {
+        let _lock = session.lock_api().await;
+        let payload = session.dump_account()?;
         let encrypted = self.cryptor.pack_bytes(&payload)?;
         let (url, method) = if self.region.is_cp_server() {
             let url = format!(
                 "{}/api/user/{}/auth?refreshUpdatedResources=False",
                 self.config.api_url,
-                self.account.lock().user_id()
+                session.user_id()
             );
             (url, reqwest::Method::PUT)
         } else {
             let url = format!("{}/api/user/auth", self.config.api_url);
             (url, reqwest::Method::POST)
         };
-        let _lock = self.api_lock.lock().await;
-        let mut req = self.prepare_request(method, &url);
+        let mut req = self.prepare_request(session, method, &url);
         req = req.body(encrypted);
-        info!("Account #{} logging in...", self.account.lock().user_id());
+        info!("Account #{} logging in...", session.user_id());
         let resp = req
             .send()
             .await
             .map_err(|e| AppError::NetworkError(e.to_string()))?;
-        self.update_session_token(&resp);
+        self.update_session_token(session, &resp);
         let login_resp: LoginResponse = self.handle_response(resp).await?;
         if !login_resp.session_token.is_empty() {
-            *self.session_token.lock() = Some(login_resp.session_token.clone());
+            session.set_session_token(Some(login_resp.session_token.clone()));
         }
         if !self.region.is_cp_server() {
             if let Some(ref user_reg) = login_resp.user_registration {
                 if !user_reg.user_id.is_empty() && user_reg.user_id != "0" {
-                    let old_uid = self.account.lock().user_id().to_string();
-                    self.account.lock().set_user_id(user_reg.user_id.clone());
+                    let old_uid = session.user_id();
+                    session.set_user_id(user_reg.user_id.clone());
                     info!(
                         "Account #{} -> {} (from login response)",
                         old_uid, user_reg.user_id
@@ -346,22 +503,87 @@ impl SekaiClient {
                 }
             }
         }
-        info!(
-            "Account #{} logged in successfully",
-            self.account.lock().user_id()
-        );
+        info!("Account #{} logged in successfully", session.user_id());
         Ok(login_resp)
     }
 
+    #[tracing::instrument(skip(self, params), fields(region = ?self.region))]
+    pub async fn get_game_api(
+        &self,
+        path: &str,
+        params: Option<&HashMap<String, String>>,
+    ) -> Result<(JsonValue, u16), AppError> {
+        let session = self.get_session().ok_or(AppError::NoClientAvailable)?;
+        let max_retries = 4;
+        let mut retry_count = 0;
+        while retry_count < max_retries {
+            let resp = self.get(&session, path, params).await?;
+            match self.handle_response_ordered(resp).await {
+                Ok(result) => {
+                    let json_value: JsonValue = serde_json::to_value(&result)
+                        .map_err(|e| AppError::ParseError(e.to_string()))?;
+                    return Ok((json_value, 200));
+                }
+                Err(AppError::SessionError) => {
+                    warn!(
+                        "{} Session expired, re-logging in...",
+                        self.region.as_str().to_uppercase()
+                    );
+                    if let Err(e) = self.login(&session).await {
+                        error!(
+                            "{} Re-login failed: {}",
+                            self.region.as_str().to_uppercase(),
+                            e
+                        );
+                        return Err(AppError::SessionError);
+                    }
+                    retry_count += 1;
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+                Err(AppError::CookieExpired) => {
+                    if self.config.require_cookies {
+                        warn!(
+                            "{} Cookies expired, refreshing...",
+                            self.region.as_str().to_uppercase()
+                        );
+                        self.refresh_cookies().await?;
+                        retry_count += 1;
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                    } else {
+                        return Err(AppError::CookieExpired);
+                    }
+                }
+                Err(AppError::UpgradeRequired) => {
+                    warn!(
+                        "{} Server upgrade required, refreshing version...",
+                        self.region.as_str().to_uppercase()
+                    );
+                    self.refresh_version().await?;
+                    retry_count += 1;
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+                Err(AppError::UnderMaintenance) => {
+                    return Err(AppError::UnderMaintenance);
+                }
+                Err(e) => {
+                    return Err(e);
+                }
+            }
+        }
+        Err(AppError::NetworkError(
+            "Max retry attempts reached".to_string(),
+        ))
+    }
+
     pub async fn get_cp_mysekai_image(&self, path: &str) -> Result<Vec<u8>, AppError> {
+        let session = self.get_session().ok_or(AppError::NoClientAvailable)?;
         let path_clean = path.trim_start_matches('/');
         let image_url = format!("{}/image/mysekai-photo/{}", self.config.api_url, path_clean);
-        let req = self.prepare_request(reqwest::Method::GET, &image_url);
+        let req = self.prepare_request(&session, reqwest::Method::GET, &image_url);
         let resp = req
             .send()
             .await
             .map_err(|e| AppError::NetworkError(e.to_string()))?;
-
         let status = resp.status().as_u16();
         if status != 200 {
             return Err(AppError::Unknown {
@@ -381,8 +603,9 @@ impl SekaiClient {
         user_id: &str,
         index: &str,
     ) -> Result<Vec<u8>, AppError> {
+        let session = self.get_session().ok_or(AppError::NoClientAvailable)?;
         let path = format!("/user/{}/mysekai/photo/{}", user_id, index);
-        let resp = self.get(&path, None).await?;
+        let resp = self.get(&session, &path, None).await?;
         let data: std::collections::HashMap<String, serde_json::Value> =
             self.handle_response(resp).await?;
         let thumbnail = data

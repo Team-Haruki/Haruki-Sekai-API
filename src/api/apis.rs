@@ -23,15 +23,13 @@ impl IntoResponse for ApiResponse {
     }
 }
 
-fn get_manager(
-    state: &AppState,
-    server: &str,
-) -> Result<Arc<crate::client::SekaiClientManager>, AppError> {
-    let region = ServerRegion::from_str(server)
-        .ok_or_else(|| AppError::InvalidServerRegion(server.to_string()))?;
+fn get_client(state: &AppState, server: &str) -> Result<Arc<crate::client::SekaiClient>, AppError> {
+    let region: ServerRegion = server
+        .parse()
+        .map_err(|_| AppError::InvalidServerRegion(server.to_string()))?;
 
     state
-        .managers
+        .clients
         .get(&region)
         .cloned()
         .ok_or(AppError::NoClientAvailable)
@@ -42,8 +40,8 @@ async fn proxy_game_api(
     server: &str,
     path: &str,
 ) -> Result<ApiResponse, AppError> {
-    let mgr = get_manager(state, server)?;
-    let (data, status) = mgr.get_game_api(path, None).await?;
+    let client = get_client(state, server)?;
+    let (data, status) = client.get_game_api(path, None).await?;
 
     Ok(ApiResponse {
         status: StatusCode::from_u16(status).unwrap_or(StatusCode::OK),

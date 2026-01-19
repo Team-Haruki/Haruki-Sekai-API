@@ -147,7 +147,10 @@ impl From<std::io::Error> for AppError {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, num_enum::TryFromPrimitive, num_enum::IntoPrimitive,
+)]
+#[repr(u16)]
 pub enum SekaiHttpStatus {
     Ok = 200,
     ClientError = 400,
@@ -161,16 +164,6 @@ pub enum SekaiHttpStatus {
 
 impl SekaiHttpStatus {
     pub fn from_code(code: u16) -> Result<Self, AppError> {
-        match code {
-            200 => Ok(SekaiHttpStatus::Ok),
-            400 => Ok(SekaiHttpStatus::ClientError),
-            403 => Ok(SekaiHttpStatus::SessionError),
-            404 => Ok(SekaiHttpStatus::NotFound),
-            409 => Ok(SekaiHttpStatus::Conflict),
-            426 => Ok(SekaiHttpStatus::GameUpgrade),
-            500 => Ok(SekaiHttpStatus::ServerError),
-            503 => Ok(SekaiHttpStatus::UnderMaintenance),
-            _ => Err(AppError::InvalidHttpStatus(code)),
-        }
+        Self::try_from(code).map_err(|_| AppError::InvalidHttpStatus(code))
     }
 }
