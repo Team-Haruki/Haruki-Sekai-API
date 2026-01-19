@@ -7,7 +7,7 @@ use tower_http::trace::TraceLayer;
 
 use crate::AppState as MainAppState;
 
-use super::api;
+use super::apis;
 use super::image;
 use super::middleware::auth_middleware;
 
@@ -33,24 +33,22 @@ pub async fn health_check() -> Json<HealthResponse> {
 pub fn create_router(state: Arc<MainAppState>) -> Router {
     START_TIME.get_or_init(Instant::now);
 
-    let public_routes = Router::new()
-        .route("/health", get(health_check))
-        .route(
-            "/image/{server}/mysekai/{param1}/{param2}",
-            get(image::get_mysekai_image),
-        );
+    let public_routes = Router::new().route("/health", get(health_check)).route(
+        "/image/{server}/mysekai/{param1}/{param2}",
+        get(image::get_mysekai_image),
+    );
 
     let api_routes = Router::new()
-        .route("/{server}/{user_id}/profile", get(api::get_user_profile))
-        .route("/{server}/system", get(api::get_system))
-        .route("/{server}/information", get(api::get_information))
+        .route("/{server}/{user_id}/profile", get(apis::get_user_profile))
+        .route("/{server}/system", get(apis::get_system))
+        .route("/{server}/information", get(apis::get_information))
         .route(
             "/{server}/event/{event_id}/ranking-top100",
-            get(api::get_event_ranking_top100),
+            get(apis::get_event_ranking_top100),
         )
         .route(
             "/{server}/event/{event_id}/ranking-border",
-            get(api::get_event_ranking_border),
+            get(apis::get_event_ranking_border),
         )
         .layer(middleware::from_fn_with_state(
             state.clone(),

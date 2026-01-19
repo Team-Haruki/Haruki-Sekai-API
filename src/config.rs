@@ -1,9 +1,9 @@
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::env;
 use std::fs::File;
 use std::io::BufReader;
 use std::path::Path;
-use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -26,19 +26,23 @@ impl ServerRegion {
         }
     }
 
-    pub fn from_str(s: &str) -> Option<Self> {
-        match s.to_lowercase().as_str() {
-            "jp" => Some(ServerRegion::Jp),
-            "en" => Some(ServerRegion::En),
-            "tw" => Some(ServerRegion::Tw),
-            "kr" => Some(ServerRegion::Kr),
-            "cn" => Some(ServerRegion::Cn),
-            _ => None,
-        }
-    }
-
     pub fn is_cp_server(&self) -> bool {
         matches!(self, ServerRegion::Jp | ServerRegion::En)
+    }
+}
+
+impl std::str::FromStr for ServerRegion {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "jp" => Ok(ServerRegion::Jp),
+            "en" => Ok(ServerRegion::En),
+            "tw" => Ok(ServerRegion::Tw),
+            "kr" => Ok(ServerRegion::Kr),
+            "cn" => Ok(ServerRegion::Cn),
+            _ => Err(format!("Unknown server region: {}", s)),
+        }
     }
 }
 

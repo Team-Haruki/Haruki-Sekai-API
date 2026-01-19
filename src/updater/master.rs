@@ -7,19 +7,19 @@ use tracing::{error, info, warn};
 
 use super::git::GitHelper;
 use crate::client::helper::{compare_version, VersionInfo};
-use crate::client::SekaiClientManager;
+use crate::client::SekaiClient;
 use crate::config::{GitConfig, ServerRegion};
 
 pub struct MasterUpdater {
     pub region: ServerRegion,
-    pub manager: Arc<SekaiClientManager>,
+    pub client: Arc<SekaiClient>,
     pub git_helper: Option<GitHelper>,
 }
 
 impl MasterUpdater {
     pub fn new(
         region: ServerRegion,
-        manager: Arc<SekaiClientManager>,
+        client: Arc<SekaiClient>,
         git_config: Option<&GitConfig>,
         proxy: Option<String>,
     ) -> Self {
@@ -29,7 +29,7 @@ impl MasterUpdater {
 
         Self {
             region,
-            manager,
+            client,
             git_helper,
         }
     }
@@ -39,7 +39,7 @@ impl MasterUpdater {
             "{} Checking for master data updates...",
             self.region.as_str().to_uppercase()
         );
-        let current_version = match self.manager.version_helper.load().await {
+        let current_version = match self.client.version_helper.load().await {
             Ok(v) => v,
             Err(e) => {
                 error!(
@@ -50,17 +50,17 @@ impl MasterUpdater {
                 return;
             }
         };
-        let client = match self.manager.get_client() {
+        let session = match self.client.get_session() {
             Some(c) => c,
             None => {
                 error!(
-                    "{} No client available",
+                    "{} No session available",
                     self.region.as_str().to_uppercase()
                 );
                 return;
             }
         };
-        let login_response = match client.login().await {
+        let login_response = match self.client.login(&session).await {
             Ok(r) => r,
             Err(e) => {
                 error!(
@@ -90,7 +90,7 @@ impl MasterUpdater {
                     login_response.cdn_version
                 );
             }
-            if let Err(e) = self.update_master_data(&login_response).await {
+            if let Err(e) = self.update_master_data(&session, &login_response).await {
                 error!(
                     "{} Failed to update master data: {}",
                     self.region.as_str().to_uppercase(),
@@ -114,15 +114,15 @@ impl MasterUpdater {
                     e
                 );
             }
-            self.manager.version_helper.update(new_version);
+            self.client.version_helper.update(new_version);
             if let Some(ref git_helper) = self.git_helper {
-                let master_dir = &self.manager.config.master_dir;
+                let master_dir = &self.client.config.master_dir;
                 match git_helper.push_changes(master_dir, &login_response.data_version) {
                     Ok(true) => info!(
                         "{} Git pushed changes successfully",
                         self.region.as_str().to_uppercase()
                     ),
-                    Ok(false) => {} // No changes to push
+                    Ok(false) => {}
                     Err(e) => error!(
                         "{} Git push failed: {}",
                         self.region.as_str().to_uppercase(),
@@ -139,7 +139,7 @@ impl MasterUpdater {
 
     fn check_cp_versions(
         &self,
-        login: &crate::client::sekai_client::LoginResponse,
+        login: &crate::client::LoginResponse,
         current: &VersionInfo,
     ) -> (bool, bool) {
         let need_master =
@@ -152,7 +152,7 @@ impl MasterUpdater {
 
     fn check_nuverse_versions(
         &self,
-        login: &crate::client::sekai_client::LoginResponse,
+        login: &crate::client::LoginResponse,
         current: &VersionInfo,
     ) -> (bool, bool) {
         let need_update = login.cdn_version > current.cdn_version;
@@ -161,18 +161,16 @@ impl MasterUpdater {
 
     async fn update_master_data(
         &self,
-        login: &crate::client::sekai_client::LoginResponse,
+        session: &crate::client::AccountSession,
+        login: &crate::client::LoginResponse,
     ) -> Result<(), crate::error::AppError> {
         info!(
             "{} Downloading master data...",
             self.region.as_str().to_uppercase()
         );
-        let master_dir = &self.manager.config.master_dir;
+        let master_dir = &self.client.config.master_dir;
         tokio::fs::create_dir_all(master_dir).await?;
-        let client = self
-            .manager
-            .get_client()
-            .ok_or(crate::error::AppError::NoClientAvailable)?;
+
         if self.region.is_cp_server() {
             use futures::stream::{self, StreamExt};
             let paths: Vec<String> = login
@@ -188,9 +186,10 @@ impl MasterUpdater {
                 .collect();
             let results: Vec<_> = stream::iter(paths)
                 .map(|api_path| {
-                    let client = client.clone();
+                    let client = self.client.clone();
+                    let session = session.clone();
                     async move {
-                        match client.get(&api_path, None).await {
+                        match client.get(&session, &api_path, None).await {
                             Ok(resp) => client.handle_response_ordered(resp).await.ok(),
                             Err(_) => None,
                         }
@@ -205,12 +204,12 @@ impl MasterUpdater {
         } else {
             let url = format!(
                 "{}/master-data-{}.info",
-                self.manager.config.nuverse_master_data_url, login.cdn_version
+                self.client.config.nuverse_master_data_url, login.cdn_version
             );
-            let http_client = &client.http_client;
+            let http_client = &self.client.http_client;
             let resp = http_client.get(&url).send().await?;
             let body = resp.bytes().await?;
-            let data = client.cryptor.unpack_ordered(&body)?;
+            let data = self.client.cryptor.unpack_ordered(&body)?;
             let structures = self.load_structures().await?;
             let restored = crate::client::nuverse::nuverse_master_restorer(&data, &structures)?;
             self.save_master_files(&restored, master_dir).await?;
@@ -275,7 +274,7 @@ impl MasterUpdater {
     }
 
     async fn load_structures(&self) -> Result<IndexMap<String, JsonValue>, crate::error::AppError> {
-        let path = &self.manager.config.nuverse_structure_file_path;
+        let path = &self.client.config.nuverse_structure_file_path;
         if path.is_empty() {
             return Ok(IndexMap::new());
         }
@@ -286,7 +285,7 @@ impl MasterUpdater {
     }
 
     async fn save_version(&self, version: &VersionInfo) -> Result<(), crate::error::AppError> {
-        let path = &self.manager.config.version_path;
+        let path = &self.client.config.version_path;
         let mut existing: serde_json::Map<String, serde_json::Value> = if Path::new(path).exists() {
             let data = tokio::fs::read(path).await?;
             sonic_rs::from_slice(&data).unwrap_or_default()

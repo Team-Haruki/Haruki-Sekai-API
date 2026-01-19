@@ -1,7 +1,8 @@
 mod account;
 pub mod helper;
-mod manager;
 pub mod nuverse;
 pub mod sekai_client;
+mod session;
 
-pub use manager::SekaiClientManager;
+pub use sekai_client::{LoginResponse, SekaiClient};
+pub use session::AccountSession;

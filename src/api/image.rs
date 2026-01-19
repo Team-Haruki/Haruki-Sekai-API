@@ -12,9 +12,9 @@ pub async fn get_mysekai_image(
     State(state): State<std::sync::Arc<AppState>>,
     Path((server, param1, param2)): Path<(String, String, String)>,
 ) -> Response {
-    let region = match ServerRegion::from_str(&server) {
-        Some(r) => r,
-        None => {
+    let region: ServerRegion = match server.parse() {
+        Ok(r) => r,
+        Err(_) => {
             return (
                 StatusCode::BAD_REQUEST,
                 format!("Invalid server: {}", server),
@@ -22,7 +22,7 @@ pub async fn get_mysekai_image(
                 .into_response();
         }
     };
-    let Some(manager) = state.managers.get(&region) else {
+    let Some(client) = state.clients.get(&region) else {
         return (StatusCode::SERVICE_UNAVAILABLE, "Server not initialized").into_response();
     };
     static HEX64: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
@@ -38,7 +38,7 @@ pub async fn get_mysekai_image(
                 .into_response();
         }
         let combined = format!("{}/{}", param1, param2);
-        manager.get_cp_mysekai_image(&combined).await
+        client.get_cp_mysekai_image(&combined).await
     } else {
         if !digits.is_match(&param1) || !digits.is_match(&param2) {
             return (
@@ -47,7 +47,7 @@ pub async fn get_mysekai_image(
             )
                 .into_response();
         }
-        manager.get_nuverse_mysekai_image(&param1, &param2).await
+        client.get_nuverse_mysekai_image(&param1, &param2).await
     };
     match image_result {
         Ok(bytes) => (StatusCode::OK, [("content-type", "image/png")], bytes).into_response(),

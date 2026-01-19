@@ -5,11 +5,11 @@ use tracing::{error, info};
 
 use super::apphash::AppHashUpdater;
 use super::master::MasterUpdater;
-use crate::client::SekaiClientManager;
+use crate::client::SekaiClient;
 use crate::config::{Config, ServerRegion};
 
 pub async fn start_scheduler(
-    managers: &std::collections::HashMap<ServerRegion, Arc<SekaiClientManager>>,
+    clients: &std::collections::HashMap<ServerRegion, Arc<SekaiClient>>,
     config: &Config,
 ) -> Result<JobScheduler, JobSchedulerError> {
     let sched = JobScheduler::new().await?;
@@ -19,8 +19,8 @@ pub async fn start_scheduler(
     } else {
         Some(config.proxy.clone())
     };
-    for (region, manager) in managers {
-        let server_config = &manager.config;
+    for (region, client) in clients {
+        let server_config = &client.config;
         if server_config.enable_master_updater && !server_config.master_updater_cron.is_empty() {
             let region_name = region.as_str().to_uppercase();
             let cron_expr = server_config.master_updater_cron.clone();
@@ -32,7 +32,7 @@ pub async fn start_scheduler(
             };
             let updater = Arc::new(MasterUpdater::new(
                 *region,
-                manager.clone(),
+                client.clone(),
                 git_cfg,
                 proxy.clone(),
             ));
