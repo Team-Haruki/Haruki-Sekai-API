@@ -20,6 +20,7 @@ use crate::error::{AppError, SekaiHttpStatus};
 use super::account::{AccountType, SekaiAccount, SekaiAccountCP, SekaiAccountNuverse};
 use super::helper::{CookieHelper, VersionHelper, VersionInfo};
 use super::session::AccountSession;
+use super::token_utils;
 
 pub struct SekaiClient {
     pub region: ServerRegion,
@@ -33,6 +34,8 @@ pub struct SekaiClient {
 
     sessions: Arc<RwLock<Vec<Arc<AccountSession>>>>,
     session_index: AtomicUsize,
+    api_semaphore: Arc<tokio::sync::Semaphore>,
+    reload_in_progress: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl SekaiClient {
@@ -83,6 +86,8 @@ impl SekaiClient {
             http_client,
             sessions: Arc::new(RwLock::new(Vec::new())),
             session_index: AtomicUsize::new(0),
+            api_semaphore: Arc::new(tokio::sync::Semaphore::new(1)),
+            reload_in_progress: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
         Ok(client)
     }
@@ -159,6 +164,127 @@ impl SekaiClient {
         Ok(())
     }
 
+    pub async fn reload_accounts(&self) -> Result<(), AppError> {
+        info!(
+            "{} Reloading accounts...",
+            self.region.as_str().to_uppercase()
+        );
+        self.reload_in_progress.store(true, Ordering::SeqCst);
+        let _permit = self
+            .api_semaphore
+            .acquire()
+            .await
+            .map_err(|_| AppError::Internal("Semaphore closed during reload".to_string()))?;
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        {
+            let mut sessions = self.sessions.write();
+            sessions.clear();
+            self.session_index.store(0, Ordering::SeqCst);
+        }
+        let accounts = self.parse_accounts()?;
+        for account in accounts {
+            if self.region.is_cp_server() && account.user_id().is_empty() {
+                warn!(
+                    "{} Skipping account with empty user_id",
+                    self.region.as_str().to_uppercase()
+                );
+                continue;
+            }
+            let session = Arc::new(AccountSession::new(account));
+            match self.login(&session).await {
+                Ok(_) => {
+                    self.sessions.write().push(session);
+                }
+                Err(e) => {
+                    error!(
+                        "{} Failed to login account: {}",
+                        self.region.as_str().to_uppercase(),
+                        e
+                    );
+                }
+            }
+        }
+        self.reload_in_progress.store(false, Ordering::SeqCst);
+        info!(
+            "{} Accounts reloaded, {} sessions active",
+            self.region.as_str().to_uppercase(),
+            self.sessions.read().len()
+        );
+        Ok(())
+    }
+
+    pub fn start_file_watcher(self: Arc<Self>) -> Result<(), AppError> {
+        use notify::{Config, PollWatcher, RecursiveMode, Watcher};
+        use std::sync::mpsc::channel;
+
+        let account_dir = self.config.account_dir.clone();
+        if account_dir.is_empty() || !Path::new(&account_dir).exists() {
+            warn!(
+                "{} Account directory not found: {}, skipping file watcher",
+                self.region.as_str().to_uppercase(),
+                account_dir
+            );
+            return Ok(());
+        }
+        let (tx, rx) = channel();
+        let config = Config::default().with_poll_interval(Duration::from_secs(5));
+        let mut watcher = PollWatcher::new(tx, config)
+            .map_err(|e| AppError::Internal(format!("Failed to create file watcher: {}", e)))?;
+        watcher
+            .watch(Path::new(&account_dir), RecursiveMode::NonRecursive)
+            .map_err(|e| AppError::Internal(format!("Failed to watch directory: {}", e)))?;
+        let client = self.clone();
+        let region_str = self.region.as_str().to_uppercase();
+        std::thread::spawn(move || {
+            let _watcher = watcher;
+            info!(
+                "{} File watcher started for {} (polling mode, 5s interval)",
+                region_str, account_dir
+            );
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("Failed to create tokio runtime for file watcher");
+            let mut last_reload = std::time::Instant::now();
+            let debounce_duration = Duration::from_secs(2);
+            for res in rx {
+                match res {
+                    Ok(event) => {
+                        use notify::EventKind;
+                        match event.kind {
+                            EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_) => {
+                                if last_reload.elapsed() < debounce_duration {
+                                    debug!(
+                                        "{} Skipping reload (debounce), last reload was {:?} ago",
+                                        region_str,
+                                        last_reload.elapsed()
+                                    );
+                                    continue;
+                                }
+                                info!(
+                                    "{} Account file change detected: {:?}",
+                                    region_str, event.paths
+                                );
+                                last_reload = std::time::Instant::now();
+                                let client_clone = client.clone();
+                                rt.block_on(async {
+                                    if let Err(e) = client_clone.reload_accounts().await {
+                                        error!("{} Failed to reload accounts: {}", region_str, e);
+                                    }
+                                });
+                            }
+                            _ => {}
+                        }
+                    }
+                    Err(e) => {
+                        error!("{} File watcher error: {}", region_str, e);
+                    }
+                }
+            }
+        });
+        Ok(())
+    }
+
     fn parse_accounts(&self) -> Result<Vec<AccountType>, AppError> {
         let mut accounts = Vec::new();
         let account_dir = Path::new(&self.config.account_dir);
@@ -217,29 +343,54 @@ impl SekaiClient {
         path: &Path,
         idx: Option<usize>,
     ) -> Option<AccountType> {
+        let log_prefix = if let Some(i) = idx {
+            format!("[{}][{}]", path.display(), i)
+        } else {
+            format!("[{}]", path.display())
+        };
+
         if self.region.is_cp_server() {
             let json_str = serde_json::to_string(&value).ok()?;
             match sonic_rs::from_str::<SekaiAccountCP>(&json_str) {
-                Ok(acc) => Some(AccountType::CP(acc)),
-                Err(e) => {
-                    if let Some(i) = idx {
-                        warn!("[{}][{}] CP unmarshal error: {}", path.display(), i, e);
-                    } else {
-                        warn!("[{}] CP unmarshal error: {}", path.display(), e);
+                Ok(mut acc) => {
+                    if let Ok(user_id) = token_utils::extract_user_id_from_jwt(&acc.credential) {
+                        debug!("{} Extracted user_id from JWT: {}", log_prefix, user_id);
+                        acc.user_id = user_id;
+                    } else if acc.user_id.is_empty() {
+                        warn!(
+                            "{} Failed to extract user_id from JWT and no fallback",
+                            log_prefix
+                        );
                     }
+                    Some(AccountType::CP(acc))
+                }
+                Err(e) => {
+                    warn!("{} CP unmarshal error: {}", log_prefix, e);
                     None
                 }
             }
         } else {
             let json_str = serde_json::to_string(&value).ok()?;
             match sonic_rs::from_str::<SekaiAccountNuverse>(&json_str) {
-                Ok(acc) => Some(AccountType::Nuverse(acc)),
-                Err(e) => {
-                    if let Some(i) = idx {
-                        warn!("[{}][{}] Nuverse unmarshal error: {}", path.display(), i, e);
-                    } else {
-                        warn!("[{}] Nuverse unmarshal error: {}", path.display(), e);
+                Ok(mut acc) => {
+                    if let Ok(user_id) =
+                        token_utils::extract_user_id_from_nuverse_token(&acc.access_token)
+                    {
+                        debug!(
+                            "{} Extracted user_id from Nuverse token: {}",
+                            log_prefix, user_id
+                        );
+                        acc.user_id = user_id;
+                    } else if acc.user_id.is_empty() || acc.user_id == "0" {
+                        warn!(
+                            "{} Failed to extract user_id from Nuverse token and no fallback",
+                            log_prefix
+                        );
                     }
+                    Some(AccountType::Nuverse(acc))
+                }
+                Err(e) => {
+                    warn!("{} Nuverse unmarshal error: {}", log_prefix, e);
                     None
                 }
             }
@@ -509,6 +660,30 @@ impl SekaiClient {
 
     #[tracing::instrument(skip(self, params), fields(region = ?self.region))]
     pub async fn get_game_api(
+        &self,
+        path: &str,
+        params: Option<&HashMap<String, String>>,
+    ) -> Result<(JsonValue, u16), AppError> {
+        // Wait for reload to complete
+        while self.reload_in_progress.load(Ordering::SeqCst) {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+
+        // Acquire semaphore with 20s timeout
+        let permit = tokio::time::timeout(
+            Duration::from_secs(20),
+            self.api_semaphore.clone().acquire_owned(),
+        )
+        .await
+        .map_err(|_| AppError::NetworkError("Request queue timeout (20s)".to_string()))?
+        .map_err(|_| AppError::NetworkError("Semaphore closed".to_string()))?;
+
+        let result = self.get_game_api_inner(path, params).await;
+        drop(permit);
+        result
+    }
+
+    async fn get_game_api_inner(
         &self,
         path: &str,
         params: Option<&HashMap<String, String>>,
