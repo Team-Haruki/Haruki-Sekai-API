@@ -34,7 +34,6 @@ pub struct SekaiClient {
 
     sessions: Arc<RwLock<Vec<Arc<AccountSession>>>>,
     session_index: AtomicUsize,
-    api_semaphore: Arc<tokio::sync::Semaphore>,
     reload_in_progress: Arc<std::sync::atomic::AtomicBool>,
 }
 
@@ -86,7 +85,6 @@ impl SekaiClient {
             http_client,
             sessions: Arc::new(RwLock::new(Vec::new())),
             session_index: AtomicUsize::new(0),
-            api_semaphore: Arc::new(tokio::sync::Semaphore::new(1)),
             reload_in_progress: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
         Ok(client)
@@ -170,11 +168,6 @@ impl SekaiClient {
             self.region.as_str().to_uppercase()
         );
         self.reload_in_progress.store(true, Ordering::SeqCst);
-        let _permit = self
-            .api_semaphore
-            .acquire()
-            .await
-            .map_err(|_| AppError::Internal("Semaphore closed during reload".to_string()))?;
         tokio::time::sleep(Duration::from_secs(3)).await;
         {
             let mut sessions = self.sessions.write();
@@ -614,9 +607,7 @@ impl SekaiClient {
         }
     }
 
-    #[tracing::instrument(skip(self, session), fields(user_id = %session.user_id()))]
     pub async fn login(&self, session: &AccountSession) -> Result<LoginResponse, AppError> {
-        let _lock = session.lock_api().await;
         let payload = session.dump_account()?;
         let encrypted = self.cryptor.pack_bytes(&payload)?;
         let (url, method) = if self.region.is_cp_server() {
@@ -664,30 +655,9 @@ impl SekaiClient {
         path: &str,
         params: Option<&HashMap<String, String>>,
     ) -> Result<(JsonValue, u16), AppError> {
-        // Wait for reload to complete
         while self.reload_in_progress.load(Ordering::SeqCst) {
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
-
-        // Acquire semaphore with 20s timeout
-        let permit = tokio::time::timeout(
-            Duration::from_secs(20),
-            self.api_semaphore.clone().acquire_owned(),
-        )
-        .await
-        .map_err(|_| AppError::NetworkError("Request queue timeout (20s)".to_string()))?
-        .map_err(|_| AppError::NetworkError("Semaphore closed".to_string()))?;
-
-        let result = self.get_game_api_inner(path, params).await;
-        drop(permit);
-        result
-    }
-
-    async fn get_game_api_inner(
-        &self,
-        path: &str,
-        params: Option<&HashMap<String, String>>,
-    ) -> Result<(JsonValue, u16), AppError> {
         let session = self.get_session().ok_or(AppError::NoClientAvailable)?;
         let max_retries = 4;
         let mut retry_count = 0;

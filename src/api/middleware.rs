@@ -35,9 +35,7 @@ pub async fn auth_middleware(
     mut req: Request<Body>,
     next: Next,
 ) -> Response {
-    // Always insert None initially, will be replaced if auth succeeds
     req.extensions_mut().insert(None::<AuthUser>);
-
     if state.db.is_none() {
         return next.run(req).await;
     }
