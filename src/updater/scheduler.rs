@@ -35,6 +35,7 @@ pub async fn start_scheduler(
                 client.clone(),
                 git_cfg,
                 proxy.clone(),
+                config.asset_updater_servers.clone(),
             ));
             match Job::new_async(cron_expr.as_str(), move |_uuid, _lock| {
                 let updater = updater.clone();

@@ -1,19 +1,30 @@
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 use indexmap::IndexMap;
+use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use tracing::{error, info, warn};
 
 use super::git::GitHelper;
 use crate::client::helper::{compare_version, VersionInfo};
 use crate::client::SekaiClient;
-use crate::config::{GitConfig, ServerRegion};
+use crate::config::{AssetUpdaterInfo, GitConfig, ServerRegion};
+
+#[derive(Debug, Serialize, Deserialize)]
+struct AssetUpdaterPayload {
+    server: String,
+    asset_version: String,
+    asset_hash: String,
+}
 
 pub struct MasterUpdater {
     pub region: ServerRegion,
     pub client: Arc<SekaiClient>,
     pub git_helper: Option<GitHelper>,
+    pub asset_updater_servers: Vec<AssetUpdaterInfo>,
+    http_client: reqwest::Client,
 }
 
 impl MasterUpdater {
@@ -22,15 +33,23 @@ impl MasterUpdater {
         client: Arc<SekaiClient>,
         git_config: Option<&GitConfig>,
         proxy: Option<String>,
+        asset_updater_servers: Vec<AssetUpdaterInfo>,
     ) -> Self {
         let git_helper = git_config
             .filter(|c| c.enabled)
             .map(|c| GitHelper::new(c, proxy));
 
+        let http_client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(30))
+            .build()
+            .unwrap_or_default();
+
         Self {
             region,
             client,
             git_helper,
+            asset_updater_servers,
+            http_client,
         }
     }
 
@@ -76,6 +95,10 @@ impl MasterUpdater {
         } else {
             self.check_nuverse_versions(&login_response, &current_version)
         };
+        if need_asset_update {
+            self.call_all_asset_updaters(&login_response.asset_version, &login_response.asset_hash)
+                .await;
+        }
         if need_master_update {
             if self.region.is_cp_server() {
                 info!(
@@ -157,6 +180,68 @@ impl MasterUpdater {
     ) -> (bool, bool) {
         let need_update = login.cdn_version > current.cdn_version;
         (need_update, need_update)
+    }
+
+    async fn call_all_asset_updaters(&self, asset_version: &str, asset_hash: &str) {
+        if self.asset_updater_servers.is_empty() {
+            return;
+        }
+        info!(
+            "{} Calling {} asset updater server(s)...",
+            self.region.as_str().to_uppercase(),
+            self.asset_updater_servers.len()
+        );
+        let payload = AssetUpdaterPayload {
+            server: self.region.as_str().to_string(),
+            asset_version: asset_version.to_string(),
+            asset_hash: asset_hash.to_string(),
+        };
+        let futures: Vec<_> = self
+            .asset_updater_servers
+            .iter()
+            .map(|info| self.call_asset_updater(info, &payload))
+            .collect();
+        futures::future::join_all(futures).await;
+        info!(
+            "{} Asset updater calls complete",
+            self.region.as_str().to_uppercase()
+        );
+    }
+
+    async fn call_asset_updater(&self, info: &AssetUpdaterInfo, payload: &AssetUpdaterPayload) {
+        let endpoint = &info.url;
+        loop {
+            let mut req = self
+                .http_client
+                .post(endpoint)
+                .header("Content-Type", "application/json")
+                .header(
+                    "User-Agent",
+                    format!("Haruki-Sekai-API/{}", env!("CARGO_PKG_VERSION")),
+                );
+            if !info.authorization.is_empty() {
+                req = req.header("Authorization", format!("Bearer {}", info.authorization));
+            }
+            let result = req.json(payload).send().await;
+            match result {
+                Ok(resp) => {
+                    if resp.status().as_u16() == 409 {
+                        tokio::time::sleep(Duration::from_secs(60)).await;
+                        continue;
+                    }
+                    return;
+                }
+                Err(e) => {
+                    warn!(
+                        "{} Asset updater call to {} failed: {}",
+                        self.region.as_str().to_uppercase(),
+                        endpoint,
+                        e
+                    );
+                    return;
+                }
+            }
+        }
     }
 
     async fn update_master_data(
