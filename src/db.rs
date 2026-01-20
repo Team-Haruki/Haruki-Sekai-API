@@ -15,7 +15,7 @@ pub async fn init_db(config: &DatabaseConfig) -> Result<DatabaseConnection, AppE
         .min_connections(1)
         .connect_timeout(std::time::Duration::from_secs(30))
         .acquire_timeout(std::time::Duration::from_secs(30))
-        .sqlx_logging(false); // Disable SQLx logging, use our own
+        .sqlx_logging(false);
 
     let db = Database::connect(opts)
         .await

@@ -112,7 +112,6 @@ impl GitHelper {
             }
             #[cfg(windows)]
             {
-                // On Windows, use GIT_ASKPASS with a batch script
                 let askpass_script = format!("@echo off\necho {}", self.password);
                 let askpass_path = std::env::temp_dir().join("git-askpass.bat");
                 std::fs::write(&askpass_path, &askpass_script)
