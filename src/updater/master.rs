@@ -15,7 +15,9 @@ use crate::config::{AssetUpdaterInfo, GitConfig, ServerRegion};
 #[derive(Debug, Serialize, Deserialize)]
 struct AssetUpdaterPayload {
     server: String,
+    #[serde(rename = "assetVersion")]
     asset_version: String,
+    #[serde(rename = "assetHash")]
     asset_hash: String,
 }
 
