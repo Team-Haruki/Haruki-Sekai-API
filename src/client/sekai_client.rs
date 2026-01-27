@@ -600,10 +600,21 @@ impl SekaiClient {
                 }),
             }
         } else {
-            Err(AppError::Unknown {
-                status,
-                body: String::from_utf8_lossy(&body).to_string(),
-            })
+            let sekai_status = SekaiHttpStatus::from_code(status)?;
+            match sekai_status {
+                SekaiHttpStatus::UnderMaintenance => Err(AppError::UnderMaintenance),
+                SekaiHttpStatus::ServerError => Err(AppError::Unknown {
+                    status,
+                    body: String::from_utf8_lossy(&body).to_string(),
+                }),
+                SekaiHttpStatus::SessionError if content_type.contains("xml") => {
+                    Err(AppError::CookieExpired)
+                }
+                _ => Err(AppError::Unknown {
+                    status,
+                    body: String::from_utf8_lossy(&body).to_string(),
+                }),
+            }
         }
     }
 
