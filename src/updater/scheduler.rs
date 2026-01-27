@@ -8,6 +8,8 @@ use super::master::MasterUpdater;
 use crate::client::SekaiClient;
 use crate::config::{Config, ServerRegion};
 
+const DEFAULT_COOKIE_REFRESH_CRON: &str = "0 0 */20 * * *";
+
 pub async fn start_scheduler(
     clients: &std::collections::HashMap<ServerRegion, Arc<SekaiClient>>,
     config: &Config,
@@ -19,6 +21,51 @@ pub async fn start_scheduler(
     } else {
         Some(config.proxy.clone())
     };
+    for (region, client) in clients {
+        if client.config.require_cookies && client.cookie_helper.is_some() {
+            let region_name = region.as_str().to_uppercase();
+            let client_clone = client.clone();
+            info!(
+                "{} Cookie refresh scheduled: {}",
+                region_name, DEFAULT_COOKIE_REFRESH_CRON
+            );
+
+            match Job::new_async(DEFAULT_COOKIE_REFRESH_CRON, move |_uuid, _lock| {
+                let client = client_clone.clone();
+                let region_str = region_name.clone();
+                Box::pin(async move {
+                    info!("{} Running scheduled cookie refresh...", region_str);
+                    match client.refresh_cookies().await {
+                        Ok(()) => {
+                            info!("{} Cookies refreshed successfully", region_str);
+                        }
+                        Err(e) => {
+                            error!("{} Failed to refresh cookies: {}", region_str, e);
+                        }
+                    }
+                })
+            }) {
+                Ok(job) => {
+                    if let Err(e) = sched.add(job).await {
+                        error!(
+                            "{} Failed to add cookie refresh job: {}",
+                            region.as_str().to_uppercase(),
+                            e
+                        );
+                    }
+                }
+                Err(e) => {
+                    error!(
+                        "{} Invalid cron expression '{}': {}",
+                        region.as_str().to_uppercase(),
+                        DEFAULT_COOKIE_REFRESH_CRON,
+                        e
+                    );
+                }
+            }
+        }
+    }
+
     for (region, client) in clients {
         let server_config = &client.config;
         if server_config.enable_master_updater && !server_config.master_updater_cron.is_empty() {
