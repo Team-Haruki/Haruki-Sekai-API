@@ -711,10 +711,18 @@ impl SekaiClient {
                 }
                 Err(AppError::UpgradeRequired) => {
                     warn!(
-                        "{} Server upgrade required, refreshing version...",
+                        "{} Server upgrade required, refreshing version and re-logging in...",
                         self.region.as_str().to_uppercase()
                     );
                     self.refresh_version().await?;
+                    if let Err(e) = self.login(&session).await {
+                        error!(
+                            "{} Re-login after version refresh failed: {}",
+                            self.region.as_str().to_uppercase(),
+                            e
+                        );
+                        return Err(AppError::UpgradeRequired);
+                    }
                     retry_count += 1;
                     tokio::time::sleep(Duration::from_secs(1)).await;
                 }

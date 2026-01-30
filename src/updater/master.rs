@@ -83,6 +83,31 @@ impl MasterUpdater {
         };
         let login_response = match self.client.login(&session).await {
             Ok(r) => r,
+            Err(crate::error::AppError::UpgradeRequired) => {
+                warn!(
+                    "{} Server upgrade required during check_update login, refreshing version...",
+                    self.region.as_str().to_uppercase()
+                );
+                if let Err(e) = self.client.refresh_version().await {
+                    error!(
+                        "{} Failed to refresh version: {}",
+                        self.region.as_str().to_uppercase(),
+                        e
+                    );
+                    return;
+                }
+                match self.client.login(&session).await {
+                    Ok(r) => r,
+                    Err(e) => {
+                        error!(
+                            "{} Failed to login after version refresh: {}",
+                            self.region.as_str().to_uppercase(),
+                            e
+                        );
+                        return;
+                    }
+                }
+            }
             Err(e) => {
                 error!(
                     "{} Failed to login: {}",
