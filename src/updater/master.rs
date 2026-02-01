@@ -27,6 +27,7 @@ pub struct MasterUpdater {
     pub git_helper: Option<GitHelper>,
     pub asset_updater_servers: Vec<AssetUpdaterInfo>,
     http_client: reqwest::Client,
+    update_lock: tokio::sync::Mutex<()>,
 }
 
 impl MasterUpdater {
@@ -52,10 +53,21 @@ impl MasterUpdater {
             git_helper,
             asset_updater_servers,
             http_client,
+            update_lock: tokio::sync::Mutex::new(()),
         }
     }
 
     pub async fn check_update(&self) {
+        let _lock = match self.update_lock.try_lock() {
+            Ok(guard) => guard,
+            Err(_) => {
+                info!(
+                    "{} Master update check already in progress, skipping...",
+                    self.region.as_str().to_uppercase()
+                );
+                return;
+            }
+        };
         info!(
             "{} Checking for master data updates...",
             self.region.as_str().to_uppercase()
@@ -117,11 +129,13 @@ impl MasterUpdater {
                 return;
             }
         };
-        let (need_master_update, need_asset_update) = if self.region.is_cp_server() {
-            self.check_cp_versions(&login_response, &current_version)
-        } else {
-            self.check_nuverse_versions(&login_response, &current_version)
-        };
+        let (need_master_update, need_asset_update, need_version_save) =
+            if self.region.is_cp_server() {
+                let (master, asset) = self.check_cp_versions(&login_response, &current_version);
+                (master, asset, master || asset)
+            } else {
+                self.check_nuverse_versions(&login_response, &current_version)
+            };
         if need_asset_update {
             self.call_all_asset_updaters(&login_response.asset_version, &login_response.asset_hash)
                 .await;
@@ -148,7 +162,7 @@ impl MasterUpdater {
                 );
             }
         }
-        if need_master_update || need_asset_update {
+        if need_version_save {
             let new_version = VersionInfo {
                 app_version: current_version.app_version,
                 app_hash: current_version.app_hash,
@@ -204,9 +218,11 @@ impl MasterUpdater {
         &self,
         login: &crate::client::LoginResponse,
         current: &VersionInfo,
-    ) -> (bool, bool) {
-        let need_update = login.cdn_version > current.cdn_version;
-        (need_update, need_update)
+    ) -> (bool, bool, bool) {
+        let need_cdn_update = login.cdn_version > current.cdn_version;
+        let need_data_version_save = login.data_version != current.data_version;
+        let need_version_save = need_cdn_update || need_data_version_save;
+        (need_cdn_update, need_cdn_update, need_version_save)
     }
 
     async fn call_all_asset_updaters(&self, asset_version: &str, asset_hash: &str) {
