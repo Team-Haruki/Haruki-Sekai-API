@@ -148,6 +148,22 @@ impl SekaiClient {
         headers.insert("X-App-Hash".to_string(), version.app_hash.clone());
     }
 
+    fn update_version_headers_from_login(&self, login: &LoginResponse) {
+        let mut headers = self.headers.lock();
+        if !login.data_version.is_empty() {
+            headers.insert("X-Data-Version".to_string(), login.data_version.clone());
+        }
+        if !login.asset_version.is_empty() {
+            headers.insert("X-Asset-Version".to_string(), login.asset_version.clone());
+        }
+        info!(
+            "{} Updated version headers from login: dataVersion={}, assetVersion={}",
+            self.region.as_str().to_uppercase(),
+            login.data_version,
+            login.asset_version
+        );
+    }
+
     pub async fn refresh_version(&self) -> Result<(), AppError> {
         let version = self.version_helper.load().await?;
         self.update_version_headers(&version);
@@ -714,14 +730,41 @@ impl SekaiClient {
                         "{} Server upgrade required, refreshing version and re-logging in...",
                         self.region.as_str().to_uppercase()
                     );
+                    // First attempt: refresh version from file and try login
                     self.refresh_version().await?;
-                    if let Err(e) = self.login(&session).await {
-                        error!(
-                            "{} Re-login after version refresh failed: {}",
-                            self.region.as_str().to_uppercase(),
-                            e
-                        );
-                        return Err(AppError::UpgradeRequired);
+                    match self.login(&session).await {
+                        Ok(login_resp) => {
+                            self.update_version_headers_from_login(&login_resp);
+                        }
+                        Err(AppError::UpgradeRequired) => {
+                            warn!(
+                                "{} Login returned 426, waiting for app version update...",
+                                self.region.as_str().to_uppercase()
+                            );
+                            tokio::time::sleep(Duration::from_secs(10)).await;
+                            self.refresh_version().await?;
+                            match self.login(&session).await {
+                                Ok(login_resp) => {
+                                    self.update_version_headers_from_login(&login_resp);
+                                }
+                                Err(e) => {
+                                    error!(
+                                        "{} Re-login after waiting for app update failed: {}",
+                                        self.region.as_str().to_uppercase(),
+                                        e
+                                    );
+                                    return Err(AppError::UpgradeRequired);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            error!(
+                                "{} Re-login after version refresh failed: {}",
+                                self.region.as_str().to_uppercase(),
+                                e
+                            );
+                            return Err(AppError::UpgradeRequired);
+                        }
                     }
                     retry_count += 1;
                     tokio::time::sleep(Duration::from_secs(1)).await;
