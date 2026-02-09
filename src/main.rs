@@ -4,6 +4,7 @@ mod config;
 mod crypto;
 mod db;
 mod error;
+mod models;
 mod updater;
 mod utils;
 
