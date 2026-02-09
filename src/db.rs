@@ -43,6 +43,13 @@ async fn create_tables(db: &DatabaseConnection) -> Result<(), AppError> {
     db.execute(&stmt).await.map_err(|e| {
         AppError::DatabaseError(format!("Failed to create sekai_user_servers: {}", e))
     })?;
+    let stmt = schema
+        .create_table_from_entity(entity::UniversalMusic)
+        .if_not_exists()
+        .to_owned();
+    db.execute(&stmt).await.map_err(|e| {
+        AppError::DatabaseError(format!("Failed to create universal_musics: {}", e))
+    })?;
     Ok(())
 }
 
