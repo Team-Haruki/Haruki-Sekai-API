@@ -160,6 +160,7 @@ impl MasterUpdater {
                     self.region.as_str().to_uppercase(),
                     e
                 );
+                return;
             }
         }
         if need_version_save {
@@ -177,6 +178,7 @@ impl MasterUpdater {
                     self.region.as_str().to_uppercase(),
                     e
                 );
+                return;
             }
             self.client.version_helper.update(new_version);
             if let Some(ref git_helper) = self.git_helper {
@@ -312,22 +314,26 @@ impl MasterUpdater {
                     }
                 })
                 .collect();
-            let results: Vec<_> = stream::iter(paths)
-                .map(|api_path| {
-                    let client = self.client.clone();
-                    let session = session.clone();
-                    async move {
-                        match client.get(&session, &api_path, None).await {
-                            Ok(resp) => client.handle_response_ordered(resp).await.ok(),
-                            Err(_) => None,
+            let results: Vec<Result<IndexMap<String, JsonValue>, crate::error::AppError>> =
+                stream::iter(paths)
+                    .map(|api_path| {
+                        let client = self.client.clone();
+                        let session = session.clone();
+                        async move {
+                            match client.get(&session, &api_path, None).await {
+                                Ok(resp) => client.handle_response_ordered(resp).await,
+                                Err(e) => Err(e),
+                            }
                         }
-                    }
-                })
-                .buffer_unordered(3)
-                .collect()
-                .await;
-            for data in results.into_iter().flatten() {
-                self.save_master_files(&data, master_dir).await?;
+                    })
+                    .buffer_unordered(3)
+                    .collect()
+                    .await;
+            for result in results {
+                match result {
+                    Ok(data) => self.save_master_files(&data, master_dir).await?,
+                    Err(e) => return Err(e),
+                }
             }
         } else {
             let url = format!(
