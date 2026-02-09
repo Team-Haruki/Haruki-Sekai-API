@@ -5,6 +5,7 @@ mod crypto;
 mod db;
 mod error;
 mod models;
+mod universal_master;
 mod updater;
 mod utils;
 
