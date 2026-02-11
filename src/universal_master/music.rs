@@ -29,12 +29,6 @@ pub struct UniversalMusic {
     pub id: i64,
 
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub seq: Option<i64>,
-
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub release_condition_id: Option<i64>,
-
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub categories: Option<Vec<CategoryElement>>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -106,8 +100,6 @@ impl UniversalMusic {
         let available_regions = regional.available_regions();
 
         // Uniform fields - take from first available
-        let seq = get_first_value(regional, |m| m.seq);
-        let release_condition_id = get_first_value(regional, |m| m.release_condition_id);
         let categories = get_first_value(regional, |m| m.categories.clone());
         let title = get_first_value(regional, |m| m.title.clone());
         let pronunciation = get_first_value(regional, |m| m.pronunciation.clone());
@@ -140,8 +132,6 @@ impl UniversalMusic {
 
         Some(UniversalMusic {
             id,
-            seq,
-            release_condition_id,
             categories,
             title,
             pronunciation,

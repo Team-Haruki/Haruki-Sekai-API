@@ -11,7 +11,7 @@
 //     let model: Costume3D = serde_json::from_str(&json).unwrap();
 // }
 
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 pub type Costume3D = Vec<Costume3DElement>;
 
@@ -34,24 +34,24 @@ pub struct Costume3DElement {
 
     pub color_id: Option<i64>,
 
-    pub color_name: Option<ColorName>,
+    pub color_name: Option<String>,
 
     pub character_id: Option<i64>,
 
     #[serde(rename = "costume3dRarity")]
     pub costume3_d_rarity: Option<Costume3DRarity>,
 
-    pub how_to_obtain:Option< Option<String>>,
+    pub how_to_obtain: Option<Option<String>>,
 
     pub assetbundle_name: Option<String>,
 
     pub designer: Option<String>,
 
-    pub archive_display_type:Option< Option<ArchiveDisplayType>>,
+    pub archive_display_type: Option<Option<ArchiveDisplayType>>,
 
     pub archive_published_at: Option<i64>,
 
-    pub published_at:Option< Option<i64>>,
+    pub published_at: Option<Option<i64>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -60,42 +60,6 @@ pub enum ArchiveDisplayType {
     None,
 
     Normal,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum ColorName {
-    #[serde(rename = "オリジナル")]
-    ColorName,
-
-    #[serde(rename = "其他颜色1")]
-    ColorName1,
-
-    #[serde(rename = "其他颜色2")]
-    ColorName2,
-
-    #[serde(rename = "其他颜色3")]
-    ColorName3,
-
-    #[serde(rename = "ノーマル")]
-    Empty,
-
-    #[serde(rename = "原版颜色")]
-    Fluffy,
-
-    #[serde(rename = "普通")]
-    Purple,
-
-    #[serde(rename = "限定颜色")]
-    Tentacled,
-
-    #[serde(rename = "アナザー1")]
-    The1,
-
-    #[serde(rename = "アナザー2")]
-    The2,
-
-    #[serde(rename = "アナザー3")]
-    The3,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
