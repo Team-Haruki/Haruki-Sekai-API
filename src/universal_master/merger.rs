@@ -145,3 +145,64 @@ where
         None
     }
 }
+
+/// Get value from JP region only (for fields where JP data is authoritative)
+pub fn get_jp_value<T: Clone, F, R>(regional_items: &RegionalData<R>, extractor: F) -> Option<T>
+where
+    F: Fn(&R) -> Option<T>,
+{
+    if let Some(item) = &regional_items.jp {
+        return extractor(item);
+    }
+    None
+}
+
+/// Merge optional regional field across ALL 5 regions
+/// Returns None if no region has the field, otherwise returns RegionalData
+pub fn merge_optional_regional_field_all<T: Clone, F, R>(
+    regional_items: &RegionalData<R>,
+    extractor: F,
+) -> Option<RegionalData<T>>
+where
+    F: Fn(&R) -> Option<T>,
+{
+    let mut field_data: RegionalData<T> = RegionalData::new();
+    let mut has_any = false;
+
+    if let Some(item) = &regional_items.jp {
+        if let Some(val) = extractor(item) {
+            field_data.jp = Some(val);
+            has_any = true;
+        }
+    }
+    if let Some(item) = &regional_items.en {
+        if let Some(val) = extractor(item) {
+            field_data.en = Some(val);
+            has_any = true;
+        }
+    }
+    if let Some(item) = &regional_items.tw {
+        if let Some(val) = extractor(item) {
+            field_data.tw = Some(val);
+            has_any = true;
+        }
+    }
+    if let Some(item) = &regional_items.kr {
+        if let Some(val) = extractor(item) {
+            field_data.kr = Some(val);
+            has_any = true;
+        }
+    }
+    if let Some(item) = &regional_items.cn {
+        if let Some(val) = extractor(item) {
+            field_data.cn = Some(val);
+            has_any = true;
+        }
+    }
+
+    if has_any {
+        Some(field_data)
+    } else {
+        None
+    }
+}

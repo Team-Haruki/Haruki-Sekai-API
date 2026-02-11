@@ -11,12 +11,6 @@ pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub id: i64,
 
-    #[sea_orm(nullable)]
-    pub seq: Option<i64>,
-
-    #[sea_orm(nullable)]
-    pub release_condition_id: Option<i64>,
-
     /// JSONB: Vec<CategoryElement>
     #[sea_orm(column_type = "JsonBinary", nullable)]
     pub categories: Option<serde_json::Value>,
@@ -93,8 +87,6 @@ impl Model {
     pub fn from_universal(music: &crate::universal_master::music::UniversalMusic) -> Self {
         Self {
             id: music.id,
-            seq: music.seq,
-            release_condition_id: music.release_condition_id,
             categories: music
                 .categories
                 .as_ref()

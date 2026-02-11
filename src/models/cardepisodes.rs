@@ -11,7 +11,7 @@
 //     let model: Cardepisode = serde_json::from_str(&json).unwrap();
 // }
 
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 pub type Cardepisode = Vec<CardepisodeElement>;
 
@@ -20,15 +20,15 @@ pub type Cardepisode = Vec<CardepisodeElement>;
 pub struct CardepisodeElement {
     pub id: Option<i64>,
 
-    pub seq:Option< Option<i64>>,
+    pub seq: Option<Option<i64>>,
 
     pub card_id: Option<i64>,
 
-    pub title: Option<Title>,
+    pub title: Option<String>,
 
     pub scenario_id: Option<String>,
 
-    pub assetbundle_name:Option< Option<String>>,
+    pub assetbundle_name: Option<Option<String>>,
 
     pub release_condition_id: Option<i64>,
 
@@ -38,7 +38,7 @@ pub struct CardepisodeElement {
 
     pub power3_bonus_fixed: Option<i64>,
 
-    pub reward_resource_box_ids:Option< Option<Vec<i64>>>,
+    pub reward_resource_box_ids: Option<Option<Vec<i64>>>,
 
     pub costs: Option<Vec<Cost>>,
 
@@ -69,19 +69,4 @@ pub struct Cost {
 #[serde(rename_all = "snake_case")]
 pub enum ResourceType {
     Material,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum Title {
-    #[serde(rename = "サイドストーリー（前編）")]
-    Empty,
-
-    #[serde(rename = "卡牌剧情（下篇）")]
-    Fluffy,
-
-    #[serde(rename = "卡牌剧情（上篇）")]
-    Purple,
-
-    #[serde(rename = "サイドストーリー（後編）")]
-    Title,
 }
