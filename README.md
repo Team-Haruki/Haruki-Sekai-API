@@ -1,4 +1,5 @@
-> Caution: This project is rewritten in Rust.  
+> [!Caution]
+> This project was rewritten in Rust.  
 > Go edition and Python edition are not maintained anymore.  
 > If you want to use Python edition, please go to [old python branch](https://github.com/Team-Haruki/Haruki-Sekai-API/tree/old-python).  
 > If you want to use Go edition, please go to [old go branch](https://github.com/Team-Haruki/Haruki-Sekai-API/tree/old-go).
