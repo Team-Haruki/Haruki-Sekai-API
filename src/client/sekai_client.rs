@@ -588,7 +588,7 @@ impl SekaiClient {
     pub async fn handle_response_ordered(
         &self,
         resp: Response,
-    ) -> Result<IndexMap<String, serde_json::Value>, AppError> {
+    ) -> Result<(IndexMap<String, serde_json::Value>, u16), AppError> {
         let status = resp.status().as_u16();
         let content_type = resp
             .headers()
@@ -606,7 +606,7 @@ impl SekaiClient {
                 SekaiHttpStatus::Ok
                 | SekaiHttpStatus::ClientError
                 | SekaiHttpStatus::NotFound
-                | SekaiHttpStatus::Conflict => self.cryptor.unpack_ordered(&body),
+                | SekaiHttpStatus::Conflict => self.cryptor.unpack_ordered(&body).map(|data| (data, status)),
                 SekaiHttpStatus::SessionError => Err(AppError::SessionError),
                 SekaiHttpStatus::GameUpgrade => Err(AppError::UpgradeRequired),
                 SekaiHttpStatus::UnderMaintenance => Err(AppError::UnderMaintenance),
@@ -691,10 +691,10 @@ impl SekaiClient {
         while retry_count < max_retries {
             let resp = self.get(&session, path, params).await?;
             match self.handle_response_ordered(resp).await {
-                Ok(result) => {
+                Ok((result, upstream_status)) => {
                     let json_value: JsonValue = serde_json::to_value(&result)
                         .map_err(|e| AppError::ParseError(e.to_string()))?;
-                    return Ok((json_value, 200));
+                    return Ok((json_value, upstream_status));
                 }
                 Err(AppError::SessionError) => {
                     warn!(

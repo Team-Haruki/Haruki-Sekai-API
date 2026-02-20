@@ -314,7 +314,7 @@ impl MasterUpdater {
                     }
                 })
                 .collect();
-            let results: Vec<Result<IndexMap<String, JsonValue>, crate::error::AppError>> =
+            let results: Vec<Result<(IndexMap<String, JsonValue>, u16), crate::error::AppError>> =
                 stream::iter(paths)
                     .map(|api_path| {
                         let client = self.client.clone();
@@ -331,7 +331,7 @@ impl MasterUpdater {
                     .await;
             for result in results {
                 match result {
-                    Ok(data) => self.save_master_files(&data, master_dir).await?,
+                    Ok((data, _status)) => self.save_master_files(&data, master_dir).await?,
                     Err(e) => return Err(e),
                 }
             }
