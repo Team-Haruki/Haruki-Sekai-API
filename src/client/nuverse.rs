@@ -60,6 +60,55 @@ pub fn restore_dict(
     result
 }
 
+/// Restores `userCard` fields inside event ranking responses from Nuverse servers (TW/KR/CN).
+/// These servers return `userCard` as a flat array instead of a keyed dictionary.
+/// If `userCard` is already a dict, it is left unchanged.
+pub fn restore_ranking_user_cards(data: &mut JsonValue) {
+    let user_card_structure: Vec<JsonValue> = vec![
+        json!("cardId"),
+        json!("level"),
+        json!("exp"),
+        json!("totalExp"),
+        json!("skillLevel"),
+        json!("skillExp"),
+        json!("totalSkillExp"),
+        json!("masterRank"),
+        json!("specialTrainingStatus"),
+        json!("defaultImage"),
+        json!("duplicateCount"),
+        json!("createdAt"),
+        json!([
+            "episodes",
+            [
+                "cardEpisodeId",
+                "scenarioStatus",
+                "scenarioStatusReasons",
+                "isNotSkipped"
+            ]
+        ]),
+    ];
+
+    let rankings = match data.get_mut("rankings").and_then(|v| v.as_array_mut()) {
+        Some(arr) => arr,
+        None => return,
+    };
+
+    for entry in rankings.iter_mut() {
+        if let Some(user_card) = entry.get("userCard") {
+            if user_card.is_array() {
+                if let Some(arr) = user_card.as_array() {
+                    let restored = restore_dict(arr, &user_card_structure);
+                    entry
+                        .as_object_mut()
+                        .unwrap()
+                        .insert("userCard".to_string(), json!(restored));
+                }
+            }
+            // If it's already a dict, leave it as-is
+        }
+    }
+}
+
 pub fn restore_compact_data(
     data: &IndexMap<String, JsonValue>,
 ) -> Vec<IndexMap<String, JsonValue>> {
