@@ -1,12 +1,3 @@
-mod api;
-mod client;
-mod config;
-mod crypto;
-mod db;
-mod error;
-mod updater;
-mod utils;
-
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -14,18 +5,14 @@ use tokio::signal;
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
-use crate::api::create_router;
-use crate::client::SekaiClient;
-use crate::config::Config;
-use crate::error::AppError;
+use haruki_sekai_api::api::create_router;
+use haruki_sekai_api::client::SekaiClient;
+use haruki_sekai_api::config::Config;
+use haruki_sekai_api::db;
+use haruki_sekai_api::error::AppError;
+use haruki_sekai_api::updater;
 
-pub struct AppState {
-    pub config: Config,
-    pub clients: std::collections::HashMap<config::ServerRegion, Arc<SekaiClient>>,
-    pub db: Option<sea_orm::DatabaseConnection>,
-    pub redis: Option<redis::aio::ConnectionManager>,
-    pub jwt_secret: Option<String>,
-}
+use haruki_sekai_api::AppState;
 
 struct LocalTimer;
 
@@ -71,7 +58,13 @@ async fn main() -> anyhow::Result<()> {
         }
     };
     let app = create_router(state.clone());
-    let _scheduler = match updater::start_scheduler(&state.clients, &state.config).await {
+    let _scheduler = match updater::start_scheduler(
+        &state.clients,
+        &state.config,
+        state.master_db.clone(),
+    )
+    .await
+    {
         Ok(s) => Some(s),
         Err(e) => {
             error!("Failed to start scheduler: {}", e);
@@ -152,6 +145,11 @@ async fn init_app_state(config: Config) -> anyhow::Result<AppState> {
     } else {
         None
     };
+    let master_db = if config.master_database.enabled {
+        Some(db::init_master_db(&config.master_database).await?)
+    } else {
+        None
+    };
     let jwt_secret = if config.backend.sekai_user_jwt_signing_key.is_empty() {
         None
     } else {
@@ -161,6 +159,7 @@ async fn init_app_state(config: Config) -> anyhow::Result<AppState> {
         config,
         clients,
         db,
+        master_db,
         redis,
         jwt_secret,
     })

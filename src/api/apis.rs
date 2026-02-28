@@ -89,7 +89,17 @@ pub async fn get_event_ranking_top100(
         "/user/{{userId}}/event/{}/ranking?rankingViewType=top100",
         event_id
     );
-    proxy_game_api(&state, &server, &path).await
+    let mut resp = proxy_game_api(&state, &server, &path).await?;
+
+    // Nuverse servers (TW/KR/CN) return userCard as a flat array; restore to keyed dict
+    let region: ServerRegion = server
+        .parse()
+        .map_err(|_| AppError::InvalidServerRegion(server.to_string()))?;
+    if !region.is_cp_server() {
+        crate::client::nuverse::restore_ranking_user_cards(&mut resp.body);
+    }
+
+    Ok(resp)
 }
 
 pub async fn get_event_ranking_border(

@@ -28,6 +28,7 @@ pub struct MasterUpdater {
     pub asset_updater_servers: Vec<AssetUpdaterInfo>,
     http_client: reqwest::Client,
     update_lock: tokio::sync::Mutex<()>,
+    db: Option<sea_orm::DatabaseConnection>,
 }
 
 impl MasterUpdater {
@@ -37,6 +38,7 @@ impl MasterUpdater {
         git_config: Option<&GitConfig>,
         proxy: Option<String>,
         asset_updater_servers: Vec<AssetUpdaterInfo>,
+        db: Option<sea_orm::DatabaseConnection>,
     ) -> Self {
         let git_helper = git_config
             .filter(|c| c.enabled)
@@ -54,6 +56,7 @@ impl MasterUpdater {
             asset_updater_servers,
             http_client,
             update_lock: tokio::sync::Mutex::new(()),
+            db,
         }
     }
 
@@ -347,6 +350,37 @@ impl MasterUpdater {
             let structures = self.load_structures().await?;
             let restored = crate::client::nuverse::nuverse_master_restorer(&data, &structures)?;
             self.save_master_files(&restored, master_dir).await?;
+        }
+
+        if let Some(db) = &self.db {
+            info!(
+                "{} Starting database ingestion for new master data...",
+                self.region.as_str().to_uppercase()
+            );
+            match crate::ingest_engine::IngestionEngine::new(db.clone()).await {
+                Ok(engine) => {
+                    let region_str = self.region.as_str().to_lowercase();
+                    if let Err(e) = engine.ingest_master_data(master_dir, &region_str).await {
+                        warn!(
+                            "{} Master Data Ingestion partial failure: {}",
+                            self.region.as_str().to_uppercase(),
+                            e
+                        );
+                    } else {
+                        info!(
+                            "{} Master Data successfully ingested into database",
+                            self.region.as_str().to_uppercase()
+                        );
+                    }
+                }
+                Err(e) => {
+                    warn!(
+                        "{} Failed to initialize IngestionEngine: {}",
+                        self.region.as_str().to_uppercase(),
+                        e
+                    );
+                }
+            }
         }
 
         info!(
