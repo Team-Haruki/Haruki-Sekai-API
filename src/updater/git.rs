@@ -31,7 +31,7 @@ impl GitHelper {
                 repo_path
             )));
         }
-        let status = self.run_git(repo_path, &["status", "--porcelain"])?;
+        let status = self.run_git(repo_path, &["status", ".", "--porcelain"])?;
         if status.trim().is_empty() {
             let unpushed = self.run_git(repo_path, &["log", "@{u}..", "--oneline"]);
             if unpushed.is_err()
@@ -45,7 +45,7 @@ impl GitHelper {
             }
             info!("Found unpushed commits");
         } else {
-            self.run_git(repo_path, &["add", "-A"])?;
+            self.run_git(repo_path, &["add", "."])?;
             let commit_msg = format!("Sekai master data version {}", data_version);
             let author = "Haruki Sekai Master Update Bot <no-reply@mail.seiunx.com>";
             self.run_git(
