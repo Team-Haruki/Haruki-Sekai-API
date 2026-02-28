@@ -63,6 +63,10 @@ pub fn restore_dict(
 /// Restores `userCard` fields inside event ranking responses from Nuverse servers (TW/KR/CN).
 /// These servers return `userCard` as a flat array instead of a keyed dictionary.
 /// If `userCard` is already a dict, it is left unchanged.
+///
+/// Handles all ranking response variants:
+/// - Top100: `rankings[]`, `userWorldBloomChapterRankings[].rankings[]`
+/// - Border: `borderRankings[]`, `userWorldBloomChapterRankingBorders[].borderRankings[]`
 pub fn restore_ranking_user_cards(data: &mut JsonValue) {
     let user_card_structure: Vec<JsonValue> = vec![
         json!("cardId"),
@@ -88,23 +92,54 @@ pub fn restore_ranking_user_cards(data: &mut JsonValue) {
         ]),
     ];
 
-    let rankings = match data.get_mut("rankings").and_then(|v| v.as_array_mut()) {
-        Some(arr) => arr,
-        None => return,
-    };
+    // Top-level: "rankings" (top100) and "borderRankings" (border)
+    for key in &["rankings", "borderRankings"] {
+        if let Some(arr) = data.get_mut(*key).and_then(|v| v.as_array_mut()) {
+            restore_user_cards_in_array(arr, &user_card_structure);
+        }
+    }
 
-    for entry in rankings.iter_mut() {
+    // Nested: userWorldBloomChapterRankings[].rankings
+    if let Some(chapters) = data
+        .get_mut("userWorldBloomChapterRankings")
+        .and_then(|v| v.as_array_mut())
+    {
+        for chapter in chapters.iter_mut() {
+            if let Some(arr) = chapter.get_mut("rankings").and_then(|v| v.as_array_mut()) {
+                restore_user_cards_in_array(arr, &user_card_structure);
+            }
+        }
+    }
+
+    // Nested: userWorldBloomChapterRankingBorders[].borderRankings
+    if let Some(chapters) = data
+        .get_mut("userWorldBloomChapterRankingBorders")
+        .and_then(|v| v.as_array_mut())
+    {
+        for chapter in chapters.iter_mut() {
+            if let Some(arr) = chapter
+                .get_mut("borderRankings")
+                .and_then(|v| v.as_array_mut())
+            {
+                restore_user_cards_in_array(arr, &user_card_structure);
+            }
+        }
+    }
+}
+
+/// Restores `userCard` from flat array to keyed dict for each entry in a rankings array.
+fn restore_user_cards_in_array(entries: &mut [JsonValue], structure: &[JsonValue]) {
+    for entry in entries.iter_mut() {
         if let Some(user_card) = entry.get("userCard") {
             if user_card.is_array() {
                 if let Some(arr) = user_card.as_array() {
-                    let restored = restore_dict(arr, &user_card_structure);
+                    let restored = restore_dict(arr, structure);
                     entry
                         .as_object_mut()
                         .unwrap()
                         .insert("userCard".to_string(), json!(restored));
                 }
             }
-            // If it's already a dict, leave it as-is
         }
     }
 }
