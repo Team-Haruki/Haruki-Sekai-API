@@ -40,6 +40,12 @@ database:
   dsn: "postgres://user:pass@host:port/database?sslmode=disable"
   max_connections: 25
 
+master_database:
+  enabled: false # set to true to enable master data ingestion into PostgreSQL
+  driver: "postgres"
+  dsn: "postgres://haruki:sekai@localhost:5432/master_data"
+  max_connections: 10
+
 apphash_sources: # sources for apphash, to update apphash values periodically
   # - type: file
   #   dir: "/path/to/your/local/apphash_json/directory"
