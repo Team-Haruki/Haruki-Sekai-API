@@ -36,9 +36,9 @@ pub struct ShopitemElement {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CostElement {
-    pub shop_item_id:Option< Option<i64>>,
+    pub shop_item_id:Option<i64>,
 
-    pub seq:Option< Option<i64>>,
+    pub seq:Option<i64>,
 
     pub cost: Option<CostCost>,
 }

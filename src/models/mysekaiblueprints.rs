@@ -28,9 +28,9 @@ pub struct MysekaiblueprintElement {
 
     pub is_obtained_by_convert: Option<bool>,
 
-    pub craft_count_limit:Option< Option<i64>>,
+    pub craft_count_limit:Option<i64>,
 
-    pub is_available_without_possession:Option< Option<bool>>,
+    pub is_available_without_possession:Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

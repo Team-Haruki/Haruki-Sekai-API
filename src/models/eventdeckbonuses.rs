@@ -22,9 +22,9 @@ pub struct EventdeckbonuseElement {
 
     pub event_id: Option<i64>,
 
-    pub game_character_unit_id:Option< Option<i64>>,
+    pub game_character_unit_id:Option<i64>,
 
-    pub card_attr:Option< Option<CardAttr>>,
+    pub card_attr:Option<CardAttr>,
 
     pub bonus_rate: Option<f64>,
 }

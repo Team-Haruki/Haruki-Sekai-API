@@ -11,7 +11,7 @@
 //     let model: Gacha = serde_json::from_str(&json).unwrap();
 // }
 
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 pub type Gacha = Vec<GachaElement>;
 
@@ -28,7 +28,7 @@ pub struct GachaElement {
 
     pub assetbundle_name: Option<String>,
 
-    pub gacha_card_rarity_rate_group_id:Option< Option<i64>>,
+    pub gacha_card_rarity_rate_group_id: Option<i64>,
 
     pub start_at: Option<i64>,
 
@@ -36,7 +36,7 @@ pub struct GachaElement {
 
     pub is_show_period: Option<bool>,
 
-    pub gacha_ceil_item_id:Option< Option<i64>>,
+    pub gacha_ceil_item_id: Option<i64>,
 
     pub wish_select_count: Option<i64>,
 
@@ -52,21 +52,21 @@ pub struct GachaElement {
 
     pub gacha_pickups: Option<Vec<GachaPickup>>,
 
-    pub gacha_pickup_costumes:Option< Option<Vec<Option<serde_json::Value>>>>,
+    pub gacha_pickup_costumes: Option<Vec<Option<serde_json::Value>>>,
 
     pub gacha_information: Option<GachaInformation>,
 
-    pub drawable_gacha_hour:Option< Option<i64>>,
+    pub drawable_gacha_hour: Option<i64>,
 
-    pub gacha_bonus_id:Option< Option<i64>>,
+    pub gacha_bonus_id: Option<i64>,
 
-    pub spin_limit:Option< Option<i64>>,
+    pub spin_limit: Option<i64>,
 
-    pub gacha_bonus_item_receivable_reward_group_id:Option< Option<i64>>,
+    pub gacha_bonus_item_receivable_reward_group_id: Option<i64>,
 
-    pub gacha_freebie_group_id:Option< Option<i64>>,
+    pub gacha_freebie_group_id: Option<i64>,
 
-    pub daily_spin_limit:Option< Option<i64>>,
+    pub daily_spin_limit: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -78,13 +78,13 @@ pub struct GachaBehavior {
 
     pub gacha_behavior_type: Option<GachaBehaviorType>,
 
-    pub cost_resource_type:Option< Option<CostResourceType>>,
+    pub cost_resource_type: Option<CostResourceType>,
 
-    pub cost_resource_quantity:Option< Option<i64>>,
+    pub cost_resource_quantity: Option<i64>,
 
     pub spin_count: Option<i64>,
 
-    pub execute_limit:Option< Option<i64>>,
+    pub execute_limit: Option<i64>,
 
     pub group_id: Option<i64>,
 
@@ -94,9 +94,9 @@ pub struct GachaBehavior {
 
     pub gacha_spinnable_type: Option<GachaSpinnableType>,
 
-    pub cost_resource_id:Option< Option<i64>>,
+    pub cost_resource_id: Option<i64>,
 
-    pub gacha_extra_id:Option< Option<i64>>,
+    pub gacha_extra_id: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -123,10 +123,10 @@ pub enum GachaBehaviorType {
     OnceAWeek,
 
     #[serde(rename = "over_rarity_3_once")]
-    OverRarity3_Once,
+    OverRarity3Once,
 
     #[serde(rename = "over_rarity_4_once")]
-    OverRarity4_Once,
+    OverRarity4Once,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -151,9 +151,9 @@ pub enum ResourceCategory {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GachaCardRarityRate {
-    pub id:Option< Option<i64>>,
+    pub id: Option<i64>,
 
-    pub group_id:Option< Option<i64>>,
+    pub group_id: Option<i64>,
 
     pub card_rarity_type: Option<CardRarityType>,
 
@@ -200,9 +200,9 @@ pub struct GachaDetail {
 
     pub is_wish: Option<bool>,
 
-    pub gacha_detail_wish_type:Option< Option<GachaDetailWishType>>,
+    pub gacha_detail_wish_type: Option<GachaDetailWishType>,
 
-    pub fixed_bonus_weight:Option< Option<i64>>,
+    pub fixed_bonus_weight: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -224,9 +224,9 @@ pub struct GachaInformation {
 
     pub description: Option<String>,
 
-    pub bubble_assetbundle_name:Option< Option<BubbleAssetbundleName>>,
+    pub bubble_assetbundle_name: Option<BubbleAssetbundleName>,
 
-    pub bubble_text:Option< Option<String>>,
+    pub bubble_text: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -254,13 +254,13 @@ pub enum BubbleAssetbundleName {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GachaPickup {
-    pub id:Option< Option<i64>>,
+    pub id: Option<i64>,
 
     pub gacha_id: Option<i64>,
 
     pub card_id: Option<i64>,
 
-    pub gacha_pickup_type:Option< Option<GachaType>>,
+    pub gacha_pickup_type: Option<GachaType>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

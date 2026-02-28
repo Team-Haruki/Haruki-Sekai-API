@@ -46,7 +46,7 @@ pub struct CardElement {
 
     pub gacha_phrase: Option<String>,
 
-    pub flavor_text:Option< Option<FlavorText>>,
+    pub flavor_text:Option<FlavorText>,
 
     pub release_at: Option<i64>,
 
@@ -60,15 +60,15 @@ pub struct CardElement {
 
     pub master_lesson_achieve_resources: Option<Vec<MasterLessonAchieveResource>>,
 
-    pub initial_special_training_status:Option< Option<InitialSpecialTrainingStatus>>,
+    pub initial_special_training_status:Option<InitialSpecialTrainingStatus>,
 
-    pub archive_display_type:Option< Option<ArchiveDisplayType>>,
+    pub archive_display_type:Option<ArchiveDisplayType>,
 
-    pub special_training_skill_id:Option< Option<i64>>,
+    pub special_training_skill_id:Option<i64>,
 
-    pub special_training_skill_name:Option< Option<String>>,
+    pub special_training_skill_name:Option<String>,
 
-    pub special_training_reward_resource_box_id:Option< Option<i64>>,
+    pub special_training_reward_resource_box_id:Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -174,9 +174,9 @@ pub enum InitialSpecialTrainingStatus {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MasterLessonAchieveResource {
-    pub release_condition_id:Option< Option<i64>>,
+    pub release_condition_id:Option<i64>,
 
-    pub card_id:Option< Option<i64>>,
+    pub card_id:Option<i64>,
 
     pub master_rank: Option<i64>,
 

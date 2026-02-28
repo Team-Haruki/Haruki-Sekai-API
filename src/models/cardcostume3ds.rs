@@ -23,5 +23,5 @@ pub struct Cardcostume3DElement {
     #[serde(rename = "costume3dId")]
     pub costume3_d_id: Option<i64>,
 
-    pub is_initial_obtain_hair:Option< Option<bool>>,
+    pub is_initial_obtain_hair:Option<bool>,
 }

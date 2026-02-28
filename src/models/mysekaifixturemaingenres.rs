@@ -26,7 +26,7 @@ pub struct MysekaifixturemaingenreElement {
 
     pub assetbundle_name: Option<String>,
 
-    pub group_id:Option< Option<i64>>,
+    pub group_id:Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

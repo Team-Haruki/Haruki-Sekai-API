@@ -26,7 +26,7 @@ pub struct MysekaifixturetagElement {
 
     pub mysekai_fixture_tag_type: Option<MysekaiFixtureTagType>,
 
-    pub external_id:Option< Option<i64>>,
+    pub external_id:Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -5,7 +5,7 @@ use std::fs::File;
 use std::io::BufReader;
 use std::path::Path;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ServerRegion {
     Jp,
@@ -186,6 +186,8 @@ pub struct Config {
     pub backend: BackendConfig,
     #[serde(default)]
     pub database: DatabaseConfig,
+    #[serde(default)]
+    pub master_database: DatabaseConfig,
     #[serde(default)]
     pub apphash_sources: Vec<AppHashSource>,
     #[serde(default)]

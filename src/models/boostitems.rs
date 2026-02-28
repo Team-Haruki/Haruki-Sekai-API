@@ -20,13 +20,13 @@ pub type Boostitem = Vec<BoostitemElement>;
 pub struct BoostitemElement {
     pub id: Option<i64>,
 
-    pub seq:Option< Option<i64>>,
+    pub seq:Option<i64>,
 
     pub name: Option<String>,
 
     pub recovery_value: Option<i64>,
 
-    pub asset_bundle_name:Option< Option<String>>,
+    pub asset_bundle_name:Option<String>,
 
     pub flavor_text: Option<FlavorText>,
 }

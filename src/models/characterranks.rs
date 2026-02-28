@@ -38,11 +38,11 @@ pub struct CharacterrankElement {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CharacterRankAchieveResource {
-    pub release_condition_id:Option< Option<i64>>,
+    pub release_condition_id:Option<i64>,
 
-    pub character_id:Option< Option<i64>>,
+    pub character_id:Option<i64>,
 
-    pub character_rank:Option< Option<i64>>,
+    pub character_rank:Option<i64>,
 
     pub resources: Option<Vec<Option<serde_json::Value>>>,
 }

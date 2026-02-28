@@ -24,7 +24,7 @@ pub struct AreaitemElement {
 
     pub name: Option<String>,
 
-    pub flavor_text:Option< Option<String>>,
+    pub flavor_text:Option<String>,
 
     pub spawn_point: Option<SpawnPoint>,
 

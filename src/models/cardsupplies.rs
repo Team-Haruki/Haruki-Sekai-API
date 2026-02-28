@@ -22,5 +22,5 @@ pub struct CardsupplieElement {
 
     pub card_supply_type: Option<String>,
 
-    pub assetbundle_name:Option< Option<String>>,
+    pub assetbundle_name:Option<String>,
 }

@@ -26,7 +26,7 @@ pub struct AreaitemlevelElement {
 
     pub target_card_attr: Option<TargetCardAttr>,
 
-    pub target_game_character_id:Option< Option<i64>>,
+    pub target_game_character_id:Option<i64>,
 
     pub power1_bonus_rate: Option<f64>,
 

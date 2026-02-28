@@ -41,17 +41,17 @@ pub struct Costume3DElement {
     #[serde(rename = "costume3dRarity")]
     pub costume3_d_rarity: Option<Costume3DRarity>,
 
-    pub how_to_obtain: Option<Option<String>>,
+    pub how_to_obtain: Option<String>,
 
     pub assetbundle_name: Option<String>,
 
     pub designer: Option<String>,
 
-    pub archive_display_type: Option<Option<ArchiveDisplayType>>,
+    pub archive_display_type: Option<ArchiveDisplayType>,
 
     pub archive_published_at: Option<i64>,
 
-    pub published_at: Option<Option<i64>>,
+    pub published_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
