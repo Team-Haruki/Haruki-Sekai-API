@@ -45,7 +45,7 @@ impl GitHelper {
             }
             info!("Found unpushed commits");
         } else {
-            self.run_git(repo_path, &["add", "."])?;
+            self.run_git(repo_path, &["add", "-A"])?;
             let commit_msg = format!("Sekai master data version {}", data_version);
             let author = "Haruki Sekai Master Update Bot <no-reply@mail.seiunx.com>";
             self.run_git(

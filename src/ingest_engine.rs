@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use sea_orm::sea_query::{Alias, InsertStatement};
-use sea_orm::{ConnectionTrait, DatabaseConnection};
+use sea_orm::{ConnectionTrait, DatabaseConnection, TransactionTrait};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::fs;
@@ -262,6 +262,32 @@ impl IngestionEngine {
             }
         }
 
+        // Use a transaction: DELETE existing rows for this region, then INSERT fresh snapshot.
+        // Master data is always a complete snapshot per region, so a full replace is correct.
+        let txn = self
+            .db
+            .begin()
+            .await
+            .context("Failed to begin transaction")?;
+
+        // Delete existing rows for this table+region before inserting
+        if has_server_region {
+            let delete_sql = format!(
+                "DELETE FROM \"{}\" WHERE server_region = '{}'",
+                table_name, region
+            );
+            txn.execute_unprepared(&delete_sql)
+                .await
+                .context("Failed to delete existing region data")?;
+        } else {
+            // No server_region column — truncate all rows (rare edge case)
+            let delete_sql = format!("DELETE FROM \"{}\"", table_name);
+            txn.execute_unprepared(&delete_sql)
+                .await
+                .context("Failed to truncate table")?;
+        }
+
+        // Batch insert in chunks of 1000
         let mut current_chunk = Vec::new();
 
         for row in rows_to_insert {
@@ -273,8 +299,7 @@ impl IngestionEngine {
                     chunk_stmt.values_panic(r);
                 }
 
-                self.db
-                    .execute(&chunk_stmt)
+                txn.execute(&chunk_stmt)
                     .await
                     .context("Failed to execute batch insert")?;
             }
@@ -286,11 +311,12 @@ impl IngestionEngine {
                 chunk_stmt.values_panic(r);
             }
 
-            self.db
-                .execute(&chunk_stmt)
+            txn.execute(&chunk_stmt)
                 .await
                 .context("Failed to execute batch insert")?;
         }
+
+        txn.commit().await.context("Failed to commit transaction")?;
 
         Ok(())
     }
@@ -303,6 +329,7 @@ mod tests {
     use std::time::Duration;
 
     #[tokio::test]
+    #[ignore] // Requires a running local Postgres; run with: cargo test -- --ignored
     async fn test_direct_ingestion() -> anyhow::Result<()> {
         let mut opt =
             ConnectOptions::new("postgres://haruki:sekai@localhost:5432/master_data".to_owned());
