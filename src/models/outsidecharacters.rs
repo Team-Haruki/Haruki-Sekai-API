@@ -19,7 +19,7 @@ pub type Outsidecharacter = Vec<OutsidecharacterElement>;
 pub struct OutsidecharacterElement {
     pub id: Option<i64>,
 
-    pub seq:Option< Option<i64>>,
+    pub seq:Option<i64>,
 
     pub name: Option<String>,
 }

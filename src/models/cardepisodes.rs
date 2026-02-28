@@ -20,7 +20,7 @@ pub type Cardepisode = Vec<CardepisodeElement>;
 pub struct CardepisodeElement {
     pub id: Option<i64>,
 
-    pub seq: Option<Option<i64>>,
+    pub seq: Option<i64>,
 
     pub card_id: Option<i64>,
 
@@ -28,7 +28,7 @@ pub struct CardepisodeElement {
 
     pub scenario_id: Option<String>,
 
-    pub assetbundle_name: Option<Option<String>>,
+    pub assetbundle_name: Option<String>,
 
     pub release_condition_id: Option<i64>,
 
@@ -38,7 +38,7 @@ pub struct CardepisodeElement {
 
     pub power3_bonus_fixed: Option<i64>,
 
-    pub reward_resource_box_ids: Option<Option<Vec<i64>>>,
+    pub reward_resource_box_ids: Option<Vec<i64>>,
 
     pub costs: Option<Vec<Cost>>,
 

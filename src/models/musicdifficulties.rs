@@ -28,7 +28,7 @@ pub struct MusicdifficultieElement {
 
     pub total_note_count: Option<i64>,
 
-    pub release_condition_id:Option< Option<i64>>,
+    pub release_condition_id:Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

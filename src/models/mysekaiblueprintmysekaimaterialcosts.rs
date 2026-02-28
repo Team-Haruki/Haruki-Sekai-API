@@ -28,7 +28,7 @@ pub struct MysekaiblueprintmysekaimaterialcostElement {
 
     pub quantity: Option<i64>,
 
-    pub mysekai_blueprint_type:Option< Option<MysekaiBlueprintType>>,
+    pub mysekai_blueprint_type:Option<MysekaiBlueprintType>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

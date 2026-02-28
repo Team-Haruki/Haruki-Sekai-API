@@ -18,13 +18,13 @@ pub type Musictag = Vec<MusictagElement>;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MusictagElement {
-    pub id:Option< Option<i64>>,
+    pub id:Option<i64>,
 
     pub music_id: Option<i64>,
 
     pub music_tag: Option<MusicTag>,
 
-    pub seq:Option< Option<i64>>,
+    pub seq:Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

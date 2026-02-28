@@ -42,23 +42,23 @@ pub struct EventExchange {
 
     pub resource_box_id: Option<i64>,
 
-    pub exchange_limit:Option< Option<i64>>,
+    pub exchange_limit:Option<i64>,
 
     pub event_exchange_cost: Option<EventExchangeCost>,
 
-    pub game_character_id:Option< Option<i64>>,
+    pub game_character_id:Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EventExchangeCost {
-    pub id:Option< Option<i64>>,
+    pub id:Option<i64>,
 
-    pub event_exchange_id:Option< Option<i64>>,
+    pub event_exchange_id:Option<i64>,
 
-    pub resource_type:Option< Option<ResourceType>>,
+    pub resource_type:Option<ResourceType>,
 
-    pub resource_id:Option< Option<i64>>,
+    pub resource_id:Option<i64>,
 
     pub resource_quantity: Option<i64>,
 }

@@ -24,11 +24,11 @@ pub struct EventitemElement {
 
     pub name: Option<Name>,
 
-    pub flavor_text:Option< Option<FlavorText>>,
+    pub flavor_text:Option<FlavorText>,
 
-    pub assetbundle_name:Option< Option<String>>,
+    pub assetbundle_name:Option<String>,
 
-    pub game_character_id:Option< Option<i64>>,
+    pub game_character_id:Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

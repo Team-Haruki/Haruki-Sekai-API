@@ -30,9 +30,9 @@ pub struct Character2DElement {
 
     pub is_enabled_flip_display: Option<bool>,
 
-    pub asset_name:Option< Option<String>>,
+    pub asset_name:Option<String>,
 
-    pub character_icon_assetbundle_name:Option< Option<CharacterIconAssetbundleName>>,
+    pub character_icon_assetbundle_name:Option<CharacterIconAssetbundleName>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -22,9 +22,9 @@ pub struct WorldbloomElement {
 
     pub event_id: Option<i64>,
 
-    pub game_character_id:Option< Option<i64>>,
+    pub game_character_id:Option<i64>,
 
-    pub world_bloom_chapter_type:Option< Option<WorldBloomChapterType>>,
+    pub world_bloom_chapter_type:Option<WorldBloomChapterType>,
 
     pub chapter_no: Option<i64>,
 
@@ -37,7 +37,7 @@ pub struct WorldbloomElement {
     pub is_supplemental: Option<bool>,
 
     #[serde(rename = "costume2dId")]
-    pub costume2_d_id:Option< Option<i64>>,
+    pub costume2_d_id:Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

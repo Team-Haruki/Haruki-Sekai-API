@@ -17,7 +17,7 @@ pub type Ngword = Vec<NgwordElement>;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NgwordElement {
-    pub id:Option< Option<i64>>,
+    pub id:Option<i64>,
 
     pub word: Option<String>,
 }

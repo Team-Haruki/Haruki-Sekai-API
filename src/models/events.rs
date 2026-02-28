@@ -44,17 +44,17 @@ pub struct EventElement {
 
     pub distribution_end_at: Option<i64>,
 
-    pub virtual_live_id:Option< Option<i64>>,
+    pub virtual_live_id:Option<i64>,
 
     pub unit: Option<Unit>,
 
-    pub is_count_leader_character_play:Option< Option<bool>>,
+    pub is_count_leader_character_play:Option<bool>,
 
     pub event_ranking_reward_ranges: Option<Vec<EventRankingRewardRange>>,
 
-    pub event_point_assetbundle_name:Option< Option<EventPointAssetbundleName>>,
+    pub event_point_assetbundle_name:Option<EventPointAssetbundleName>,
 
-    pub standby_screen_display_start_at:Option< Option<i64>>,
+    pub standby_screen_display_start_at:Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -67,15 +67,15 @@ pub enum EventPointAssetbundleName {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EventRankingRewardRange {
-    pub id:Option< Option<i64>>,
+    pub id:Option<i64>,
 
-    pub event_id:Option< Option<i64>>,
+    pub event_id:Option<i64>,
 
     pub from_rank: Option<i64>,
 
     pub to_rank: Option<i64>,
 
-    pub is_to_rank_border:Option< Option<bool>>,
+    pub is_to_rank_border:Option<bool>,
 
     pub event_ranking_rewards: Option<Vec<EventRankingReward>>,
 }
@@ -83,17 +83,17 @@ pub struct EventRankingRewardRange {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EventRankingReward {
-    pub id:Option< Option<i64>>,
+    pub id:Option<i64>,
 
-    pub event_ranking_reward_range_id:Option< Option<i64>>,
+    pub event_ranking_reward_range_id:Option<i64>,
 
-    pub seq:Option< Option<i64>>,
+    pub seq:Option<i64>,
 
     pub resource_box_id: Option<i64>,
 
-    pub reward_condition_type:Option< Option<RewardConditionType>>,
+    pub reward_condition_type:Option<RewardConditionType>,
 
-    pub condition_value:Option< Option<i64>>,
+    pub condition_value:Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -43,14 +43,28 @@ async fn create_tables(db: &DatabaseConnection) -> Result<(), AppError> {
     db.execute(&stmt).await.map_err(|e| {
         AppError::DatabaseError(format!("Failed to create sekai_user_servers: {}", e))
     })?;
-    let stmt = schema
-        .create_table_from_entity(entity::UniversalMusic)
-        .if_not_exists()
-        .to_owned();
-    db.execute(&stmt).await.map_err(|e| {
-        AppError::DatabaseError(format!("Failed to create universal_musics: {}", e))
-    })?;
     Ok(())
+}
+
+pub async fn init_master_db(config: &DatabaseConfig) -> Result<DatabaseConnection, AppError> {
+    if config.dsn.is_empty() {
+        return Err(AppError::DatabaseError(
+            "Master Database DSN is empty".to_string(),
+        ));
+    }
+    let mut opts = ConnectOptions::new(&config.dsn);
+    opts.max_connections(config.max_connections)
+        .min_connections(1)
+        .connect_timeout(std::time::Duration::from_secs(30))
+        .acquire_timeout(std::time::Duration::from_secs(30))
+        .sqlx_logging(false);
+
+    let db = Database::connect(opts).await.map_err(|e| {
+        AppError::DatabaseError(format!("Failed to connect to master database: {}", e))
+    })?;
+
+    info!("Master Database initialized successfully (SeaORM)");
+    Ok(db)
 }
 
 pub async fn init_redis(config: &RedisConfig) -> Result<redis::aio::ConnectionManager, AppError> {

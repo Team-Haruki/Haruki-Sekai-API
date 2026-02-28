@@ -18,7 +18,7 @@ pub type Level = Vec<LevelElement>;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LevelElement {
-    pub id:Option< Option<i64>>,
+    pub id:Option<i64>,
 
     pub level_type: Option<LevelType>,
 

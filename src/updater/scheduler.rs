@@ -13,6 +13,7 @@ const DEFAULT_COOKIE_REFRESH_CRON: &str = "0 0 */20 * * *";
 pub async fn start_scheduler(
     clients: &std::collections::HashMap<ServerRegion, Arc<SekaiClient>>,
     config: &Config,
+    db: Option<sea_orm::DatabaseConnection>,
 ) -> Result<JobScheduler, JobSchedulerError> {
     let sched = JobScheduler::new().await?;
     let git_config = &config.git;
@@ -83,6 +84,7 @@ pub async fn start_scheduler(
                 git_cfg,
                 proxy.clone(),
                 config.asset_updater_servers.clone(),
+                db.clone(),
             ));
             match Job::new_async(cron_expr.as_str(), move |_uuid, _lock| {
                 let updater = updater.clone();

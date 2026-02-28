@@ -30,17 +30,17 @@ pub struct StampElement {
 
     pub balloon_assetbundle_name: Option<BalloonAssetbundleName>,
 
-    pub character_id1:Option< Option<i64>>,
+    pub character_id1:Option<i64>,
 
-    pub game_character_unit_id:Option< Option<i64>>,
+    pub game_character_unit_id:Option<i64>,
 
     pub archive_published_at: Option<i64>,
 
-    pub description:Option< Option<String>>,
+    pub description:Option<String>,
 
-    pub archive_display_type:Option< Option<ArchiveDisplayType>>,
+    pub archive_display_type:Option<ArchiveDisplayType>,
 
-    pub character_id2:Option< Option<i64>>,
+    pub character_id2:Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

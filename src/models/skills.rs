@@ -20,7 +20,7 @@ pub type Skill = Vec<SkillElement>;
 pub struct SkillElement {
     pub id: Option<i64>,
 
-    pub short_description:Option< Option<String>>,
+    pub short_description:Option<String>,
 
     pub description: Option<String>,
 
@@ -66,19 +66,19 @@ pub struct SkillEffect {
 
     pub skill_effect_type: Option<DescriptionSpriteName>,
 
-    pub activate_notes_judgment_type:Option< Option<ActivateNotesJudgmentType>>,
+    pub activate_notes_judgment_type:Option<ActivateNotesJudgmentType>,
 
     pub skill_effect_details: Option<Vec<SkillEffectDetail>>,
 
-    pub activate_life:Option< Option<i64>>,
+    pub activate_life:Option<i64>,
 
-    pub condition_type:Option< Option<ConditionType>>,
+    pub condition_type:Option<ConditionType>,
 
-    pub skill_enhance:Option< Option<SkillEnhance>>,
+    pub skill_enhance:Option<SkillEnhance>,
 
-    pub activate_character_rank:Option< Option<i64>>,
+    pub activate_character_rank:Option<i64>,
 
-    pub activate_unit_count:Option< Option<i64>>,
+    pub activate_unit_count:Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -113,7 +113,7 @@ pub struct SkillEffectDetail {
 
     pub activate_effect_value: Option<i64>,
 
-    pub activate_effect_value2:Option< Option<i64>>,
+    pub activate_effect_value2:Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

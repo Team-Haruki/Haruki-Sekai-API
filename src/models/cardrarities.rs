@@ -26,5 +26,5 @@ pub struct CardraritieElement {
 
     pub max_skill_level: Option<i64>,
 
-    pub training_max_level:Option< Option<i64>>,
+    pub training_max_level:Option<i64>,
 }

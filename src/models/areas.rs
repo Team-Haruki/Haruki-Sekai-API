@@ -38,15 +38,15 @@ pub struct AreaElement {
 
     pub release_condition_id: Option<i64>,
 
-    pub sub_name:Option< Option<String>>,
+    pub sub_name:Option<String>,
 
-    pub label:Option< Option<String>>,
+    pub label:Option<String>,
 
-    pub start_at:Option< Option<i64>>,
+    pub start_at:Option<i64>,
 
-    pub end_at:Option< Option<i64>>,
+    pub end_at:Option<i64>,
 
-    pub release_condition_id2:Option< Option<i64>>,
+    pub release_condition_id2:Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

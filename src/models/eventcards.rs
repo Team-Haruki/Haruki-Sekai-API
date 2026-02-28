@@ -18,7 +18,7 @@ pub type Eventcard = Vec<EventcardElement>;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EventcardElement {
-    pub id:Option< Option<i64>>,
+    pub id:Option<i64>,
 
     pub card_id: Option<i64>,
 
@@ -26,7 +26,7 @@ pub struct EventcardElement {
 
     pub bonus_rate: Option<f64>,
 
-    pub leader_bonus_rate:Option< Option<f64>>,
+    pub leader_bonus_rate:Option<f64>,
 
     pub is_display_card_story: Option<bool>,
 }

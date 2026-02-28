@@ -34,11 +34,11 @@ pub struct MusicvocalElement {
 
     pub assetbundle_name: Option<String>,
 
-    pub archive_published_at: Option<Option<i64>>,
+    pub archive_published_at: Option<i64>,
 
-    pub special_season_id: Option<Option<i64>>,
+    pub special_season_id: Option<i64>,
 
-    pub archive_display_type: Option<Option<ArchiveDisplayType>>,
+    pub archive_display_type: Option<ArchiveDisplayType>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
