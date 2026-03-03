@@ -1,5 +1,5 @@
 FROM rust:1.92-alpine AS builder
-RUN apk add --no-cache musl-dev openssl-dev openssl-libs-static cmake make
+RUN apk add --no-cache musl-dev openssl-dev openssl-libs-static cmake make perl
 WORKDIR /app
 COPY . .
 ARG VERSION=dev
