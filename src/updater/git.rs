@@ -35,7 +35,7 @@ impl GitHelper {
             )));
         }
 
-        let repo = Repository::open(path)
+        let repo = Repository::discover(path)
             .map_err(|e| AppError::NetworkError(format!("Failed to open git repository: {}", e)))?;
 
         if !self.has_changes(&repo)? {
