@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use sea_orm::sea_query::{Alias, InsertStatement};
+use sea_orm::sea_query::{Alias, Expr, ExprTrait, InsertStatement, Query};
 use sea_orm::{ConnectionTrait, DatabaseConnection, TransactionTrait};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -261,33 +261,27 @@ impl IngestionEngine {
                 rows_to_insert.push(row);
             }
         }
-
-        // Use a transaction: DELETE existing rows for this region, then INSERT fresh snapshot.
-        // Master data is always a complete snapshot per region, so a full replace is correct.
         let txn = self
             .db
             .begin()
             .await
             .context("Failed to begin transaction")?;
-
-        // Delete existing rows for this table+region before inserting
         if has_server_region {
-            let delete_sql = format!(
-                "DELETE FROM \"{}\" WHERE server_region = '{}'",
-                table_name, region
-            );
-            txn.execute_unprepared(&delete_sql)
+            let mut delete_stmt = Query::delete();
+            delete_stmt
+                .from_table(Alias::new(&table_name))
+                .and_where(Expr::col(Alias::new("server_region")).eq(region));
+            txn.execute(&delete_stmt)
                 .await
                 .context("Failed to delete existing region data")?;
         } else {
-            // No server_region column — truncate all rows (rare edge case)
-            let delete_sql = format!("DELETE FROM \"{}\"", table_name);
-            txn.execute_unprepared(&delete_sql)
+            let mut delete_stmt = Query::delete();
+            delete_stmt.from_table(Alias::new(&table_name));
+            txn.execute(&delete_stmt)
                 .await
-                .context("Failed to truncate table")?;
+                .context("Failed to clear table")?;
         }
 
-        // Batch insert in chunks of 1000
         let mut current_chunk = Vec::new();
 
         for row in rows_to_insert {
