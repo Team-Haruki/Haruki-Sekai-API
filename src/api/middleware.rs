@@ -146,12 +146,17 @@ pub async fn auth_middleware(
 }
 
 fn extract_server_from_path(path: &str) -> String {
-    let parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
-    if !parts.is_empty() {
-        parts[0].to_lowercase()
+    let mut parts = path.split('/').filter(|s| !s.is_empty());
+    let first = match parts.next() {
+        Some(part) => part,
+        None => return String::new(),
+    };
+    let server = if first.eq_ignore_ascii_case("api") {
+        parts.next().unwrap_or_default()
     } else {
-        String::new()
-    }
+        first
+    };
+    server.to_ascii_lowercase()
 }
 
 fn error_response(status: StatusCode, message: &str) -> Response {
@@ -164,4 +169,25 @@ fn error_response(status: StatusCode, message: &str) -> Response {
         r#"{"result":"failed","status":500,"message":"Internal error"}"#.to_string()
     });
     (status, [("content-type", "application/json")], json).into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::extract_server_from_path;
+
+    #[test]
+    fn extract_server_uses_segment_after_api_prefix() {
+        assert_eq!(extract_server_from_path("/api/jp/system"), "jp");
+    }
+
+    #[test]
+    fn extract_server_falls_back_to_first_segment_without_api_prefix() {
+        assert_eq!(extract_server_from_path("/jp/system"), "jp");
+    }
+
+    #[test]
+    fn extract_server_handles_empty_or_incomplete_paths() {
+        assert_eq!(extract_server_from_path("/"), "");
+        assert_eq!(extract_server_from_path("/api"), "");
+    }
 }

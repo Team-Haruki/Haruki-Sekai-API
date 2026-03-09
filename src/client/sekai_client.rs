@@ -606,7 +606,10 @@ impl SekaiClient {
                 SekaiHttpStatus::Ok
                 | SekaiHttpStatus::ClientError
                 | SekaiHttpStatus::NotFound
-                | SekaiHttpStatus::Conflict => self.cryptor.unpack_ordered(&body).map(|data| (data, status)),
+                | SekaiHttpStatus::Conflict => self
+                    .cryptor
+                    .unpack_ordered(&body)
+                    .map(|data| (data, status)),
                 SekaiHttpStatus::SessionError => Err(AppError::SessionError),
                 SekaiHttpStatus::GameUpgrade => Err(AppError::UpgradeRequired),
                 SekaiHttpStatus::UnderMaintenance => Err(AppError::UnderMaintenance),

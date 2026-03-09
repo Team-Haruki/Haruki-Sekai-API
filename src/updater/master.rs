@@ -12,6 +12,9 @@ use crate::client::helper::{compare_version, VersionInfo};
 use crate::client::SekaiClient;
 use crate::config::{AssetUpdaterInfo, GitConfig, ServerRegion};
 
+const ASSET_UPDATER_CONFLICT_RETRY_DELAY_SECS: u64 = 60;
+const ASSET_UPDATER_MAX_CONFLICT_RETRIES: u8 = 10;
+
 #[derive(Debug, Serialize, Deserialize)]
 struct AssetUpdaterPayload {
     server: String,
@@ -258,6 +261,7 @@ impl MasterUpdater {
 
     async fn call_asset_updater(&self, info: &AssetUpdaterInfo, payload: &AssetUpdaterPayload) {
         let endpoint = &info.url;
+        let mut conflict_retries = 0u8;
         loop {
             let mut req = self
                 .http_client
@@ -274,8 +278,37 @@ impl MasterUpdater {
             match result {
                 Ok(resp) => {
                     if resp.status().as_u16() == 409 {
-                        tokio::time::sleep(Duration::from_secs(60)).await;
+                        if conflict_retries >= ASSET_UPDATER_MAX_CONFLICT_RETRIES {
+                            warn!(
+                                "{} Asset updater call to {} kept returning 409; giving up after {} retries",
+                                self.region.as_str().to_uppercase(),
+                                endpoint,
+                                ASSET_UPDATER_MAX_CONFLICT_RETRIES
+                            );
+                            return;
+                        }
+                        conflict_retries += 1;
+                        warn!(
+                            "{} Asset updater call to {} returned 409; retry {}/{} in {}s",
+                            self.region.as_str().to_uppercase(),
+                            endpoint,
+                            conflict_retries,
+                            ASSET_UPDATER_MAX_CONFLICT_RETRIES,
+                            ASSET_UPDATER_CONFLICT_RETRY_DELAY_SECS
+                        );
+                        tokio::time::sleep(Duration::from_secs(
+                            ASSET_UPDATER_CONFLICT_RETRY_DELAY_SECS,
+                        ))
+                        .await;
                         continue;
+                    }
+                    if !resp.status().is_success() {
+                        warn!(
+                            "{} Asset updater call to {} returned status {}",
+                            self.region.as_str().to_uppercase(),
+                            endpoint,
+                            resp.status()
+                        );
                     }
                     return;
                 }
