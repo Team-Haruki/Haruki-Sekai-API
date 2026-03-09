@@ -11,7 +11,7 @@
 //     let model: Musicdifficultie = serde_json::from_str(&json).unwrap();
 // }
 
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 pub type Musicdifficultie = Vec<MusicdifficultieElement>;
 
@@ -28,7 +28,7 @@ pub struct MusicdifficultieElement {
 
     pub total_note_count: Option<i64>,
 
-    pub release_condition_id:Option<i64>,
+    pub release_condition_id: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

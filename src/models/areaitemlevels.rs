@@ -11,7 +11,7 @@
 //     let model: Areaitemlevel = serde_json::from_str(&json).unwrap();
 // }
 
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 pub type Areaitemlevel = Vec<AreaitemlevelElement>;
 
@@ -26,7 +26,7 @@ pub struct AreaitemlevelElement {
 
     pub target_card_attr: Option<TargetCardAttr>,
 
-    pub target_game_character_id:Option<i64>,
+    pub target_game_character_id: Option<i64>,
 
     pub power1_bonus_rate: Option<f64>,
 

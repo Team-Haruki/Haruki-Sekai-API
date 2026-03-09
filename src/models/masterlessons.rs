@@ -11,7 +11,7 @@
 //     let model: Masterlesson = serde_json::from_str(&json).unwrap();
 // }
 
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 pub type Masterlesson = Vec<MasterlessonElement>;
 
@@ -28,11 +28,11 @@ pub struct MasterlessonElement {
 
     pub power3_bonus_fixed: Option<i64>,
 
-    pub character_rank_exp:Option<i64>,
+    pub character_rank_exp: Option<i64>,
 
     pub costs: Option<Vec<Cost>>,
 
-    pub rewards:Option<Vec<Option<serde_json::Value>>>,
+    pub rewards: Option<Vec<Option<serde_json::Value>>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -63,17 +63,17 @@ pub struct Cost {
 
     pub master_rank: Option<i64>,
 
-    pub seq:Option<i64>,
+    pub seq: Option<i64>,
 
-    pub resource_type:Option<ResourceType>,
+    pub resource_type: Option<ResourceType>,
 
     pub resource_id: Option<i64>,
 
     pub quantity: Option<i64>,
 
-    pub character_id:Option<i64>,
+    pub character_id: Option<i64>,
 
-    pub unit:Option<Unit>,
+    pub unit: Option<Unit>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

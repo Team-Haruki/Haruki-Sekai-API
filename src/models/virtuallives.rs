@@ -11,7 +11,7 @@
 //     let model: Virtuallive = serde_json::from_str(&json).unwrap();
 // }
 
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 pub type Virtuallive = Vec<VirtualliveElement>;
 
@@ -30,7 +30,7 @@ pub struct VirtualliveElement {
 
     pub assetbundle_name: Option<String>,
 
-    pub screen_mv_music_vocal_id:Option<i64>,
+    pub screen_mv_music_vocal_id: Option<i64>,
 
     pub start_at: Option<i64>,
 
@@ -48,7 +48,7 @@ pub struct VirtualliveElement {
 
     pub virtual_live_rewards: Option<Vec<VirtualLiveReward>>,
 
-    pub virtual_live_cheer_point_rewards:Option<Vec<Option<serde_json::Value>>>,
+    pub virtual_live_cheer_point_rewards: Option<Vec<Option<serde_json::Value>>>,
 
     pub virtual_live_waiting_room: Option<VirtualLiveWaitingRoom>,
 
@@ -60,11 +60,11 @@ pub struct VirtualliveElement {
 
     pub virtual_live_information: Option<VirtualLiveInformation>,
 
-    pub archive_release_condition_id:Option<i64>,
+    pub archive_release_condition_id: Option<i64>,
 
-    pub sub_game_character_penlight_color_group_id:Option<i64>,
+    pub sub_game_character_penlight_color_group_id: Option<i64>,
 
-    pub virtual_live_group_id:Option<i64>,
+    pub virtual_live_group_id: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -90,13 +90,13 @@ pub struct VirtualItem {
 
     pub effect_expression_type: Option<EffectExpressionType>,
 
-    pub unit:Option<Unit>,
+    pub unit: Option<Unit>,
 
-    pub game_character_unit_id:Option<i64>,
+    pub game_character_unit_id: Option<i64>,
 
-    pub virtual_item_label_type:Option<VirtualItemLabelType>,
+    pub virtual_item_label_type: Option<VirtualItemLabelType>,
 
-    pub sub_game_character_id:Option<i64>,
+    pub sub_game_character_id: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -204,18 +204,18 @@ pub enum DayOfWeek {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VirtualLiveCharacter {
-    pub id:Option<i64>,
+    pub id: Option<i64>,
 
-    pub virtual_live_id:Option<i64>,
+    pub virtual_live_id: Option<i64>,
 
-    pub game_character_unit_id:Option<i64>,
+    pub game_character_unit_id: Option<i64>,
 
-    pub seq:Option<i64>,
+    pub seq: Option<i64>,
 
     pub virtual_live_performance_type: Option<VirtualLivePerformanceType>,
 
     #[serde(rename = "subGameCharacter2dId")]
-    pub sub_game_character2_d_id:Option<i64>,
+    pub sub_game_character2_d_id: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -230,11 +230,11 @@ pub enum VirtualLivePerformanceType {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VirtualLiveInformation {
-    pub virtual_live_id:Option<i64>,
+    pub virtual_live_id: Option<i64>,
 
-    pub summary:Option<Summary>,
+    pub summary: Option<Summary>,
 
-    pub description:Option<String>,
+    pub description: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -254,11 +254,11 @@ pub enum VirtualLivePlatform {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VirtualLiveReward {
-    pub id:Option<i64>,
+    pub id: Option<i64>,
 
     pub virtual_live_type: Option<VirtualLiveType>,
 
-    pub virtual_live_id:Option<i64>,
+    pub virtual_live_id: Option<i64>,
 
     pub resource_box_id: Option<i64>,
 }
@@ -298,7 +298,7 @@ pub struct VirtualLiveSchedule {
 
     pub is_after_event: Option<bool>,
 
-    pub notice_group_id:Option<NoticeGroupId>,
+    pub notice_group_id: Option<NoticeGroupId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -321,31 +321,31 @@ pub struct VirtualLiveSetlist {
 
     pub virtual_live_setlist_type: Option<VirtualLiveSetlistType>,
 
-    pub assetbundle_name:Option<String>,
+    pub assetbundle_name: Option<String>,
 
-    pub virtual_live_stage_id:Option<i64>,
+    pub virtual_live_stage_id: Option<i64>,
 
-    pub music_id:Option<i64>,
+    pub music_id: Option<i64>,
 
-    pub music_vocal_id:Option<i64>,
+    pub music_vocal_id: Option<i64>,
 
     #[serde(rename = "character3dId1")]
-    pub character3_d_id1:Option<i64>,
+    pub character3_d_id1: Option<i64>,
 
     #[serde(rename = "character3dId2")]
-    pub character3_d_id2:Option<i64>,
+    pub character3_d_id2: Option<i64>,
 
     #[serde(rename = "character3dId3")]
-    pub character3_d_id3:Option<i64>,
+    pub character3_d_id3: Option<i64>,
 
     #[serde(rename = "character3dId4")]
-    pub character3_d_id4:Option<i64>,
+    pub character3_d_id4: Option<i64>,
 
     #[serde(rename = "character3dId5")]
-    pub character3_d_id5:Option<i64>,
+    pub character3_d_id5: Option<i64>,
 
     #[serde(rename = "character3dId6")]
-    pub character3_d_id6:Option<i64>,
+    pub character3_d_id6: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -367,15 +367,15 @@ pub enum VirtualLiveSetlistType {
 pub struct VirtualLiveWaitingRoom {
     pub id: Option<i64>,
 
-    pub virtual_live_id:Option<i64>,
+    pub virtual_live_id: Option<i64>,
 
-    pub assetbundle_name:Option<AssetbundleName>,
+    pub assetbundle_name: Option<AssetbundleName>,
 
     pub start_at: Option<i64>,
 
     pub end_at: Option<i64>,
 
-    pub lobby_assetbundle_name:Option<LobbyAssetbundleName>,
+    pub lobby_assetbundle_name: Option<LobbyAssetbundleName>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

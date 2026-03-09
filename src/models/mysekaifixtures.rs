@@ -11,7 +11,7 @@
 //     let model: Mysekaifixture = serde_json::from_str(&json).unwrap();
 // }
 
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 pub type Mysekaifixture = Vec<MysekaifixtureElement>;
 
@@ -34,7 +34,7 @@ pub struct MysekaifixtureElement {
 
     pub mysekai_fixture_main_genre_id: Option<i64>,
 
-    pub mysekai_fixture_sub_genre_id:Option<i64>,
+    pub mysekai_fixture_sub_genre_id: Option<i64>,
 
     pub mysekai_fixture_handle_type: Option<MysekaiFixtureHandleType>,
 
@@ -48,7 +48,7 @@ pub struct MysekaifixtureElement {
 
     pub mysekai_fixture_put_sound_id: Option<i64>,
 
-    pub mysekai_fixture_footstep_id:Option<i64>,
+    pub mysekai_fixture_footstep_id: Option<i64>,
 
     pub mysekai_fixture_tag_group: Option<MysekaiFixtureTagGroup>,
 
@@ -62,13 +62,13 @@ pub struct MysekaifixtureElement {
 
     pub assetbundle_name: Option<String>,
 
-    pub first_put_cost:Option<i64>,
+    pub first_put_cost: Option<i64>,
 
-    pub second_put_cost:Option<i64>,
+    pub second_put_cost: Option<i64>,
 
-    pub color_code:Option<String>,
+    pub color_code: Option<String>,
 
-    pub mysekai_fixture_game_character_group_performance_bonus_id:Option<i64>,
+    pub mysekai_fixture_game_character_group_performance_bonus_id: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -148,11 +148,11 @@ pub struct MysekaiFixtureTagGroup {
 
     pub mysekai_fixture_tag_id1: Option<i64>,
 
-    pub mysekai_fixture_tag_id2:Option<i64>,
+    pub mysekai_fixture_tag_id2: Option<i64>,
 
-    pub mysekai_fixture_tag_id3:Option<i64>,
+    pub mysekai_fixture_tag_id3: Option<i64>,
 
-    pub mysekai_fixture_tag_id4:Option<i64>,
+    pub mysekai_fixture_tag_id4: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

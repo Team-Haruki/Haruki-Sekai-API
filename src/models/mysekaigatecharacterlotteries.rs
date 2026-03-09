@@ -11,7 +11,7 @@
 //     let model: Mysekaigatecharacterlotterie = serde_json::from_str(&json).unwrap();
 // }
 
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 pub type Mysekaigatecharacterlotterie = Vec<MysekaigatecharacterlotterieElement>;
 

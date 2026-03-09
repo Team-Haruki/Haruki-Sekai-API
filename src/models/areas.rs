@@ -11,7 +11,7 @@
 //     let model: Area = serde_json::from_str(&json).unwrap();
 // }
 
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 pub type Area = Vec<AreaElement>;
 
@@ -38,15 +38,15 @@ pub struct AreaElement {
 
     pub release_condition_id: Option<i64>,
 
-    pub sub_name:Option<String>,
+    pub sub_name: Option<String>,
 
-    pub label:Option<String>,
+    pub label: Option<String>,
 
-    pub start_at:Option<i64>,
+    pub start_at: Option<i64>,
 
-    pub end_at:Option<i64>,
+    pub end_at: Option<i64>,
 
-    pub release_condition_id2:Option<i64>,
+    pub release_condition_id2: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

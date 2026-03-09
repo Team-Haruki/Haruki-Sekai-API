@@ -11,7 +11,7 @@
 //     let model: Worldbloomsupportdeckbonuse = serde_json::from_str(&json).unwrap();
 // }
 
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 pub type Worldbloomsupportdeckbonuse = Vec<WorldbloomsupportdeckbonuseElement>;
 
@@ -20,11 +20,14 @@ pub type Worldbloomsupportdeckbonuse = Vec<WorldbloomsupportdeckbonuseElement>;
 pub struct WorldbloomsupportdeckbonuseElement {
     pub card_rarity_type: Option<String>,
 
-    pub world_bloom_support_deck_character_bonuses: Option<Vec<WorldBloomSupportDeckCharacterBonus>>,
+    pub world_bloom_support_deck_character_bonuses:
+        Option<Vec<WorldBloomSupportDeckCharacterBonus>>,
 
-    pub world_bloom_support_deck_master_rank_bonuses: Option<Vec<WorldBloomSupportDeckMasterRankBonus>>,
+    pub world_bloom_support_deck_master_rank_bonuses:
+        Option<Vec<WorldBloomSupportDeckMasterRankBonus>>,
 
-    pub world_bloom_support_deck_skill_level_bonuses: Option<Vec<WorldBloomSupportDeckSkillLevelBonus>>,
+    pub world_bloom_support_deck_skill_level_bonuses:
+        Option<Vec<WorldBloomSupportDeckSkillLevelBonus>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

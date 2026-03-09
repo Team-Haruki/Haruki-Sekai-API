@@ -11,7 +11,7 @@
 //     let model: Music = serde_json::from_str(&json).unwrap();
 // }
 
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 pub type Music = Vec<MusicElement>;
 
@@ -44,13 +44,13 @@ pub struct MusicElement {
 
     pub assetbundle_name: Option<String>,
 
-    pub live_talk_background_assetbundle_name:Option<LiveTalkBackgroundAssetbundleName>,
+    pub live_talk_background_assetbundle_name: Option<LiveTalkBackgroundAssetbundleName>,
 
     pub published_at: Option<i64>,
 
     pub released_at: Option<i64>,
 
-    pub live_stage_id:Option<i64>,
+    pub live_stage_id: Option<i64>,
 
     pub filler_sec: Option<f64>,
 
@@ -58,9 +58,9 @@ pub struct MusicElement {
 
     pub is_full_length: Option<bool>,
 
-    pub music_collaboration_id:Option<i64>,
+    pub music_collaboration_id: Option<i64>,
 
-    pub infos:Option<Vec<Info>>,
+    pub infos: Option<Vec<Info>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

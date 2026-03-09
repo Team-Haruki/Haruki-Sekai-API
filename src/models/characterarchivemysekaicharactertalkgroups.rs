@@ -11,9 +11,10 @@
 //     let model: Characterarchivemysekaicharactertalkgroup = serde_json::from_str(&json).unwrap();
 // }
 
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
-pub type Characterarchivemysekaicharactertalkgroup = Vec<CharacterarchivemysekaicharactertalkgroupElement>;
+pub type Characterarchivemysekaicharactertalkgroup =
+    Vec<CharacterarchivemysekaicharactertalkgroupElement>;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

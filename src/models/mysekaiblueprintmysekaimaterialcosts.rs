@@ -11,7 +11,7 @@
 //     let model: Mysekaiblueprintmysekaimaterialcost = serde_json::from_str(&json).unwrap();
 // }
 
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 pub type Mysekaiblueprintmysekaimaterialcost = Vec<MysekaiblueprintmysekaimaterialcostElement>;
 
@@ -28,7 +28,7 @@ pub struct MysekaiblueprintmysekaimaterialcostElement {
 
     pub quantity: Option<i64>,
 
-    pub mysekai_blueprint_type:Option<MysekaiBlueprintType>,
+    pub mysekai_blueprint_type: Option<MysekaiBlueprintType>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

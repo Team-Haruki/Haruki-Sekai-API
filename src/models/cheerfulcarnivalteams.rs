@@ -11,7 +11,7 @@
 //     let model: Cheerfulcarnivalteam = serde_json::from_str(&json).unwrap();
 // }
 
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 pub type Cheerfulcarnivalteam = Vec<CheerfulcarnivalteamElement>;
 

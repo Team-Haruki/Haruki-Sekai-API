@@ -11,7 +11,7 @@
 //     let model: Mysekaigamecharacterunitgroup = serde_json::from_str(&json).unwrap();
 // }
 
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 pub type Mysekaigamecharacterunitgroup = Vec<MysekaigamecharacterunitgroupElement>;
 
@@ -22,11 +22,11 @@ pub struct MysekaigamecharacterunitgroupElement {
 
     pub game_character_unit_id1: Option<i64>,
 
-    pub game_character_unit_id2:Option<i64>,
+    pub game_character_unit_id2: Option<i64>,
 
-    pub game_character_unit_id3:Option<i64>,
+    pub game_character_unit_id3: Option<i64>,
 
-    pub game_character_unit_id4:Option<i64>,
+    pub game_character_unit_id4: Option<i64>,
 
-    pub game_character_unit_id5:Option<i64>,
+    pub game_character_unit_id5: Option<i64>,
 }

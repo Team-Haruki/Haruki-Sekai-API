@@ -11,7 +11,7 @@
 //     let model: Mysekaimusicrecord = serde_json::from_str(&json).unwrap();
 // }
 
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 pub type Mysekaimusicrecord = Vec<MysekaimusicrecordElement>;
 

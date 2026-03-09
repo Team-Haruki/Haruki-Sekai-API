@@ -11,7 +11,7 @@
 //     let model: Resourceboxe = serde_json::from_str(&json).unwrap();
 // }
 
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 pub type Resourceboxe = Vec<ResourceboxeElement>;
 
@@ -24,13 +24,13 @@ pub struct ResourceboxeElement {
 
     pub resource_box_type: Option<ResourceBoxType>,
 
-    pub description:Option<String>,
+    pub description: Option<String>,
 
-    pub details:Option<Vec<Detail>>,
+    pub details: Option<Vec<Detail>>,
 
-    pub name:Option<String>,
+    pub name: Option<String>,
 
-    pub assetbundle_name:Option<String>,
+    pub assetbundle_name: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -44,11 +44,11 @@ pub struct Detail {
 
     pub resource_type: Option<ResourceType>,
 
-    pub resource_id:Option<i64>,
+    pub resource_id: Option<i64>,
 
     pub resource_quantity: Option<i64>,
 
-    pub resource_level:Option<i64>,
+    pub resource_level: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

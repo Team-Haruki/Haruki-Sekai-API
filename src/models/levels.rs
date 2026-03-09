@@ -11,14 +11,14 @@
 //     let model: Level = serde_json::from_str(&json).unwrap();
 // }
 
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 pub type Level = Vec<LevelElement>;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LevelElement {
-    pub id:Option<i64>,
+    pub id: Option<i64>,
 
     pub level_type: Option<LevelType>,
 

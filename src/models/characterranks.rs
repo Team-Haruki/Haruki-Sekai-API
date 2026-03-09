@@ -11,7 +11,7 @@
 //     let model: Characterrank = serde_json::from_str(&json).unwrap();
 // }
 
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 pub type Characterrank = Vec<CharacterrankElement>;
 
@@ -38,11 +38,11 @@ pub struct CharacterrankElement {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CharacterRankAchieveResource {
-    pub release_condition_id:Option<i64>,
+    pub release_condition_id: Option<i64>,
 
-    pub character_id:Option<i64>,
+    pub character_id: Option<i64>,
 
-    pub character_rank:Option<i64>,
+    pub character_rank: Option<i64>,
 
     pub resources: Option<Vec<Option<serde_json::Value>>>,
 }
