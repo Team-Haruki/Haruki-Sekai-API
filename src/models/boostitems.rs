@@ -11,7 +11,7 @@
 //     let model: Boostitem = serde_json::from_str(&json).unwrap();
 // }
 
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 pub type Boostitem = Vec<BoostitemElement>;
 
@@ -20,13 +20,13 @@ pub type Boostitem = Vec<BoostitemElement>;
 pub struct BoostitemElement {
     pub id: Option<i64>,
 
-    pub seq:Option<i64>,
+    pub seq: Option<i64>,
 
     pub name: Option<String>,
 
     pub recovery_value: Option<i64>,
 
-    pub asset_bundle_name:Option<String>,
+    pub asset_bundle_name: Option<String>,
 
     pub flavor_text: Option<FlavorText>,
 }
@@ -36,7 +36,9 @@ pub enum FlavorText {
     #[serde(rename = "恢复1演出能量。")]
     FlavorText1,
 
-    #[serde(rename = "ライブボーナスを10回復する。\n※テストイベント終了後、メンテナンスにて回収します。")]
+    #[serde(
+        rename = "ライブボーナスを10回復する。\n※テストイベント終了後、メンテナンスにて回収します。"
+    )]
     FlavorText10,
 
     #[serde(rename = "恢复99演出能量。")]

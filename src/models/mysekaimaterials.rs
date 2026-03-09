@@ -11,7 +11,7 @@
 //     let model: Mysekaimaterial = serde_json::from_str(&json).unwrap();
 // }
 
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 pub type Mysekaimaterial = Vec<MysekaimaterialElement>;
 
@@ -34,11 +34,11 @@ pub struct MysekaimaterialElement {
 
     pub icon_assetbundle_name: Option<String>,
 
-    pub model_assetbundle_name:Option<String>,
+    pub model_assetbundle_name: Option<String>,
 
     pub mysekai_site_ids: Option<Vec<i64>>,
 
-    pub mysekai_phenomena_group_id:Option<i64>,
+    pub mysekai_phenomena_group_id: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

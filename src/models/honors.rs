@@ -11,7 +11,7 @@
 //     let model: Honor = serde_json::from_str(&json).unwrap();
 // }
 
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 pub type Honor = Vec<HonorElement>;
 
@@ -24,19 +24,19 @@ pub struct HonorElement {
 
     pub group_id: Option<i64>,
 
-    pub honor_rarity:Option<HonorRarity>,
+    pub honor_rarity: Option<HonorRarity>,
 
     pub name: Option<String>,
 
-    pub assetbundle_name:Option<String>,
+    pub assetbundle_name: Option<String>,
 
     pub levels: Option<Vec<Level>>,
 
-    pub honor_type_id:Option<i64>,
+    pub honor_type_id: Option<i64>,
 
-    pub honor_mission_type:Option<String>,
+    pub honor_mission_type: Option<String>,
 
-    pub start_at:Option<i64>,
+    pub start_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -54,7 +54,7 @@ pub enum HonorRarity {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Level {
-    pub honor_id:Option<i64>,
+    pub honor_id: Option<i64>,
 
     pub level: Option<i64>,
 
@@ -62,9 +62,9 @@ pub struct Level {
 
     pub description: Option<String>,
 
-    pub assetbundle_name:Option<String>,
+    pub assetbundle_name: Option<String>,
 
-    pub honor_rarity:Option<HonorRarity>,
+    pub honor_rarity: Option<HonorRarity>,
 
-    pub start_at:Option<i64>,
+    pub start_at: Option<i64>,
 }

@@ -11,7 +11,7 @@
 //     let model: Character2D = serde_json::from_str(&json).unwrap();
 // }
 
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 pub type Character2D = Vec<Character2DElement>;
 
@@ -30,9 +30,9 @@ pub struct Character2DElement {
 
     pub is_enabled_flip_display: Option<bool>,
 
-    pub asset_name:Option<String>,
+    pub asset_name: Option<String>,
 
-    pub character_icon_assetbundle_name:Option<CharacterIconAssetbundleName>,
+    pub character_icon_assetbundle_name: Option<CharacterIconAssetbundleName>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

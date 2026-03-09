@@ -11,7 +11,7 @@
 //     let model: Mysekaifixturemaingenre = serde_json::from_str(&json).unwrap();
 // }
 
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 pub type Mysekaifixturemaingenre = Vec<MysekaifixturemaingenreElement>;
 
@@ -26,7 +26,7 @@ pub struct MysekaifixturemaingenreElement {
 
     pub assetbundle_name: Option<String>,
 
-    pub group_id:Option<i64>,
+    pub group_id: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

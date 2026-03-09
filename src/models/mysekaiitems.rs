@@ -11,7 +11,7 @@
 //     let model: Mysekaiitem = serde_json::from_str(&json).unwrap();
 // }
 
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 pub type Mysekaiitem = Vec<MysekaiitemElement>;
 

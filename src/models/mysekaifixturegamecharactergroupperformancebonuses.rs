@@ -11,9 +11,10 @@
 //     let model: Mysekaifixturegamecharactergroupperformancebonuse = serde_json::from_str(&json).unwrap();
 // }
 
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
-pub type Mysekaifixturegamecharactergroupperformancebonuse = Vec<MysekaifixturegamecharactergroupperformancebonuseElement>;
+pub type Mysekaifixturegamecharactergroupperformancebonuse =
+    Vec<MysekaifixturegamecharactergroupperformancebonuseElement>;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

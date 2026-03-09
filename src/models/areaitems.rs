@@ -11,7 +11,7 @@
 //     let model: Areaitem = serde_json::from_str(&json).unwrap();
 // }
 
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 pub type Areaitem = Vec<AreaitemElement>;
 
@@ -24,7 +24,7 @@ pub struct AreaitemElement {
 
     pub name: Option<String>,
 
-    pub flavor_text:Option<String>,
+    pub flavor_text: Option<String>,
 
     pub spawn_point: Option<SpawnPoint>,
 

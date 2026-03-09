@@ -11,7 +11,7 @@
 //     let model: Eventstorie = serde_json::from_str(&json).unwrap();
 // }
 
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 pub type Eventstorie = Vec<EventstorieElement>;
 
@@ -24,7 +24,7 @@ pub struct EventstorieElement {
 
     pub outline: Option<String>,
 
-    pub banner_game_character_unit_id:Option<i64>,
+    pub banner_game_character_unit_id: Option<i64>,
 
     pub assetbundle_name: Option<String>,
 
@@ -50,13 +50,13 @@ pub struct EventStoryEpisode {
 
     pub episode_rewards: Option<Vec<EpisodeReward>>,
 
-    pub game_character_id:Option<i64>,
+    pub game_character_id: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EpisodeReward {
-    pub story_type:Option<StoryType>,
+    pub story_type: Option<StoryType>,
 
     pub resource_box_id: Option<i64>,
 }

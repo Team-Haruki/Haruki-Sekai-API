@@ -11,7 +11,7 @@
 //     let model: Cardsupplie = serde_json::from_str(&json).unwrap();
 // }
 
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 pub type Cardsupplie = Vec<CardsupplieElement>;
 
@@ -22,5 +22,5 @@ pub struct CardsupplieElement {
 
     pub card_supply_type: Option<String>,
 
-    pub assetbundle_name:Option<String>,
+    pub assetbundle_name: Option<String>,
 }

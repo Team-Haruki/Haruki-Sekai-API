@@ -11,7 +11,7 @@
 //     let model: Outsidecharacter = serde_json::from_str(&json).unwrap();
 // }
 
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 pub type Outsidecharacter = Vec<OutsidecharacterElement>;
 
@@ -19,7 +19,7 @@ pub type Outsidecharacter = Vec<OutsidecharacterElement>;
 pub struct OutsidecharacterElement {
     pub id: Option<i64>,
 
-    pub seq:Option<i64>,
+    pub seq: Option<i64>,
 
     pub name: Option<String>,
 }

@@ -11,7 +11,7 @@
 //     let model: Gamecharacter = serde_json::from_str(&json).unwrap();
 // }
 
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 pub type Gamecharacter = Vec<GamecharacterElement>;
 
@@ -20,19 +20,19 @@ pub type Gamecharacter = Vec<GamecharacterElement>;
 pub struct GamecharacterElement {
     pub id: Option<i64>,
 
-    pub seq:Option<i64>,
+    pub seq: Option<i64>,
 
     pub resource_id: Option<i64>,
 
-    pub first_name:Option<String>,
+    pub first_name: Option<String>,
 
     pub given_name: Option<String>,
 
-    pub first_name_ruby:Option<String>,
+    pub first_name_ruby: Option<String>,
 
-    pub given_name_ruby:Option<String>,
+    pub given_name_ruby: Option<String>,
 
-    pub first_name_english:Option<String>,
+    pub first_name_english: Option<String>,
 
     pub given_name_english: Option<String>,
 
@@ -47,7 +47,7 @@ pub struct GamecharacterElement {
 
     pub breast_size: Option<BreastSize>,
 
-    pub model_name:Option<String>,
+    pub model_name: Option<String>,
 
     pub unit: Option<Unit>,
 

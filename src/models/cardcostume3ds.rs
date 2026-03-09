@@ -11,7 +11,7 @@
 //     let model: Cardcostume3D = serde_json::from_str(&json).unwrap();
 // }
 
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 pub type Cardcostume3D = Vec<Cardcostume3DElement>;
 
@@ -23,5 +23,5 @@ pub struct Cardcostume3DElement {
     #[serde(rename = "costume3dId")]
     pub costume3_d_id: Option<i64>,
 
-    pub is_initial_obtain_hair:Option<bool>,
+    pub is_initial_obtain_hair: Option<bool>,
 }

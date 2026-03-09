@@ -11,7 +11,7 @@
 //     let model: Mysekaiblueprint = serde_json::from_str(&json).unwrap();
 // }
 
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 pub type Mysekaiblueprint = Vec<MysekaiblueprintElement>;
 
@@ -28,9 +28,9 @@ pub struct MysekaiblueprintElement {
 
     pub is_obtained_by_convert: Option<bool>,
 
-    pub craft_count_limit:Option<i64>,
+    pub craft_count_limit: Option<i64>,
 
-    pub is_available_without_possession:Option<bool>,
+    pub is_available_without_possession: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

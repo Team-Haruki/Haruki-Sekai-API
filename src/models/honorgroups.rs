@@ -11,7 +11,7 @@
 //     let model: Honorgroup = serde_json::from_str(&json).unwrap();
 // }
 
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 pub type Honorgroup = Vec<HonorgroupElement>;
 
@@ -26,9 +26,9 @@ pub struct HonorgroupElement {
 
     pub honor_type: Option<HonorType>,
 
-    pub background_assetbundle_name:Option<String>,
+    pub background_assetbundle_name: Option<String>,
 
-    pub frame_name:Option<String>,
+    pub frame_name: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -11,9 +11,10 @@
 //     let model: Mysekaicharactertalkfixturecommonmysekaifixturegroup = serde_json::from_str(&json).unwrap();
 // }
 
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
-pub type Mysekaicharactertalkfixturecommonmysekaifixturegroup = Vec<MysekaicharactertalkfixturecommonmysekaifixturegroupElement>;
+pub type Mysekaicharactertalkfixturecommonmysekaifixturegroup =
+    Vec<MysekaicharactertalkfixturecommonmysekaifixturegroupElement>;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
