@@ -17,11 +17,10 @@ const ASSET_UPDATER_MAX_CONFLICT_RETRIES: u8 = 10;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct AssetUpdaterPayload {
-    server: String,
-    #[serde(rename = "assetVersion")]
+    region: String,
     asset_version: String,
-    #[serde(rename = "assetHash")]
     asset_hash: String,
+    dry_run: bool,
 }
 
 pub struct MasterUpdater {
@@ -243,9 +242,10 @@ impl MasterUpdater {
             self.asset_updater_servers.len()
         );
         let payload = AssetUpdaterPayload {
-            server: self.region.as_str().to_string(),
+            region: self.region.as_str().to_string(),
             asset_version: asset_version.to_string(),
             asset_hash: asset_hash.to_string(),
+            dry_run: false,
         };
         let futures: Vec<_> = self
             .asset_updater_servers
