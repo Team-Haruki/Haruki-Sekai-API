@@ -7,7 +7,7 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt().init();
     println!("Connecting to PostgreSQL...");
     let mut opt =
-        ConnectOptions::new("postgres://haruki:sekai@localhost:5432/master_data".to_owned());
+        ConnectOptions::new("postgres://haruki_sekai:sekai_pw_2026@localhost:5432/haruki_sekai?sslmode=disable".to_owned());
     opt.max_connections(5)
         .min_connections(1)
         .connect_timeout(Duration::from_secs(5))
