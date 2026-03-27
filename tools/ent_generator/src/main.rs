@@ -2,6 +2,33 @@ use regex::Regex;
 use std::fs;
 use std::path::Path;
 
+/// Returns overridden unique keys for tables where the default (game_id + server_region)
+/// is incorrect. Determined by analyzing actual JSON data across all 5 regions.
+/// All keys use DB column names (e.g. "game_id" not "id").
+/// Returns None to use default logic, Some(vec) to override.
+fn unique_key_override(table_name: &str) -> Option<serde_json::Value> {
+    let keys: Option<Vec<Vec<&str>>> = match table_name {
+        // Tables without id field — natural composite keys
+        "areaitemlevel" => Some(vec![vec!["area_item_id", "level", "server_region"]]),
+        "cardcostume3d" => Some(vec![vec!["costume3_d_id", "server_region"]]),
+        "cardraritie" => Some(vec![vec!["card_rarity_type", "server_region"]]),
+        "eventmusic" => Some(vec![vec!["event_id", "music_id", "server_region"]]),
+        "masterlesson" => Some(vec![vec!["card_rarity_type", "master_rank", "server_region"]]),
+        "worldbloomdifferentattributebonuse" => Some(vec![vec!["attribute_count", "server_region"]]),
+        "worldbloomsupportdeckbonuse" => Some(vec![vec!["card_rarity_type", "server_region"]]),
+        // Tables where id exists in model but is missing/non-unique in JSON data
+        "eventcard" => Some(vec![vec!["card_id", "event_id", "server_region"]]),
+        "level" => Some(vec![vec!["level_type", "level", "server_region"]]),
+        "musictag" => Some(vec![vec!["music_id", "music_tag", "server_region"]]),
+        "charactermissionv2parametergroup" => Some(vec![vec!["game_id", "seq", "server_region"]]),
+        "resourceboxe" => Some(vec![vec!["resource_box_purpose", "game_id", "server_region"]]),
+        // ngwords: data has genuine duplicates, no unique key possible
+        "ngword" => Some(vec![]),
+        _ => None,
+    };
+    keys.map(|k| serde_json::json!(k))
+}
+
 /// Reads a Rust model file and extracts the root struct name from `pub type XXX = Vec<YYY>;`.
 /// Returns (table_name_lowercase, root_struct_name) or None if no root type alias is found.
 fn extract_root_type(file_content: &str) -> Option<(String, String)> {
@@ -41,11 +68,14 @@ fn generate_ent_go_schema(
             None => continue,
         };
 
-        let optional = col_name != "game_id" && col_name != "server_region";
+        let optional = col_name != "server_region";
         let opt_suffix = if optional { ".Optional()" } else { "" };
 
         let field_line = match col_type {
-            "int64" | "int32" | "int" => {
+            "int64" => {
+                format!("\t\tfield.Int64(\"{}\"){},", col_name, opt_suffix)
+            }
+            "int32" | "int" => {
                 format!("\t\tfield.Int(\"{}\"){},", col_name, opt_suffix)
             }
             "float64" | "float32" | "float" => {
@@ -189,8 +219,37 @@ fn extract_struct_fields(file_content: &str, struct_name: &str) -> Vec<(String, 
     fields
 }
 
+/// Extracts names of simple enums (all unit variants, no data) from a Rust source file.
+/// These enums serialize as plain strings via serde.
+fn extract_simple_enums(file_content: &str) -> std::collections::HashSet<String> {
+    let mut result = std::collections::HashSet::new();
+    let enum_re = Regex::new(r"pub enum (\w+)\s*\{([^}]+)\}").unwrap();
+    for caps in enum_re.captures_iter(file_content) {
+        let name = caps.get(1).unwrap().as_str();
+        let body = caps.get(2).unwrap().as_str();
+        // A simple enum has NO tuple variants `Variant(...)` or struct variants `Variant {...}`
+        let has_data_variant = body.lines().any(|line| {
+            let trimmed = line.trim();
+            // Skip attributes, comments, and empty lines
+            if trimmed.is_empty()
+                || trimmed.starts_with('#')
+                || trimmed.starts_with("//")
+                || trimmed.starts_with(']')
+            {
+                return false;
+            }
+            trimmed.contains('(') || trimmed.contains('{')
+        });
+        if !has_data_variant {
+            result.insert(name.to_string());
+        }
+    }
+    result
+}
+
 /// Maps a Rust type to an EntGo-compatible type string.
-fn rust_type_to_ent_type(rust_type: &str) -> String {
+/// `simple_enums` is the set of enum names that serialize as plain strings.
+fn rust_type_to_ent_type(rust_type: &str, simple_enums: &std::collections::HashSet<String>) -> String {
     let inner = if rust_type.starts_with("Option<") && rust_type.ends_with('>') {
         &rust_type[7..rust_type.len() - 1]
     } else {
@@ -203,8 +262,11 @@ fn rust_type_to_ent_type(rust_type: &str) -> String {
         "bool" => "bool".to_string(),
         "String" => "string".to_string(),
         _ => {
-            // Anything complex (Vec, nested struct, serde_json::Value, etc.) → JSON
-            "json.RawMessage".to_string()
+            if simple_enums.contains(inner) {
+                "string".to_string()
+            } else {
+                "json.RawMessage".to_string()
+            }
         }
     }
 }
@@ -281,12 +343,13 @@ fn main() {
         }
 
         // Build column definitions
+        let simple_enums = extract_simple_enums(&content);
         let mut columns: Vec<String> = Vec::new();
         let mut has_id = false;
 
         for (field_name, field_type) in &fields {
             let db_col = to_snake_case(field_name);
-            let ent_type = rust_type_to_ent_type(field_type);
+            let ent_type = rust_type_to_ent_type(field_type, &simple_enums);
 
             if db_col == "id" {
                 has_id = true;
@@ -300,11 +363,13 @@ fn main() {
         // Always add server_region column
         columns.push("server_region:string".to_string());
 
-        // Determine unique keys: if has game_id, use [game_id, server_region], else [server_region]
-        let unique_keys = if has_id {
+        // Determine unique keys: check override first, then default logic
+        let unique_keys = if let Some(override_keys) = unique_key_override(&table_name) {
+            override_keys
+        } else if has_id {
             serde_json::json!([["id", "server_region"]])
         } else {
-            serde_json::json!([["server_region"]])
+            serde_json::json!([])
         };
 
         // Pluralize table name for consistency
