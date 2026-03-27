@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use sea_orm::sea_query::{Alias, Expr, ExprTrait, InsertStatement, Query};
 use sea_orm::{ConnectionTrait, DatabaseConnection, TransactionTrait};
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
 use tracing::{info, warn};
@@ -189,9 +189,22 @@ impl IngestionEngine {
         }
 
         let mut target_columns: Vec<MappedCol> = Vec::new();
-        let first_obj = data[0].as_object().unwrap();
 
-        for json_key in first_obj.keys() {
+        // Collect ALL unique JSON keys across all records (not just the first one),
+        // because some fields only appear in a subset of records.
+        let mut all_json_keys = Vec::new();
+        let mut seen_keys = HashSet::new();
+        for item in &data {
+            if let Value::Object(obj) = item {
+                for key in obj.keys() {
+                    if seen_keys.insert(key.clone()) {
+                        all_json_keys.push(key.clone());
+                    }
+                }
+            }
+        }
+
+        for json_key in &all_json_keys {
             let mut normalized_json_key = json_key.to_lowercase().replace("_", "");
             if normalized_json_key == "id" {
                 normalized_json_key = "gameid".to_string();
@@ -211,26 +224,8 @@ impl IngestionEngine {
                     col_type: db_cols.get(&db_col).unwrap().clone(),
                     db_col,
                 });
-            } else {
-                let snake_key = {
-                    let mut s = String::new();
-                    for (i, c) in json_key.chars().enumerate() {
-                        if c.is_uppercase() && i > 0 {
-                            s.push('_');
-                        }
-                        s.push(c.to_ascii_lowercase());
-                    }
-                    s
-                };
-
-                if snake_key != "id" {
-                    target_columns.push(MappedCol {
-                        json_key: json_key.clone(),
-                        db_col: snake_key,
-                        col_type: "json.RawMessage".to_string(), // Fallback
-                    });
-                }
             }
+            // Skip JSON keys that don't match any known DB column
         }
 
         let mut column_aliases = Vec::new();
