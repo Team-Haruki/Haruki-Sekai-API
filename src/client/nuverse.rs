@@ -60,6 +60,26 @@ pub fn restore_dict(
     result
 }
 
+/// Restores `userHonors` inside a profile response from Nuverse servers (TW/KR/CN).
+/// These servers may return each `userHonors` element as a flat array `[honorId, level, obtainedAt]`
+/// instead of a keyed dict. If elements are already dicts, they are left unchanged.
+pub fn restore_profile_user_honors(data: &mut JsonValue) {
+    let structure: Vec<JsonValue> = vec![json!("honorId"), json!("level"), json!("obtainedAt")];
+
+    if let Some(honors) = data.get_mut("userHonors") {
+        if let Some(arr) = honors.as_array_mut() {
+            for item in arr.iter_mut() {
+                if item.is_array() {
+                    if let Some(flat) = item.as_array() {
+                        let restored = restore_dict(flat, &structure);
+                        *item = json!(restored);
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Restores `userCard` fields inside event ranking responses from Nuverse servers (TW/KR/CN).
 /// These servers return `userCard` as a flat array instead of a keyed dictionary.
 /// If `userCard` is already a dict, it is left unchanged.
@@ -284,6 +304,35 @@ pub fn nuverse_master_restorer(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_restore_profile_user_honors_flat() {
+        let mut data = json!({
+            "userHonors": [
+                [1001, 2, 1711000000_i64],
+                [1002, 1, 1712000000_i64]
+            ]
+        });
+        restore_profile_user_honors(&mut data);
+        let honors = data["userHonors"].as_array().unwrap();
+        assert_eq!(honors[0]["honorId"], json!(1001));
+        assert_eq!(honors[0]["level"], json!(2));
+        assert_eq!(honors[0]["obtainedAt"], json!(1711000000_i64));
+        assert_eq!(honors[1]["honorId"], json!(1002));
+    }
+
+    #[test]
+    fn test_restore_profile_user_honors_already_dict() {
+        // Already a dict — should be left unchanged
+        let mut data = json!({
+            "userHonors": [
+                {"honorId": 1001, "level": 2, "obtainedAt": 1711000000_i64}
+            ]
+        });
+        restore_profile_user_honors(&mut data);
+        let honors = data["userHonors"].as_array().unwrap();
+        assert_eq!(honors[0]["honorId"], json!(1001));
+    }
 
     #[test]
     fn test_restore_dict_simple() {

@@ -61,7 +61,17 @@ pub async fn get_user_profile(
         tracing::debug!("User {} requesting profile for {}", user.id, user_id);
     }
     let path = format!("/user/{{userId}}/{}/profile", user_id);
-    proxy_game_api(&state, &server, &path).await
+    let mut resp = proxy_game_api(&state, &server, &path).await?;
+
+    // Nuverse servers (TW/KR/CN) may return userHonors elements as flat arrays; restore to dicts
+    let region: ServerRegion = server
+        .parse()
+        .map_err(|_| AppError::InvalidServerRegion(server.to_string()))?;
+    if !region.is_cp_server() {
+        crate::client::nuverse::restore_profile_user_honors(&mut resp.body);
+    }
+
+    Ok(resp)
 }
 
 pub async fn get_system(
