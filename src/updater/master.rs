@@ -385,35 +385,39 @@ impl MasterUpdater {
             self.save_master_files(&restored, master_dir).await?;
         }
 
-        if let Some(db) = &self.db {
-            info!(
-                "{} Starting database ingestion for new master data...",
-                self.region.as_str().to_uppercase()
-            );
-            match crate::ingest_engine::IngestionEngine::new(db.clone()).await {
-                Ok(engine) => {
-                    let region_str = self.region.as_str().to_lowercase();
-                    if let Err(e) = engine.ingest_master_data(master_dir, &region_str).await {
+        if let Some(db) = self.db.clone() {
+            let region = self.region;
+            let master_dir = master_dir.to_string();
+            tokio::spawn(async move {
+                info!(
+                    "{} Starting database ingestion for new master data...",
+                    region.as_str().to_uppercase()
+                );
+                match crate::ingest_engine::IngestionEngine::new(db).await {
+                    Ok(engine) => {
+                        let region_str = region.as_str().to_lowercase();
+                        if let Err(e) = engine.ingest_master_data(&master_dir, &region_str).await {
+                            warn!(
+                                "{} Master Data Ingestion partial failure: {}",
+                                region.as_str().to_uppercase(),
+                                e
+                            );
+                        } else {
+                            info!(
+                                "{} Master Data successfully ingested into database",
+                                region.as_str().to_uppercase()
+                            );
+                        }
+                    }
+                    Err(e) => {
                         warn!(
-                            "{} Master Data Ingestion partial failure: {}",
-                            self.region.as_str().to_uppercase(),
+                            "{} Failed to initialize IngestionEngine: {}",
+                            region.as_str().to_uppercase(),
                             e
-                        );
-                    } else {
-                        info!(
-                            "{} Master Data successfully ingested into database",
-                            self.region.as_str().to_uppercase()
                         );
                     }
                 }
-                Err(e) => {
-                    warn!(
-                        "{} Failed to initialize IngestionEngine: {}",
-                        self.region.as_str().to_uppercase(),
-                        e
-                    );
-                }
-            }
+            });
         }
 
         info!(
