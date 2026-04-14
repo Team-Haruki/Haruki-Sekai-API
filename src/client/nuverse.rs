@@ -221,11 +221,14 @@ pub fn nuverse_master_restorer(
 ) -> Result<IndexMap<String, JsonValue>, AppError> {
     let mut restored_compact_master: IndexMap<String, JsonValue> = IndexMap::new();
     let mut processed_data: IndexMap<String, JsonValue> = IndexMap::new();
-    let mut restored_from_compact: std::collections::HashSet<String> =
-        std::collections::HashSet::new();
 
+    // Single pass: compact keys are restored immediately; non-compact keys are restored and
+    // buffered into processed_data.  The order between compact and non-compact siblings
+    // (e.g. compactCostume3ds vs costume3ds) does NOT matter — merging happens in a
+    // dedicated second step below.
     for (key, value) in master_data.iter() {
         if let Some(new_key_original) = key.strip_prefix("compact") {
+            // Persist the raw columnar blob so it is also written as a file.
             restored_compact_master.insert(key.clone(), value.clone());
             let data_map: Option<IndexMap<String, JsonValue>> = value
                 .as_object()
@@ -238,19 +241,19 @@ pub fn nuverse_master_restorer(
                         first_char.to_lowercase(),
                         &new_key_original[first_char.len_utf8()..]
                     );
-                    restored_compact_master.insert(new_key.clone(), json!(restored));
-                    restored_from_compact.insert(new_key);
+                    restored_compact_master.insert(new_key, json!(restored));
                 }
             }
             continue;
         }
+
         let id_key = if key == "eventCards" {
             Some("cardId")
         } else {
             None
         };
 
-        // Restore this key's value from flat-array format using the structures definition.
+        // Restore this key from flat-array format using the structures definition.
         let restored_value = if let Some(structure) = structures.get(key) {
             if let (Some(arr), Some(struct_arr)) = (value.as_array(), structure.as_array()) {
                 let restored: Vec<JsonValue> = arr
@@ -265,39 +268,9 @@ pub fn nuverse_master_restorer(
             value.clone()
         };
 
-        // When a compact variant was already restored for this key (e.g. compactCostume3ds →
-        // costume3ds), merge the flat-array records into the compact-restored array instead of
-        // replacing it.  Compact-restored records win on duplicate IDs; only records whose ID
-        // is absent from the compact set are appended.
-        if restored_from_compact.contains(key) {
-            if let Some(compact_arr) = restored_compact_master
-                .get(key)
-                .and_then(|v| v.as_array())
-                .map(|a| a.to_vec())
-            {
-                if let Some(normal_arr) = restored_value.as_array() {
-                    let merge_id = id_key.unwrap_or("id");
-                    let compact_ids: std::collections::HashSet<i64> = compact_arr
-                        .iter()
-                        .filter_map(|item| item.get(merge_id).and_then(|v| v.as_i64()))
-                        .collect();
-                    let mut merged = compact_arr;
-                    for item in normal_arr {
-                        let new_id = item.get(merge_id).and_then(|v| v.as_i64());
-                        if new_id.map(|id| !compact_ids.contains(&id)).unwrap_or(true) {
-                            merged.push(item.clone());
-                        }
-                    }
-                    merged.sort_by_key(|item| {
-                        item.get(merge_id).and_then(|v| v.as_i64()).unwrap_or(0)
-                    });
-                    restored_compact_master.insert(key.clone(), json!(merged));
-                }
-            }
-            continue;
-        }
-
         processed_data.insert(key.clone(), restored_value);
+
+        // Special dedup for eventCards which can arrive from two sources.
         if let Some(id_k) = id_key {
             if let Some(processed_arr) = processed_data.get(key).and_then(|v| v.as_array()) {
                 if let Some(value_arr) = value.as_array() {
@@ -326,11 +299,41 @@ pub fn nuverse_master_restorer(
             }
         }
     }
+
+    // Second pass: fold processed_data into restored_compact_master.
+    // For keys that already have a compact-restored array (e.g. costume3ds produced from
+    // compactCostume3ds), append only the records whose `id` is absent from the compact
+    // set so that both sources contribute to the final file.
     for (k, v) in processed_data {
-        if !restored_compact_master.contains_key(&k) {
+        if let Some(existing) = restored_compact_master.get(&k) {
+            if let (Some(compact_arr), Some(normal_arr)) = (existing.as_array(), v.as_array()) {
+                let merge_id = if k == "eventCards" { "cardId" } else { "id" };
+                let compact_ids: std::collections::HashSet<i64> = compact_arr
+                    .iter()
+                    .filter_map(|item| item.get(merge_id).and_then(|v| v.as_i64()))
+                    .collect();
+                let mut merged = compact_arr.to_vec();
+                for item in normal_arr {
+                    if item
+                        .get(merge_id)
+                        .and_then(|v| v.as_i64())
+                        .map(|id| !compact_ids.contains(&id))
+                        .unwrap_or(true)
+                    {
+                        merged.push(item.clone());
+                    }
+                }
+                merged.sort_by_key(|item| {
+                    item.get(merge_id).and_then(|v| v.as_i64()).unwrap_or(0)
+                });
+                restored_compact_master.insert(k, json!(merged));
+            }
+            // Non-array value: keep the compact version unchanged.
+        } else {
             restored_compact_master.insert(k, v);
         }
     }
+
     Ok(restored_compact_master)
 }
 
