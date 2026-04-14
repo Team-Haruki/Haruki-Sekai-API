@@ -1,0 +1,1546 @@
+[
+  {
+    "columns": [
+      "area_item_id:int64",
+      "level:int64",
+      "target_unit:string",
+      "target_card_attr:string",
+      "target_game_character_id:int64",
+      "power1_bonus_rate:float64",
+      "power1_all_match_bonus_rate:float64",
+      "power2_bonus_rate:float64",
+      "power2_all_match_bonus_rate:float64",
+      "power3_bonus_rate:float64",
+      "power3_all_match_bonus_rate:float64",
+      "sentence:string",
+      "server_region:string"
+    ],
+    "name": "areaitemlevels",
+    "unique_keys": [
+      [
+        "area_item_id",
+        "level",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "game_id:int64",
+      "area_id:int64",
+      "name:string",
+      "flavor_text:string",
+      "spawn_point:string",
+      "assetbundle_name:string",
+      "server_region:string"
+    ],
+    "name": "areaitems",
+    "unique_keys": [
+      [
+        "id",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "game_id:int64",
+      "assetbundle_name:string",
+      "group_id:int64",
+      "is_base_area:bool",
+      "area_type:string",
+      "view_type:string",
+      "display_timeline_type:string",
+      "additional_area_type:string",
+      "name:string",
+      "release_condition_id:int64",
+      "sub_name:string",
+      "label:string",
+      "start_at:int64",
+      "end_at:int64",
+      "release_condition_id2:int64",
+      "server_region:string"
+    ],
+    "name": "areas",
+    "unique_keys": [
+      [
+        "id",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "game_id:int64",
+      "group_id:int64",
+      "character_id1:int64",
+      "character_id2:int64",
+      "server_region:string"
+    ],
+    "name": "bonds",
+    "unique_keys": [
+      [
+        "id",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "game_id:int64",
+      "seq:int64",
+      "bonds_group_id:int64",
+      "game_character_unit_id1:int64",
+      "game_character_unit_id2:int64",
+      "honor_rarity:string",
+      "name:string",
+      "pronunciation:string",
+      "description:string",
+      "levels:json.RawMessage",
+      "configurable_unit_virtual_singer:bool",
+      "server_region:string"
+    ],
+    "name": "bondshonors",
+    "unique_keys": [
+      [
+        "id",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "game_id:int64",
+      "seq:int64",
+      "name:string",
+      "recovery_value:int64",
+      "asset_bundle_name:string",
+      "flavor_text:string",
+      "server_region:string"
+    ],
+    "name": "boostitems",
+    "unique_keys": [
+      [
+        "id",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "card_id:int64",
+      "costume3_d_id:int64",
+      "is_initial_obtain_hair:bool",
+      "server_region:string"
+    ],
+    "name": "cardcostume3ds",
+    "unique_keys": [
+      [
+        "costume3_d_id",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "game_id:int64",
+      "seq:int64",
+      "card_id:int64",
+      "title:string",
+      "scenario_id:string",
+      "assetbundle_name:string",
+      "release_condition_id:int64",
+      "power1_bonus_fixed:int64",
+      "power2_bonus_fixed:int64",
+      "power3_bonus_fixed:int64",
+      "reward_resource_box_ids:json.RawMessage",
+      "costs:json.RawMessage",
+      "card_episode_part_type:string",
+      "server_region:string"
+    ],
+    "name": "cardepisodes",
+    "unique_keys": [
+      [
+        "id",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "game_id:int64",
+      "card_rarity_type:string",
+      "power1_bonus_fixed:int64",
+      "power2_bonus_fixed:int64",
+      "power3_bonus_fixed:int64",
+      "server_region:string"
+    ],
+    "name": "cardmysekaicanvasbonuses",
+    "unique_keys": [
+      [
+        "id",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "card_rarity_type:string",
+      "seq:int64",
+      "max_level:int64",
+      "max_skill_level:int64",
+      "training_max_level:int64",
+      "server_region:string"
+    ],
+    "name": "cardrarities",
+    "unique_keys": [
+      [
+        "card_rarity_type",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "game_id:int64",
+      "seq:int64",
+      "character_id:int64",
+      "card_rarity_type:string",
+      "special_training_power1_bonus_fixed:int64",
+      "special_training_power2_bonus_fixed:int64",
+      "special_training_power3_bonus_fixed:int64",
+      "attr:string",
+      "support_unit:string",
+      "skill_id:int64",
+      "card_skill_name:string",
+      "prefix:string",
+      "assetbundle_name:string",
+      "gacha_phrase:string",
+      "flavor_text:string",
+      "release_at:int64",
+      "archive_published_at:int64",
+      "card_supply_id:int64",
+      "card_parameters:json.RawMessage",
+      "special_training_costs:json.RawMessage",
+      "master_lesson_achieve_resources:json.RawMessage",
+      "initial_special_training_status:string",
+      "archive_display_type:string",
+      "special_training_skill_id:int64",
+      "special_training_skill_name:string",
+      "special_training_reward_resource_box_id:int64",
+      "server_region:string"
+    ],
+    "name": "cards",
+    "unique_keys": [
+      [
+        "id",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "game_id:int64",
+      "card_supply_type:string",
+      "assetbundle_name:string",
+      "server_region:string"
+    ],
+    "name": "cardsupplies",
+    "unique_keys": [
+      [
+        "id",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "game_id:int64",
+      "character_id:int64",
+      "high_score:int64",
+      "resource_box_id:int64",
+      "server_region:string"
+    ],
+    "name": "challengelivehighscorerewards",
+    "unique_keys": [
+      [
+        "id",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "game_id:int64",
+      "character_type:string",
+      "is_next_grade:bool",
+      "character_id:int64",
+      "unit:string",
+      "is_enabled_flip_display:bool",
+      "asset_name:string",
+      "character_icon_assetbundle_name:string",
+      "server_region:string"
+    ],
+    "name": "character2ds",
+    "unique_keys": [
+      [
+        "id",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "game_id:int64",
+      "seq:int64",
+      "requirement:int64",
+      "exp:int64",
+      "quantity:int64",
+      "server_region:string"
+    ],
+    "name": "charactermissionv2parametergroups",
+    "unique_keys": [
+      [
+        "game_id",
+        "seq",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "game_id:int64",
+      "character_id:int64",
+      "character_rank:int64",
+      "power1_bonus_rate:float64",
+      "power2_bonus_rate:float64",
+      "power3_bonus_rate:float64",
+      "reward_resource_box_ids:json.RawMessage",
+      "character_rank_achieve_resources:json.RawMessage",
+      "server_region:string"
+    ],
+    "name": "characterranks",
+    "unique_keys": [
+      [
+        "id",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "game_id:int64",
+      "event_id:int64",
+      "seq:int64",
+      "team_name:string",
+      "assetbundle_name:string",
+      "server_region:string"
+    ],
+    "name": "cheerfulcarnivalteams",
+    "unique_keys": [
+      [
+        "id",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "game_id:int64",
+      "seq:int64",
+      "costume3_d_group_id:int64",
+      "costume3_d_type:string",
+      "name:string",
+      "part_type:string",
+      "color_id:int64",
+      "color_name:string",
+      "character_id:int64",
+      "costume3_d_rarity:string",
+      "how_to_obtain:string",
+      "assetbundle_name:string",
+      "designer:string",
+      "archive_display_type:string",
+      "archive_published_at:int64",
+      "published_at:int64",
+      "server_region:string"
+    ],
+    "name": "costume3ds",
+    "unique_keys": [
+      [
+        "id",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "game_id:int64",
+      "card_id:int64",
+      "event_id:int64",
+      "bonus_rate:float64",
+      "leader_bonus_rate:float64",
+      "is_display_card_story:bool",
+      "server_region:string"
+    ],
+    "name": "eventcards",
+    "unique_keys": [
+      [
+        "card_id",
+        "event_id",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "game_id:int64",
+      "event_id:int64",
+      "game_character_unit_id:int64",
+      "card_attr:string",
+      "bonus_rate:float64",
+      "server_region:string"
+    ],
+    "name": "eventdeckbonuses",
+    "unique_keys": [
+      [
+        "id",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "game_id:int64",
+      "event_id:int64",
+      "assetbundle_name:string",
+      "start_at:int64",
+      "end_at:int64",
+      "event_exchanges:json.RawMessage",
+      "server_region:string"
+    ],
+    "name": "eventexchangesummaries",
+    "unique_keys": [
+      [
+        "id",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "game_id:int64",
+      "event_id:int64",
+      "name:string",
+      "flavor_text:string",
+      "assetbundle_name:string",
+      "game_character_id:int64",
+      "server_region:string"
+    ],
+    "name": "eventitems",
+    "unique_keys": [
+      [
+        "id",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "event_id:int64",
+      "music_id:int64",
+      "seq:int64",
+      "release_condition_id:int64",
+      "server_region:string"
+    ],
+    "name": "eventmusics",
+    "unique_keys": [
+      [
+        "event_id",
+        "music_id",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "game_id:int64",
+      "card_rarity_type:string",
+      "master_rank:int64",
+      "bonus_rate:float64",
+      "server_region:string"
+    ],
+    "name": "eventraritybonusrates",
+    "unique_keys": [
+      [
+        "id",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "game_id:int64",
+      "event_type:string",
+      "name:string",
+      "assetbundle_name:string",
+      "bgm_assetbundle_name:string",
+      "event_only_component_display_start_at:int64",
+      "start_at:int64",
+      "aggregate_at:int64",
+      "ranking_announce_at:int64",
+      "distribution_start_at:int64",
+      "event_only_component_display_end_at:int64",
+      "closed_at:int64",
+      "distribution_end_at:int64",
+      "virtual_live_id:int64",
+      "unit:string",
+      "is_count_leader_character_play:bool",
+      "event_ranking_reward_ranges:json.RawMessage",
+      "event_point_assetbundle_name:string",
+      "standby_screen_display_start_at:int64",
+      "server_region:string"
+    ],
+    "name": "events",
+    "unique_keys": [
+      [
+        "id",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "game_id:int64",
+      "event_id:int64",
+      "outline:string",
+      "banner_game_character_unit_id:int64",
+      "assetbundle_name:string",
+      "event_story_episodes:json.RawMessage",
+      "server_region:string"
+    ],
+    "name": "eventstories",
+    "unique_keys": [
+      [
+        "id",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "game_id:int64",
+      "seq:int64",
+      "event_story_id:int64",
+      "unit:string",
+      "event_story_unit_relation:string",
+      "server_region:string"
+    ],
+    "name": "eventstoryunits",
+    "unique_keys": [
+      [
+        "id",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "game_id:int64",
+      "gacha_id:int64",
+      "name:string",
+      "assetbundle_name:string",
+      "convert_start_at:int64",
+      "convert_resource_box_id:int64",
+      "server_region:string"
+    ],
+    "name": "gachaceilitems",
+    "unique_keys": [
+      [
+        "id",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "game_id:int64",
+      "gacha_type:string",
+      "name:string",
+      "seq:int64",
+      "assetbundle_name:string",
+      "gacha_card_rarity_rate_group_id:int64",
+      "start_at:int64",
+      "end_at:int64",
+      "is_show_period:bool",
+      "gacha_ceil_item_id:int64",
+      "wish_select_count:int64",
+      "wish_fixed_select_count:int64",
+      "wish_limited_select_count:int64",
+      "gacha_card_rarity_rates:json.RawMessage",
+      "gacha_details:json.RawMessage",
+      "gacha_behaviors:json.RawMessage",
+      "gacha_pickups:json.RawMessage",
+      "gacha_pickup_costumes:json.RawMessage",
+      "gacha_information:json.RawMessage",
+      "drawable_gacha_hour:int64",
+      "gacha_bonus_id:int64",
+      "spin_limit:int64",
+      "gacha_bonus_item_receivable_reward_group_id:int64",
+      "gacha_freebie_group_id:int64",
+      "daily_spin_limit:int64",
+      "server_region:string"
+    ],
+    "name": "gachas",
+    "unique_keys": [
+      [
+        "id",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "game_id:int64",
+      "name:string",
+      "assetbundle_name:string",
+      "gacha_display_type:string",
+      "server_region:string"
+    ],
+    "name": "gachatickets",
+    "unique_keys": [
+      [
+        "id",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "game_id:int64",
+      "seq:int64",
+      "resource_id:int64",
+      "first_name:string",
+      "given_name:string",
+      "first_name_ruby:string",
+      "given_name_ruby:string",
+      "first_name_english:string",
+      "given_name_english:string",
+      "gender:string",
+      "height:float64",
+      "live2_d_height_adjustment:float64",
+      "figure:string",
+      "breast_size:string",
+      "model_name:string",
+      "unit:string",
+      "support_unit_type:string",
+      "server_region:string"
+    ],
+    "name": "gamecharacters",
+    "unique_keys": [
+      [
+        "id",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "game_id:int64",
+      "game_character_id:int64",
+      "unit:string",
+      "color_code:string",
+      "skin_color_code:string",
+      "skin_shadow_color_code1:string",
+      "skin_shadow_color_code2:string",
+      "server_region:string"
+    ],
+    "name": "gamecharacterunits",
+    "unique_keys": [
+      [
+        "id",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "game_id:int64",
+      "name:string",
+      "pronunciation:string",
+      "honor_type:string",
+      "background_assetbundle_name:string",
+      "frame_name:string",
+      "server_region:string"
+    ],
+    "name": "honorgroups",
+    "unique_keys": [
+      [
+        "id",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "game_id:int64",
+      "seq:int64",
+      "group_id:int64",
+      "honor_rarity:string",
+      "name:string",
+      "assetbundle_name:string",
+      "levels:json.RawMessage",
+      "honor_type_id:int64",
+      "honor_mission_type:string",
+      "start_at:int64",
+      "server_region:string"
+    ],
+    "name": "honors",
+    "unique_keys": [
+      [
+        "id",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "game_id:int64",
+      "level_type:string",
+      "level:int64",
+      "total_exp:int64",
+      "server_region:string"
+    ],
+    "name": "levels",
+    "unique_keys": [
+      [
+        "level_type",
+        "level",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "game_id:int64",
+      "music_id:int64",
+      "start_at:int64",
+      "end_at:int64",
+      "server_region:string"
+    ],
+    "name": "limitedtimemusics",
+    "unique_keys": [
+      [
+        "id",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "card_rarity_type:string",
+      "master_rank:int64",
+      "power1_bonus_fixed:int64",
+      "power2_bonus_fixed:int64",
+      "power3_bonus_fixed:int64",
+      "character_rank_exp:int64",
+      "costs:json.RawMessage",
+      "rewards:json.RawMessage",
+      "server_region:string"
+    ],
+    "name": "masterlessons",
+    "unique_keys": [
+      [
+        "card_rarity_type",
+        "master_rank",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "game_id:int64",
+      "name:string",
+      "pronunciation:string",
+      "server_region:string"
+    ],
+    "name": "musicartists",
+    "unique_keys": [
+      [
+        "id",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "game_id:int64",
+      "music_id:int64",
+      "music_difficulty:string",
+      "play_level:int64",
+      "total_note_count:int64",
+      "release_condition_id:int64",
+      "server_region:string"
+    ],
+    "name": "musicdifficulties",
+    "unique_keys": [
+      [
+        "id",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "game_id:int64",
+      "seq:int64",
+      "release_condition_id:int64",
+      "categories:json.RawMessage",
+      "title:string",
+      "pronunciation:string",
+      "creator_artist_id:int64",
+      "lyricist:string",
+      "composer:string",
+      "arranger:string",
+      "dancer_count:int64",
+      "self_dancer_position:int64",
+      "assetbundle_name:string",
+      "live_talk_background_assetbundle_name:string",
+      "published_at:int64",
+      "released_at:int64",
+      "live_stage_id:int64",
+      "filler_sec:float64",
+      "is_newly_written_music:bool",
+      "is_full_length:bool",
+      "music_collaboration_id:int64",
+      "infos:json.RawMessage",
+      "server_region:string"
+    ],
+    "name": "musics",
+    "unique_keys": [
+      [
+        "id",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "game_id:int64",
+      "music_id:int64",
+      "music_tag:string",
+      "seq:int64",
+      "server_region:string"
+    ],
+    "name": "musictags",
+    "unique_keys": [
+      [
+        "music_id",
+        "music_tag",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "game_id:int64",
+      "music_id:int64",
+      "music_vocal_type:string",
+      "seq:int64",
+      "release_condition_id:int64",
+      "caption:string",
+      "characters:json.RawMessage",
+      "assetbundle_name:string",
+      "archive_published_at:int64",
+      "special_season_id:int64",
+      "archive_display_type:string",
+      "server_region:string"
+    ],
+    "name": "musicvocals",
+    "unique_keys": [
+      [
+        "id",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "game_id:int64",
+      "mysekai_blueprint_id:int64",
+      "mysekai_material_id:int64",
+      "seq:int64",
+      "quantity:int64",
+      "mysekai_blueprint_type:string",
+      "server_region:string"
+    ],
+    "name": "mysekaiblueprintmysekaimaterialcosts",
+    "unique_keys": [
+      [
+        "id",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "game_id:int64",
+      "mysekai_craft_type:string",
+      "craft_target_id:int64",
+      "is_enable_sketch:bool",
+      "is_obtained_by_convert:bool",
+      "craft_count_limit:int64",
+      "is_available_without_possession:bool",
+      "server_region:string"
+    ],
+    "name": "mysekaiblueprints",
+    "unique_keys": [
+      [
+        "id",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "game_id:int64",
+      "group_id:int64",
+      "mysekai_character_talk_condition_id:int64",
+      "server_region:string"
+    ],
+    "name": "mysekaicharactertalkconditiongroups",
+    "unique_keys": [
+      [
+        "id",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "game_id:int64",
+      "mysekai_character_talk_condition_type:string",
+      "mysekai_character_talk_condition_type_value:int64",
+      "server_region:string"
+    ],
+    "name": "mysekaicharactertalkconditions",
+    "unique_keys": [
+      [
+        "id",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "game_id:int64",
+      "game_character_unit_id:int64",
+      "mysekai_character_talk_fixture_common_type:string",
+      "mysekai_character_talk_fixture_common_mysekai_fixture_group_id:int64",
+      "mysekai_character_talk_fixture_common_tweet_group_id:int64",
+      "server_region:string"
+    ],
+    "name": "mysekaicharactertalkfixturecommons",
+    "unique_keys": [
+      [
+        "id",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "game_id:int64",
+      "mysekai_game_character_unit_group_id:int64",
+      "mysekai_character_talk_condition_group_id:int64",
+      "mysekai_site_group_id:int64",
+      "mysekai_character_talk_term_id:int64",
+      "character_archive_mysekai_character_talk_group_id:int64",
+      "assetbundle_name:string",
+      "lua:string",
+      "is_enabled_for_multi:bool",
+      "server_region:string"
+    ],
+    "name": "mysekaicharactertalks",
+    "unique_keys": [
+      [
+        "id",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "game_id:int64",
+      "group_id:int64",
+      "game_character_id:int64",
+      "server_region:string"
+    ],
+    "name": "mysekaifixturegamecharactergroups",
+    "unique_keys": [
+      [
+        "id",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "game_id:int64",
+      "name:string",
+      "mysekai_fixture_main_genre_type:string",
+      "assetbundle_name:string",
+      "group_id:int64",
+      "server_region:string"
+    ],
+    "name": "mysekaifixturemaingenres",
+    "unique_keys": [
+      [
+        "id",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "game_id:int64",
+      "mysekai_fixture_id:int64",
+      "mysekai_material_id:int64",
+      "seq:int64",
+      "quantity:int64",
+      "server_region:string"
+    ],
+    "name": "mysekaifixtureonlydisassemblematerials",
+    "unique_keys": [
+      [
+        "id",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "game_id:int64",
+      "mysekai_fixture_type:string",
+      "name:string",
+      "pronunciation:string",
+      "flavor_text:string",
+      "seq:int64",
+      "grid_size:json.RawMessage",
+      "mysekai_fixture_main_genre_id:int64",
+      "mysekai_fixture_sub_genre_id:int64",
+      "mysekai_fixture_handle_type:string",
+      "mysekai_settable_site_type:string",
+      "mysekai_settable_layout_type:string",
+      "mysekai_fixture_put_type:string",
+      "mysekai_fixture_another_colors:json.RawMessage",
+      "mysekai_fixture_put_sound_id:int64",
+      "mysekai_fixture_footstep_id:int64",
+      "mysekai_fixture_tag_group:json.RawMessage",
+      "is_assembled:bool",
+      "is_disassembled:bool",
+      "mysekai_fixture_player_action_type:string",
+      "is_game_character_action:bool",
+      "assetbundle_name:string",
+      "first_put_cost:int64",
+      "second_put_cost:int64",
+      "color_code:string",
+      "mysekai_fixture_game_character_group_performance_bonus_id:int64",
+      "server_region:string"
+    ],
+    "name": "mysekaifixtures",
+    "unique_keys": [
+      [
+        "id",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "game_id:int64",
+      "name:string",
+      "mysekai_fixture_sub_genre_type:string",
+      "assetbundle_name:string",
+      "server_region:string"
+    ],
+    "name": "mysekaifixturesubgenres",
+    "unique_keys": [
+      [
+        "id",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "game_id:int64",
+      "name:string",
+      "pronunciation:string",
+      "mysekai_fixture_tag_type:string",
+      "external_id:int64",
+      "server_region:string"
+    ],
+    "name": "mysekaifixturetags",
+    "unique_keys": [
+      [
+        "id",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "game_id:int64",
+      "game_character_unit_id1:int64",
+      "game_character_unit_id2:int64",
+      "game_character_unit_id3:int64",
+      "game_character_unit_id4:int64",
+      "game_character_unit_id5:int64",
+      "server_region:string"
+    ],
+    "name": "mysekaigamecharacterunitgroups",
+    "unique_keys": [
+      [
+        "id",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "game_id:int64",
+      "mysekai_gate_id:int64",
+      "game_character_unit_id:int64",
+      "visitable_mysekai_gate_level:int64",
+      "server_region:string"
+    ],
+    "name": "mysekaigatecharacterlotteries",
+    "unique_keys": [
+      [
+        "id",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "game_id:int64",
+      "mysekai_gate_id:int64",
+      "level:int64",
+      "mysekai_gate_material_group_id:int64",
+      "mysekai_gate_character_visit_count_rate_id:int64",
+      "power_bonus_rate:float64",
+      "server_region:string"
+    ],
+    "name": "mysekaigatelevels",
+    "unique_keys": [
+      [
+        "id",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "game_id:int64",
+      "group_id:int64",
+      "mysekai_material_id:int64",
+      "quantity:int64",
+      "server_region:string"
+    ],
+    "name": "mysekaigatematerialgroups",
+    "unique_keys": [
+      [
+        "id",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "game_id:int64",
+      "unit:string",
+      "name:string",
+      "assetbundle_name:string",
+      "server_region:string"
+    ],
+    "name": "mysekaigates",
+    "unique_keys": [
+      [
+        "id",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "game_id:int64",
+      "seq:int64",
+      "mysekai_item_type:string",
+      "name:string",
+      "pronunciation:string",
+      "description:string",
+      "icon_assetbundle_name:string",
+      "server_region:string"
+    ],
+    "name": "mysekaiitems",
+    "unique_keys": [
+      [
+        "id",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "game_id:int64",
+      "group_id:int64",
+      "mysekai_material_id:int64",
+      "game_character_id:int64",
+      "server_region:string"
+    ],
+    "name": "mysekaimaterialgamecharacterrelations",
+    "unique_keys": [
+      [
+        "id",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "game_id:int64",
+      "seq:int64",
+      "mysekai_material_type:string",
+      "name:string",
+      "pronunciation:string",
+      "description:string",
+      "mysekai_material_rarity_type:string",
+      "icon_assetbundle_name:string",
+      "model_assetbundle_name:string",
+      "mysekai_site_ids:json.RawMessage",
+      "mysekai_phenomena_group_id:int64",
+      "server_region:string"
+    ],
+    "name": "mysekaimaterials",
+    "unique_keys": [
+      [
+        "id",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "game_id:int64",
+      "name:string",
+      "seq:int64",
+      "mysekai_music_track_type:string",
+      "unit:string",
+      "server_region:string"
+    ],
+    "name": "mysekaimusicrecordcategories",
+    "unique_keys": [
+      [
+        "id",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "game_id:int64",
+      "mysekai_music_track_type:string",
+      "external_id:int64",
+      "server_region:string"
+    ],
+    "name": "mysekaimusicrecords",
+    "unique_keys": [
+      [
+        "id",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "game_id:int64",
+      "base_color:string",
+      "ground_color:string",
+      "gradation_color:string",
+      "corner_color:string",
+      "ground_highlight_color:string",
+      "server_region:string"
+    ],
+    "name": "mysekaiphenomenabackgroundcolors",
+    "unique_keys": [
+      [
+        "id",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "game_id:int64",
+      "mysekai_phenomena_brightness_type:string",
+      "name:string",
+      "english_name:string",
+      "description:string",
+      "mysekai_phenomena_time_period_type:string",
+      "mysekai_phenomena_background_color_id:int64",
+      "assetbundle_name:string",
+      "ramp_texture_assetbundle_name:string",
+      "icon_assetbundle_name:string",
+      "server_region:string"
+    ],
+    "name": "mysekaiphenomenas",
+    "unique_keys": [
+      [
+        "id",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "game_id:int64",
+      "mysekai_site_harvest_fixture_type:string",
+      "hp:int64",
+      "last_attack_stamina:int64",
+      "mysekai_site_harvest_fixture_rarity_type:string",
+      "assetbundle_name:string",
+      "server_region:string"
+    ],
+    "name": "mysekaisiteharvestfixtures",
+    "unique_keys": [
+      [
+        "id",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "game_id:int64",
+      "word:string",
+      "server_region:string"
+    ],
+    "name": "ngwords",
+    "unique_keys": []
+  },
+  {
+    "columns": [
+      "game_id:int64",
+      "seq:int64",
+      "name:string",
+      "server_region:string"
+    ],
+    "name": "outsidecharacters",
+    "unique_keys": [
+      [
+        "id",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "game_id:int64",
+      "seq:int64",
+      "name:string",
+      "assetbundle_name:string",
+      "server_region:string"
+    ],
+    "name": "playerframegroups",
+    "unique_keys": [
+      [
+        "id",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "game_id:int64",
+      "seq:int64",
+      "player_frame_group_id:int64",
+      "description:string",
+      "game_character_id:int64",
+      "server_region:string"
+    ],
+    "name": "playerframes",
+    "unique_keys": [
+      [
+        "id",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "resource_box_purpose:string",
+      "game_id:int64",
+      "resource_box_type:string",
+      "description:string",
+      "details:json.RawMessage",
+      "name:string",
+      "assetbundle_name:string",
+      "server_region:string"
+    ],
+    "name": "resourceboxes",
+    "unique_keys": [
+      [
+        "resource_box_purpose",
+        "game_id",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "game_id:int64",
+      "shop_id:int64",
+      "seq:int64",
+      "release_condition_id:int64",
+      "resource_box_id:int64",
+      "costs:json.RawMessage",
+      "start_at:int64",
+      "server_region:string"
+    ],
+    "name": "shopitems",
+    "unique_keys": [
+      [
+        "id",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "game_id:int64",
+      "short_description:string",
+      "description:string",
+      "description_sprite_name:string",
+      "skill_filter_id:int64",
+      "skill_effects:json.RawMessage",
+      "server_region:string"
+    ],
+    "name": "skills",
+    "unique_keys": [
+      [
+        "id",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "game_id:int64",
+      "stamp_type:string",
+      "seq:int64",
+      "name:string",
+      "assetbundle_name:string",
+      "balloon_assetbundle_name:string",
+      "character_id1:int64",
+      "game_character_unit_id:int64",
+      "archive_published_at:int64",
+      "description:string",
+      "archive_display_type:string",
+      "character_id2:int64",
+      "server_region:string"
+    ],
+    "name": "stamps",
+    "unique_keys": [
+      [
+        "id",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "game_id:int64",
+      "virtual_live_type:string",
+      "virtual_live_platform:string",
+      "seq:int64",
+      "name:string",
+      "assetbundle_name:string",
+      "screen_mv_music_vocal_id:int64",
+      "start_at:int64",
+      "end_at:int64",
+      "ranking_announce_at:int64",
+      "virtual_live_setlists:json.RawMessage",
+      "virtual_live_beginner_schedules:json.RawMessage",
+      "virtual_live_schedules:json.RawMessage",
+      "virtual_live_characters:json.RawMessage",
+      "virtual_live_rewards:json.RawMessage",
+      "virtual_live_cheer_point_rewards:json.RawMessage",
+      "virtual_live_waiting_room:json.RawMessage",
+      "virtual_items:json.RawMessage",
+      "virtual_live_appeals:json.RawMessage",
+      "virtual_live_background_musics:json.RawMessage",
+      "virtual_live_information:json.RawMessage",
+      "archive_release_condition_id:int64",
+      "sub_game_character_penlight_color_group_id:int64",
+      "virtual_live_group_id:int64",
+      "server_region:string"
+    ],
+    "name": "virtuallives",
+    "unique_keys": [
+      [
+        "id",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "attribute_count:int64",
+      "bonus_rate:float64",
+      "server_region:string"
+    ],
+    "name": "worldbloomdifferentattributebonuses",
+    "unique_keys": [
+      [
+        "attribute_count",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "game_id:int64",
+      "event_id:int64",
+      "game_character_id:int64",
+      "world_bloom_chapter_type:string",
+      "chapter_no:int64",
+      "chapter_start_at:int64",
+      "aggregate_at:int64",
+      "chapter_end_at:int64",
+      "is_supplemental:bool",
+      "costume2_d_id:int64",
+      "server_region:string"
+    ],
+    "name": "worldblooms",
+    "unique_keys": [
+      [
+        "id",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "card_rarity_type:string",
+      "server_region:string"
+    ],
+    "name": "worldbloomsupportdeckbonuses",
+    "unique_keys": [
+      [
+        "card_rarity_type",
+        "server_region"
+      ]
+    ]
+  }
+]
