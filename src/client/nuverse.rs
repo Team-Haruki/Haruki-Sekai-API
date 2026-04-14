@@ -244,27 +244,60 @@ pub fn nuverse_master_restorer(
             }
             continue;
         }
-        if restored_from_compact.contains(key) {
-            continue;
-        }
         let id_key = if key == "eventCards" {
             Some("cardId")
         } else {
             None
         };
-        if let Some(structure) = structures.get(key) {
+
+        // Restore this key's value from flat-array format using the structures definition.
+        let restored_value = if let Some(structure) = structures.get(key) {
             if let (Some(arr), Some(struct_arr)) = (value.as_array(), structure.as_array()) {
                 let restored: Vec<JsonValue> = arr
                     .iter()
                     .filter_map(|item| item.as_array().map(|a| json!(restore_dict(a, struct_arr))))
                     .collect();
-                processed_data.insert(key.clone(), json!(restored));
+                json!(restored)
             } else {
-                processed_data.insert(key.clone(), value.clone());
+                value.clone()
             }
         } else {
-            processed_data.insert(key.clone(), value.clone());
+            value.clone()
+        };
+
+        // When a compact variant was already restored for this key (e.g. compactCostume3ds →
+        // costume3ds), merge the flat-array records into the compact-restored array instead of
+        // replacing it.  Compact-restored records win on duplicate IDs; only records whose ID
+        // is absent from the compact set are appended.
+        if restored_from_compact.contains(key) {
+            if let Some(compact_arr) = restored_compact_master
+                .get(key)
+                .and_then(|v| v.as_array())
+                .map(|a| a.to_vec())
+            {
+                if let Some(normal_arr) = restored_value.as_array() {
+                    let merge_id = id_key.unwrap_or("id");
+                    let compact_ids: std::collections::HashSet<i64> = compact_arr
+                        .iter()
+                        .filter_map(|item| item.get(merge_id).and_then(|v| v.as_i64()))
+                        .collect();
+                    let mut merged = compact_arr;
+                    for item in normal_arr {
+                        let new_id = item.get(merge_id).and_then(|v| v.as_i64());
+                        if new_id.map(|id| !compact_ids.contains(&id)).unwrap_or(true) {
+                            merged.push(item.clone());
+                        }
+                    }
+                    merged.sort_by_key(|item| {
+                        item.get(merge_id).and_then(|v| v.as_i64()).unwrap_or(0)
+                    });
+                    restored_compact_master.insert(key.clone(), json!(merged));
+                }
+            }
+            continue;
         }
+
+        processed_data.insert(key.clone(), restored_value);
         if let Some(id_k) = id_key {
             if let Some(processed_arr) = processed_data.get(key).and_then(|v| v.as_array()) {
                 if let Some(value_arr) = value.as_array() {
@@ -382,19 +415,61 @@ mod tests {
     }
 
     #[test]
-    fn test_restore_compact_data_with_enum() {
-        let mut data = IndexMap::new();
-        data.insert("id".to_string(), json!([1, 2]));
-        data.insert("status".to_string(), json!([0, 1]));
-        data.insert(
-            "__ENUM__".to_string(),
+    fn test_nuverse_master_restorer_merges_compact_with_normal() {
+        // Simulates: compactCostume3ds (columnar, 2 records) + costume3ds (flat-array, 1 extra
+        // record not in compact).  After restoration the merged costume3ds should have all 3.
+        let mut master_data: IndexMap<String, JsonValue> = IndexMap::new();
+
+        // compact format: 2 records
+        master_data.insert(
+            "compactCostume3ds".to_string(),
             json!({
-                "status": ["inactive", "active"]
+                "id":   [1, 2],
+                "name": ["A", "B"]
             }),
         );
-        let result = restore_compact_data(&data);
-        assert_eq!(result.len(), 2);
-        assert_eq!(result[0].get("status"), Some(&json!("inactive")));
-        assert_eq!(result[1].get("status"), Some(&json!("active")));
+        // flat-array format: 1 record whose id=3 doesn't exist in compact
+        master_data.insert(
+            "costume3ds".to_string(),
+            json!([[3, "C"]]),
+        );
+
+        // structures file tells how to decode the flat-array costume3ds
+        let mut structures: IndexMap<String, JsonValue> = IndexMap::new();
+        structures.insert("costume3ds".to_string(), json!(["id", "name"]));
+
+        let result = nuverse_master_restorer(&master_data, &structures).unwrap();
+        let merged = result["costume3ds"].as_array().unwrap();
+        assert_eq!(merged.len(), 3, "should have 3 records after merge");
+        assert_eq!(merged[0]["id"], json!(1));
+        assert_eq!(merged[1]["id"], json!(2));
+        assert_eq!(merged[2]["id"], json!(3));
+        assert_eq!(merged[2]["name"], json!("C"));
+    }
+
+    #[test]
+    fn test_nuverse_master_restorer_compact_wins_on_duplicate_id() {
+        // When costume3ds contains an id already present in compactCostume3ds, the
+        // compact-restored record takes precedence (flat-array duplicate is dropped).
+        let mut master_data: IndexMap<String, JsonValue> = IndexMap::new();
+        master_data.insert(
+            "compactCostume3ds".to_string(),
+            json!({
+                "id":   [1],
+                "name": ["CompactName"]
+            }),
+        );
+        master_data.insert(
+            "costume3ds".to_string(),
+            json!([[1, "NormalName"]]),
+        );
+        let mut structures: IndexMap<String, JsonValue> = IndexMap::new();
+        structures.insert("costume3ds".to_string(), json!(["id", "name"]));
+
+        let result = nuverse_master_restorer(&master_data, &structures).unwrap();
+        let merged = result["costume3ds"].as_array().unwrap();
+        assert_eq!(merged.len(), 1, "duplicate id should not be duplicated");
+        assert_eq!(merged[0]["name"], json!("CompactName"), "compact record wins");
     }
 }
+

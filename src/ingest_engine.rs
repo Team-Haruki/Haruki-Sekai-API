@@ -1,10 +1,11 @@
 use anyhow::{Context, Result};
+use futures::StreamExt;
 use sea_orm::sea_query::{Alias, Expr, ExprTrait, InsertStatement, Query};
 use sea_orm::{ConnectionTrait, DatabaseConnection, TransactionTrait};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tracing::{info, warn};
 
 // Structure of schema_info.json
@@ -81,46 +82,10 @@ impl IngestionEngine {
         None
     }
 
-    fn to_sea_query_value(val: &Value, col_type: &str) -> sea_orm::sea_query::Value {
-        if col_type == "json.RawMessage" {
-            // Strict enforce JSONB cast
-            return sea_orm::sea_query::Value::Json(Some(Box::new(val.clone())));
-        }
-
-        match val {
-            Value::Null => match col_type {
-                "int64" | "int32" | "int" => sea_orm::sea_query::Value::BigInt(None),
-                "float64" | "float32" | "float" => sea_orm::sea_query::Value::Double(None),
-                "bool" => sea_orm::sea_query::Value::Bool(None),
-                "string" => sea_orm::sea_query::Value::String(None),
-                _ => sea_orm::sea_query::Value::Json(None),
-            },
-            Value::Bool(b) => (*b).into(),
-            Value::Number(n) => {
-                if let Some(i) = n.as_i64() {
-                    i.into()
-                } else if let Some(f) = n.as_f64() {
-                    f.into()
-                } else {
-                    n.to_string().into()
-                }
-            }
-            Value::String(s) => s.as_str().into(),
-            Value::Array(arr) => {
-                let json_str = serde_json::to_string(arr).unwrap_or_default();
-                sea_orm::sea_query::Value::Json(Some(Box::new(
-                    serde_json::from_str(&json_str).unwrap(),
-                )))
-            }
-            Value::Object(obj) => {
-                let json_str = serde_json::to_string(obj).unwrap_or_default();
-                sea_orm::sea_query::Value::Json(Some(Box::new(
-                    serde_json::from_str(&json_str).unwrap(),
-                )))
-            }
-        }
-    }
-
+    /// Ingest all JSON files in `dir_path` for the given `region`, running up to
+    /// `CONCURRENCY` files concurrently. Each file is processed in its own transaction
+    /// (DELETE existing region rows → batch INSERT new rows), so a failure in one file
+    /// does not roll back others.
     pub async fn ingest_master_data(&self, dir_path: &str, region: &str) -> Result<()> {
         let path = Path::new(dir_path);
         if !path.exists() || !path.is_dir() {
@@ -128,20 +93,32 @@ impl IngestionEngine {
             return Ok(());
         }
 
-        let mut entries = fs::read_dir(path)?;
-        let mut failed_tables = Vec::new();
-
-        while let Some(entry) = entries.next() {
-            let entry = entry?;
-            let path = entry.path();
-
-            if path.extension().and_then(|s| s.to_str()) == Some("json") {
-                if let Err(e) = self.ingest_file(&path, region).await {
-                    warn!("Failed to ingest {}: {:#}", path.display(), e);
-                    failed_tables.push(path.display().to_string());
-                }
+        let mut json_files: Vec<PathBuf> = Vec::new();
+        let mut rd = tokio::fs::read_dir(path).await?;
+        while let Some(entry) = rd.next_entry().await? {
+            let p = entry.path();
+            if p.extension().and_then(|s| s.to_str()) == Some("json") {
+                json_files.push(p);
             }
         }
+
+        // Process up to CONCURRENCY files at a time. The connection pool will queue
+        // transactions that exceed its max_connections; no failures from contention.
+        const CONCURRENCY: usize = 8;
+        let failed_tables: Vec<String> = futures::stream::iter(json_files)
+            .map(|p| async move {
+                match self.ingest_file(&p, region).await {
+                    Ok(()) => None,
+                    Err(e) => {
+                        warn!("Failed to ingest {}: {:#}", p.display(), e);
+                        Some(p.display().to_string())
+                    }
+                }
+            })
+            .buffer_unordered(CONCURRENCY)
+            .filter_map(|r| async move { r })
+            .collect()
+            .await;
 
         if !failed_tables.is_empty() {
             warn!("Completed with failures in: {:?}", failed_tables);
@@ -156,158 +133,193 @@ impl IngestionEngine {
         let file_stem = path.file_stem().unwrap().to_str().unwrap();
         let table_name = match self.resolve_table_name(file_stem) {
             Some(t) => t,
-            None => {
-                // Not mapped, skip silently
-                return Ok(());
-            }
+            None => return Ok(()),
         };
 
-        if table_name == "character_profiles"
-            || table_name == "virtual_items"
-            || table_name == "virtualitems"
-        {
+        if matches!(
+            table_name.as_str(),
+            "character_profiles" | "virtual_items" | "virtualitems"
+        ) {
             return Ok(());
         }
 
         let (db_cols, _unique_keys) = self.schema_map.get(&table_name).unwrap();
+        let has_server_region = db_cols.contains_key("server_region");
 
-        let json_content = fs::read_to_string(path)?;
-        let data: Vec<Value> = serde_json::from_str(&json_content)?;
+        // Async file I/O — does not block the runtime.
+        let json_content = tokio::fs::read_to_string(path).await?;
 
-        if data.is_empty() {
+        // JSON parsing and row-value building are CPU-bound; run on the blocking thread pool
+        // so they don't starve other async tasks running concurrently.
+        let db_cols_owned = db_cols.clone();
+        let region_str = region.to_string();
+        let (column_names, rows) = tokio::task::spawn_blocking(move || {
+            build_insert_data(&json_content, &db_cols_owned, &region_str, has_server_region)
+        })
+        .await??;
+
+        if rows.is_empty() {
             return Ok(());
         }
 
-        let mut insert_stmt = InsertStatement::new()
-            .into_table(Alias::new(&table_name))
-            .to_owned();
-
-        struct MappedCol {
-            json_key: String,
-            db_col: String,
-            col_type: String,
-        }
-
-        let mut target_columns: Vec<MappedCol> = Vec::new();
-
-        // Collect ALL unique JSON keys across all records (not just the first one),
-        // because some fields only appear in a subset of records.
-        let mut all_json_keys = Vec::new();
-        let mut seen_keys = HashSet::new();
-        for item in &data {
-            if let Value::Object(obj) = item {
-                for key in obj.keys() {
-                    if seen_keys.insert(key.clone()) {
-                        all_json_keys.push(key.clone());
-                    }
-                }
-            }
-        }
-
-        for json_key in &all_json_keys {
-            let mut normalized_json_key = json_key.to_lowercase().replace("_", "");
-            if normalized_json_key == "id" {
-                normalized_json_key = "gameid".to_string();
-            }
-
-            let mut actual_db_col = None;
-            for db_c in db_cols.keys() {
-                if db_c.replace("_", "") == normalized_json_key {
-                    actual_db_col = Some(db_c.clone());
-                    break;
-                }
-            }
-
-            if let Some(db_col) = actual_db_col {
-                target_columns.push(MappedCol {
-                    json_key: json_key.clone(),
-                    col_type: db_cols.get(&db_col).unwrap().clone(),
-                    db_col,
-                });
-            }
-            // Skip JSON keys that don't match any known DB column
-        }
-
-        let mut column_aliases = Vec::new();
-        for mcol in &target_columns {
-            column_aliases.push(Alias::new(&mcol.db_col));
-        }
-
-        let has_server_region = db_cols.contains_key("server_region");
-        if has_server_region {
-            column_aliases.push(Alias::new("server_region"));
-        }
-
-        insert_stmt.columns(column_aliases);
-
-        let mut rows_to_insert = Vec::new();
-
-        for item in &data {
-            if let Value::Object(obj) = item {
-                let mut row = Vec::new();
-                for mcol in &target_columns {
-                    let val = obj.get(&mcol.json_key).unwrap_or(&Value::Null);
-                    row.push(Self::to_sea_query_value(val, &mcol.col_type).into());
-                }
-                if has_server_region {
-                    row.push(region.into());
-                }
-
-                rows_to_insert.push(row);
-            }
-        }
+        // Everything below is I/O-bound DB work — stays on the async executor.
         let txn = self
             .db
             .begin()
             .await
             .context("Failed to begin transaction")?;
+
         if has_server_region {
-            let mut delete_stmt = Query::delete();
-            delete_stmt
-                .from_table(Alias::new(&table_name))
+            let mut del = Query::delete();
+            del.from_table(Alias::new(&table_name))
                 .and_where(Expr::col(Alias::new("server_region")).eq(region));
-            txn.execute(&delete_stmt)
+            txn.execute(&del)
                 .await
                 .context("Failed to delete existing region data")?;
         } else {
-            let mut delete_stmt = Query::delete();
-            delete_stmt.from_table(Alias::new(&table_name));
-            txn.execute(&delete_stmt)
+            let mut del = Query::delete();
+            del.from_table(Alias::new(&table_name));
+            txn.execute(&del)
                 .await
                 .context("Failed to clear table")?;
         }
 
-        let mut current_chunk = Vec::new();
+        let mut insert_stmt = InsertStatement::new()
+            .into_table(Alias::new(&table_name))
+            .to_owned();
+        insert_stmt.columns(column_names.iter().map(|n| Alias::new(n.as_str())));
 
-        for row in rows_to_insert {
-            current_chunk.push(row);
-
-            if current_chunk.len() >= 1000 {
-                let mut chunk_stmt = insert_stmt.clone();
-                for r in current_chunk.drain(..) {
-                    chunk_stmt.values_panic(r);
-                }
-
-                txn.execute(&chunk_stmt)
-                    .await
-                    .context("Failed to execute batch insert")?;
+        const BATCH_SIZE: usize = 5_000;
+        let mut rows_iter = rows.into_iter();
+        loop {
+            let chunk: Vec<Vec<sea_orm::sea_query::SimpleExpr>> =
+                rows_iter.by_ref().take(BATCH_SIZE).collect();
+            if chunk.is_empty() {
+                break;
             }
-        }
-
-        if !current_chunk.is_empty() {
-            let mut chunk_stmt = insert_stmt.clone();
-            for r in current_chunk.drain(..) {
-                chunk_stmt.values_panic(r);
+            let mut batch = insert_stmt.clone();
+            for row in chunk {
+                batch.values_panic(row);
             }
-
-            txn.execute(&chunk_stmt)
+            txn.execute(&batch)
                 .await
                 .context("Failed to execute batch insert")?;
         }
 
         txn.commit().await.context("Failed to commit transaction")?;
-
         Ok(())
+    }
+}
+
+/// CPU-bound work extracted for `spawn_blocking`: parse JSON, map keys to DB columns,
+/// and build typed row values. Returns (ordered column names, rows of SimpleExpr).
+fn build_insert_data(
+    json_content: &str,
+    db_cols: &HashMap<String, String>,
+    region: &str,
+    has_server_region: bool,
+) -> Result<(Vec<String>, Vec<Vec<sea_orm::sea_query::SimpleExpr>>)> {
+    let data: Vec<Value> = serde_json::from_str(json_content)?;
+    if data.is_empty() {
+        return Ok((Vec::new(), Vec::new()));
+    }
+
+    // Collect ALL unique JSON keys across all records (not just the first one),
+    // because some fields only appear in a subset of records.
+    let mut all_json_keys: Vec<String> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    for item in &data {
+        if let Value::Object(obj) = item {
+            for key in obj.keys() {
+                if seen.insert(key.clone()) {
+                    all_json_keys.push(key.clone());
+                }
+            }
+        }
+    }
+
+    struct MappedCol {
+        json_key: String,
+        db_col: String,
+        col_type: String,
+    }
+
+    let mut target_columns: Vec<MappedCol> = Vec::new();
+    for json_key in &all_json_keys {
+        let mut norm = json_key.to_lowercase().replace("_", "");
+        if norm == "id" {
+            norm = "gameid".to_string();
+        }
+        if let Some(db_col) = db_cols.keys().find(|k| k.replace("_", "") == norm) {
+            target_columns.push(MappedCol {
+                json_key: json_key.clone(),
+                col_type: db_cols[db_col].clone(),
+                db_col: db_col.clone(),
+            });
+        }
+        // Skip JSON keys that don't match any known DB column
+    }
+
+    let mut column_names: Vec<String> = target_columns.iter().map(|c| c.db_col.clone()).collect();
+    if has_server_region {
+        column_names.push("server_region".to_string());
+    }
+
+    let mut rows: Vec<Vec<sea_orm::sea_query::SimpleExpr>> = Vec::with_capacity(data.len());
+    for item in &data {
+        if let Value::Object(obj) = item {
+            let mut row: Vec<sea_orm::sea_query::SimpleExpr> =
+                Vec::with_capacity(column_names.len());
+            for mcol in &target_columns {
+                let val = obj.get(&mcol.json_key).unwrap_or(&Value::Null);
+                row.push(json_to_sea_value(val, &mcol.col_type).into());
+            }
+            if has_server_region {
+                let region_val: sea_orm::sea_query::Value = region.into();
+                row.push(region_val.into());
+            }
+            rows.push(row);
+        }
+    }
+
+    Ok((column_names, rows))
+}
+
+fn json_to_sea_value(val: &Value, col_type: &str) -> sea_orm::sea_query::Value {
+    if col_type == "json.RawMessage" {
+        return sea_orm::sea_query::Value::Json(Some(Box::new(val.clone())));
+    }
+    match val {
+        Value::Null => match col_type {
+            "int64" | "int32" | "int" => sea_orm::sea_query::Value::BigInt(None),
+            "float64" | "float32" | "float" => sea_orm::sea_query::Value::Double(None),
+            "bool" => sea_orm::sea_query::Value::Bool(None),
+            "string" => sea_orm::sea_query::Value::String(None),
+            _ => sea_orm::sea_query::Value::Json(None),
+        },
+        Value::Bool(b) => (*b).into(),
+        Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                i.into()
+            } else if let Some(f) = n.as_f64() {
+                f.into()
+            } else {
+                n.to_string().into()
+            }
+        }
+        Value::String(s) => s.as_str().into(),
+        Value::Array(arr) => {
+            let json_str = serde_json::to_string(arr).unwrap_or_default();
+            sea_orm::sea_query::Value::Json(Some(Box::new(
+                serde_json::from_str(&json_str).unwrap(),
+            )))
+        }
+        Value::Object(obj) => {
+            let json_str = serde_json::to_string(obj).unwrap_or_default();
+            sea_orm::sea_query::Value::Json(Some(Box::new(
+                serde_json::from_str(&json_str).unwrap(),
+            )))
+        }
     }
 }
 
