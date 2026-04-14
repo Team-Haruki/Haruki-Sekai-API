@@ -189,11 +189,13 @@ impl IngestionEngine {
             .to_owned();
         insert_stmt.columns(column_names.iter().map(|n| Alias::new(n.as_str())));
 
-        const BATCH_SIZE: usize = 5_000;
+        // PostgreSQL limits bind parameters to 65535 per query.
+        // Divide by column count (minimum 1) to stay safely under the limit.
+        let batch_size = (65_535 / column_names.len().max(1)).min(5_000).max(1);
         let mut rows_iter = rows.into_iter();
         loop {
             let chunk: Vec<Vec<sea_orm::sea_query::SimpleExpr>> =
-                rows_iter.by_ref().take(BATCH_SIZE).collect();
+                rows_iter.by_ref().take(batch_size).collect();
             if chunk.is_empty() {
                 break;
             }
