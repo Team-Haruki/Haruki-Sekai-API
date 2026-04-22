@@ -25,6 +25,27 @@
         "power3AllMatchBonusRate",
         "sentence"
     ],
+    "billingShopItems": [
+        "id",
+        "seq",
+        "billingShopItemType",
+        "billingProductGroupId",
+        "saleType",
+        "name",
+        "description",
+        "billableLimitType",
+        "billableLimitValue",
+        "billableLimitResetIntervalType",
+        "billableLimitResetIntervalValue",
+        "assetbundleName",
+        "resourceBoxId",
+        "bonusResourceBoxId",
+        "label",
+        "startAt",
+        "endAt",
+        "purchaseOption",
+        "billingShopTabChildId"
+    ],
     "bondsHonors": [
         "id",
         "seq",
@@ -178,6 +199,41 @@
         "gameCharacterUnitId4",
         "gameCharacterUnitId5"
     ],
+    "costume3dFittings": [
+        "billingShopItemId",
+        "characterId",
+        "hairCostume3dId"
+    ],
+    "costume3dModelDefaultHairs": [
+        "id",
+        "headCostume3dId",
+        "hairCostume3dId",
+        "unit"
+    ],
+    "costume3dModelNotAvailablePatterns": [
+        "id",
+        "headCostume3dId",
+        "hairCostume3dId",
+        "unit"
+    ],
+    "costume3ds": [
+        "id",
+        "seq",
+        "costume3dGroupId",
+        "costume3dType",
+        "name",
+        "partType",
+        "colorId",
+        "colorName",
+        "characterId",
+        "costume3dRarity",
+        "howToObtain",
+        "assetbundleName",
+        "designer",
+        "publishedAt",
+        "archiveDisplayType",
+        "archivePublishedAt"
+    ],
     "episodeCharacters": [
         "id",
         "seq",
@@ -218,6 +274,34 @@
         ],
         "assetbundleName"
     ],
+    "eventStories": [
+        "id",
+        "eventId",
+        "outline",
+        "bannerGameCharacterUnitId",
+        "assetbundleName",
+        [
+            "eventStoryEpisodes",
+            [
+                "id",
+                "eventStoryId",
+                "gameCharacterId",
+                "episodeNo",
+                "title",
+                "assetbundleName",
+                "scenarioId",
+                "releaseConditionId",
+                [
+                    "episodeRewards",
+                    [
+                        "startAt",
+                        "endAt",
+                        "resourceBoxId"
+                    ]
+                ]
+            ]
+        ]
+    ],
     "events": [
         "id",
         "eventType",
@@ -248,34 +332,6 @@
             ]
         ],
         "distributionEndAt"
-    ],
-    "eventStories": [
-        "id",
-        "eventId",
-        "outline",
-        "bannerGameCharacterUnitId",
-        "assetbundleName",
-        [
-            "eventStoryEpisodes",
-            [
-                "id",
-                "eventStoryId",
-                "gameCharacterId",
-                "episodeNo",
-                "title",
-                "assetbundleName",
-                "scenarioId",
-                "releaseConditionId",
-                [
-                    "episodeRewards",
-                    [
-                        "startAt",
-                        "endAt",
-                        "resourceBoxId"
-                    ]
-                ]
-            ]
-        ]
     ],
     "gachaCeilExchangeSummaries": [
         "id",
@@ -415,6 +471,21 @@
             ]
         ]
     ],
+    "jewelShowDialogues": [
+        "id",
+        "seq",
+        "name",
+        "assetBundleName",
+        "startAt",
+        "endAt",
+        [
+            "behaviors",
+            [
+                "seq",
+                "billingShopItemId"
+            ]
+        ]
+    ],
     "liveMissions": [
         "id",
         "liveMissionPeriodId",
@@ -482,6 +553,33 @@
         "releaseConditionId",
         "totalNoteCount"
     ],
+    "musicTags": [
+        "musicId",
+        "musicTag"
+    ],
+    "musicVocals": [
+        "id",
+        "musicId",
+        "musicVocalType",
+        "seq",
+        "releaseConditionId",
+        "caption",
+        [
+            "characters",
+            [
+                "id",
+                "musicId",
+                "musicVocalId",
+                "characterType",
+                "characterId",
+                "seq"
+            ]
+        ],
+        "assetbundleName",
+        "specialSeasonId",
+        "archiveDisplayType",
+        "archivePublishedAt"
+    ],
     "musics": [
         "id",
         "seq",
@@ -519,35 +617,23 @@
         "isNewlyWrittenMusic",
         "isFullLength"
     ],
-    "musicTags": [
-        "musicId",
-        "musicTag"
-    ],
-    "musicVocals": [
-        "id",
-        "musicId",
-        "musicVocalType",
-        "seq",
-        "releaseConditionId",
-        "caption",
-        [
-            "characters",
-            [
-                "id",
-                "musicId",
-                "musicVocalId",
-                "characterType",
-                "characterId",
-                "seq"
-            ]
-        ],
-        "assetbundleName",
-        "specialSeasonId",
-        "archiveDisplayType",
-        "archivePublishedAt"
-    ],
     "ngWords": [
         "word"
+    ],
+    "ongoingMissions": [
+        "id",
+        "ongoingMissionType",
+        "seq",
+        "sentence",
+        "requirement",
+        [
+            "rewards",
+            [
+                "resourceBoxId"
+            ]
+        ],
+        "startAt",
+        "endAt"
     ],
     "releaseConditions": [
         "id",
@@ -566,6 +652,89 @@
         "requirement",
         "sentence",
         "resourceBoxId"
+    ],
+    "sekaiEchoCardMissions": [
+        "cardGroup",
+        "sekaiEchoCardMissionType",
+        "seq",
+        "sentence",
+        "keyMission",
+        "resourceBoxId"
+    ],
+    "sekaiEchoHonorMissions": [
+        "sekaiLevel",
+        "sekaiEchoHonorMissionType",
+        "seq",
+        "requirement",
+        "sentence"
+    ],
+    "sekaiEchoHonors": [
+        "eventId",
+        "sekaiLevel",
+        "honorId"
+    ],
+    "sekaiEchoMissions": [
+        "id",
+        "sekaiEchoMissionType",
+        "seq",
+        "sentence",
+        "requirement",
+        [
+            "rewards",
+            [
+                "resourceBoxId"
+            ]
+        ]
+    ],
+    "sekaiEchoPointExchanges": [
+        "resourceType",
+        "resourceId",
+        "quantity",
+        "echoPoint",
+        "seq"
+    ],
+    "sekaiEchoStories": [
+        "id",
+        "groupId",
+        "storyType",
+        "eventId",
+        "honorGroupId",
+        "gameCharacterId",
+        "characterEventSeq",
+        "musicId",
+        "stampId",
+        "startAt",
+        "unit",
+        "assetBundleName",
+        "showGameCharacterId"
+    ],
+    "sekaiEchoStoryGroups": [
+        "groupId",
+        "groupName"
+    ],
+    "sekaiEchoUnitAbs": [
+        "unit",
+        "seq",
+        "assetBundleName",
+        "pvAssetBundleName",
+        "picAssetBundleName"
+    ],
+    "sekaiEchoUnitCharacters": [
+        "gameCharacterId",
+        "unit",
+        "seq",
+        "assetBundleName"
+    ],
+    "shiningExchanges": [
+        "id",
+        "shiningExchangeType",
+        "seq",
+        "resourceBoxId",
+        "cost",
+        "refreshCycle",
+        "exchangeLimit",
+        "startAt",
+        "endAt"
     ],
     "shopItems": [
         "id",
@@ -761,156 +930,5 @@
     "wordings": [
         "wordingKey",
         "value"
-    ],
-    "sekaiEchoStories": [
-        "id",
-        "groupId",
-        "storyType",
-        "eventId",
-        "honorGroupId",
-        "gameCharacterId",
-        "characterEventSeq",
-        "musicId",
-        "stampId",
-        "startAt",
-        "unit",
-        "assetBundleName",
-        "showGameCharacterId"
-    ],
-    "sekaiEchoStoryGroups": [
-        "groupId",
-        "groupName"
-    ],
-    "sekaiEchoUnitCharacters": [
-        "gameCharacterId",
-        "unit",
-        "seq",
-        "assetBundleName"
-    ],
-    "sekaiEchoUnitAbs": [
-        "unit",
-        "seq",
-        "assetBundleName",
-        "pvAssetBundleName",
-        "picAssetBundleName"
-    ],
-    "sekaiEchoMissions": [
-        "id",
-        "sekaiEchoMissionType",
-        "seq",
-        "sentence",
-        "requirement",
-        [
-            "rewards",
-            [
-                "resourceBoxId"
-            ]
-        ]
-    ],
-    "sekaiEchoCardMissions": [
-        "cardGroup",
-        "sekaiEchoCardMissionType",
-        "seq",
-        "sentence",
-        "keyMission",
-        "resourceBoxId"
-    ],
-    "sekaiEchoHonors": [
-        "eventId",
-        "sekaiLevel",
-        "honorId"
-    ],
-    "sekaiEchoHonorMissions": [
-        "sekaiLevel",
-        "sekaiEchoHonorMissionType",
-        "seq",
-        "requirement",
-        "sentence"
-    ],
-    "sekaiEchoPointExchanges": [
-        "resourceType",
-        "resourceId",
-        "quantity",
-        "echoPoint",
-        "seq"
-    ],
-    "shiningExchanges": [
-        "id",
-        "shiningExchangeType",
-        "seq",
-        "resourceBoxId",
-        "cost",
-        "refreshCycle",
-        "exchangeLimit",
-        "startAt",
-        "endAt"
-    ],
-    "billingShopItems": [
-        "id",
-        "seq",
-        "billingShopItemType",
-        "billingProductGroupId",
-        "saleType",
-        "name",
-        "description",
-        "billableLimitType",
-        "billableLimitValue",
-        "billableLimitResetIntervalType",
-        "billableLimitResetIntervalValue",
-        "assetbundleName",
-        "resourceBoxId",
-        "bonusResourceBoxId",
-        "label",
-        "startAt",
-        "endAt",
-        "purchaseOption",
-        "billingShopTabChildId"
-    ],
-    "ongoingMissions": [
-        "id",
-        "ongoingMissionType",
-        "seq",
-        "sentence",
-        "requirement",
-        [
-            "rewards",
-            [
-                "resourceBoxId"
-            ]
-        ],
-        "startAt",
-        "endAt"
-    ],
-    "jewelShowDialogues": [
-        "id",
-        "seq",
-        "name",
-        "assetBundleName",
-        "startAt",
-        "endAt",
-        [
-            "behaviors",
-            [
-                "seq",
-                "billingShopItemId"
-            ]
-        ]
-    ],
-    "costume3dFittings": [
-        "billingShopItemId",
-        "characterId",
-        "hairCostume3dId"
-    ],
-    "costume3dModelDefaultHairs": [
-        "id",
-        "headCostume3dId",
-        "hairCostume3dId",
-        "unit"
-    ],
-    "costume3dModelNotAvailablePatterns": [
-        "id",
-        "headCostume3dId",
-        "hairCostume3dId",
-        "unit"
     ]
 }
