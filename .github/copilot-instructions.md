@@ -110,9 +110,41 @@ Use `ServerRegion::is_cp_server()` to branch on protocol differences.
 - Do not manually edit model files; regenerate from source data
 
 ### Git Commits
-- Format: `[Type] Description`
-- Types: `[Feat]`, `[Fix]`, `[Chore]`, `[WIP]`
-- Examples: `[Feat] Add master database support`, `[Fix] Adapt new sekai asset updater`
+
+All commits **must** follow:
+
+```
+[Type] Short description starting with capital letter
+```
+
+| Type      | Usage                                                 |
+|-----------|-------------------------------------------------------|
+| `[Feat]`  | New feature or capability                             |
+| `[Fix]`   | Bug fix                                               |
+| `[Chore]` | Maintenance, refactoring, dependency or build changes |
+| `[Docs]`  | Documentation-only changes                            |
+
+Rules:
+- Description starts with a **capital letter**
+- Imperative mood (`Add ...`, not `Added ...`)
+- No trailing period
+- Keep subject <= ~70 chars
+
+Examples:
+```
+[Feat] Add toolbox live snapshot provider
+[Fix] Move user_snapshot config under pjsk_render
+[Chore] Rename config file to haruki-cloud.yaml
+[Docs] Update known-bugs.md with snapshot fix
+```
+
+### Agent Signature
+
+When an AI agent creates a commit, it **must** include a `Co-Authored-By` trailer identifying the agent. This ensures traceability of AI-generated changes.
+
+```
+Co-Authored-By: <Agent Name> <noreply@example.com>
+```
 
 ## Key Configuration
 
