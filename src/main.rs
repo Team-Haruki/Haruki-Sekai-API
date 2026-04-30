@@ -3,7 +3,6 @@ use std::sync::Arc;
 
 use tokio::signal;
 use tracing::{error, info, warn};
-use tracing_subscriber::EnvFilter;
 
 use haruki_sekai_api::api::create_router;
 use haruki_sekai_api::client::SekaiClient;
@@ -14,29 +13,11 @@ use haruki_sekai_api::updater;
 
 use haruki_sekai_api::AppState;
 
-struct LocalTimer;
-
-impl tracing_subscriber::fmt::time::FormatTime for LocalTimer {
-    fn format_time(&self, w: &mut tracing_subscriber::fmt::format::Writer<'_>) -> std::fmt::Result {
-        write!(
-            w,
-            "{}",
-            chrono::Local::now().format("%Y-%m-%dT%H:%M:%S%.3f%z")
-        )
-    }
-}
+mod logging;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_timer(LocalTimer)
-        .with_target(true)
-        .with_thread_ids(false)
-        .with_file(false)
-        .with_line_number(false)
-        .init();
+    logging::init();
 
     info!(
         "========================= Haruki Sekai API v{} =========================",

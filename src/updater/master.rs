@@ -14,6 +14,8 @@ use crate::config::{AssetUpdaterInfo, GitConfig, ServerRegion};
 
 const ASSET_UPDATER_CONFLICT_RETRY_DELAY_SECS: u64 = 60;
 const ASSET_UPDATER_MAX_CONFLICT_RETRIES: u8 = 10;
+const CP_MASTER_SPLIT_MAX_RETRIES: u8 = 3;
+const CP_MASTER_SPLIT_RETRY_DELAY_SECS: u64 = 2;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct AssetUpdaterPayload {
@@ -338,7 +340,6 @@ impl MasterUpdater {
         tokio::fs::create_dir_all(master_dir).await?;
 
         if self.region.is_cp_server() {
-            use futures::stream::{self, StreamExt};
             let paths: Vec<String> = login
                 .suite_master_split_path
                 .iter()
@@ -350,26 +351,9 @@ impl MasterUpdater {
                     }
                 })
                 .collect();
-            let results: Vec<Result<(IndexMap<String, JsonValue>, u16), crate::error::AppError>> =
-                stream::iter(paths)
-                    .map(|api_path| {
-                        let client = self.client.clone();
-                        let session = session.clone();
-                        async move {
-                            match client.get(&session, &api_path, None).await {
-                                Ok(resp) => client.handle_response_ordered(resp).await,
-                                Err(e) => Err(e),
-                            }
-                        }
-                    })
-                    .buffer_unordered(3)
-                    .collect()
-                    .await;
-            for result in results {
-                match result {
-                    Ok((data, _status)) => self.save_master_files(&data, master_dir).await?,
-                    Err(e) => return Err(e),
-                }
+            for api_path in paths {
+                let data = self.download_cp_master_split(session, &api_path).await?;
+                self.save_master_files(&data, master_dir).await?;
             }
         } else {
             let url = format!(
@@ -425,6 +409,97 @@ impl MasterUpdater {
             self.region.as_str().to_uppercase()
         );
         Ok(())
+    }
+
+    async fn download_cp_master_split(
+        &self,
+        session: &crate::client::AccountSession,
+        api_path: &str,
+    ) -> Result<IndexMap<String, JsonValue>, crate::error::AppError> {
+        for attempt in 1..=CP_MASTER_SPLIT_MAX_RETRIES {
+            let resp = match self.client.get(session, api_path, None).await {
+                Ok(resp) => resp,
+                Err(e) => {
+                    if matches!(e, crate::error::AppError::NetworkError(_))
+                        && attempt < CP_MASTER_SPLIT_MAX_RETRIES
+                    {
+                        warn!(
+                            "{} Failed to request master split {} (attempt {}/{}): {}; retrying in {}s",
+                            self.region.as_str().to_uppercase(),
+                            api_path,
+                            attempt,
+                            CP_MASTER_SPLIT_MAX_RETRIES,
+                            e,
+                            CP_MASTER_SPLIT_RETRY_DELAY_SECS
+                        );
+                        tokio::time::sleep(Duration::from_secs(CP_MASTER_SPLIT_RETRY_DELAY_SECS))
+                            .await;
+                        continue;
+                    }
+                    warn!(
+                        "{} Failed to request master split {}: {}",
+                        self.region.as_str().to_uppercase(),
+                        api_path,
+                        e
+                    );
+                    return Err(e);
+                }
+            };
+
+            let status = resp.status();
+            let content_type = resp
+                .headers()
+                .get("content-type")
+                .and_then(|h| h.to_str().ok())
+                .unwrap_or("")
+                .to_string();
+            let content_encoding = resp
+                .headers()
+                .get("content-encoding")
+                .and_then(|h| h.to_str().ok())
+                .unwrap_or("")
+                .to_string();
+
+            match self.client.handle_response_ordered(resp).await {
+                Ok((data, _status)) => return Ok(data),
+                Err(e) => {
+                    if matches!(e, crate::error::AppError::NetworkError(_))
+                        && attempt < CP_MASTER_SPLIT_MAX_RETRIES
+                    {
+                        warn!(
+                            "{} Failed to read master split {} (attempt {}/{}; status={}, content-type={}, content-encoding={}): {}; retrying in {}s",
+                            self.region.as_str().to_uppercase(),
+                            api_path,
+                            attempt,
+                            CP_MASTER_SPLIT_MAX_RETRIES,
+                            status,
+                            content_type,
+                            content_encoding,
+                            e,
+                            CP_MASTER_SPLIT_RETRY_DELAY_SECS
+                        );
+                        tokio::time::sleep(Duration::from_secs(CP_MASTER_SPLIT_RETRY_DELAY_SECS))
+                            .await;
+                        continue;
+                    }
+                    warn!(
+                        "{} Failed to process master split {} (status={}, content-type={}, content-encoding={}): {}",
+                        self.region.as_str().to_uppercase(),
+                        api_path,
+                        status,
+                        content_type,
+                        content_encoding,
+                        e
+                    );
+                    return Err(e);
+                }
+            }
+        }
+
+        Err(crate::error::AppError::NetworkError(format!(
+            "Failed to download master split {} after {} retries",
+            api_path, CP_MASTER_SPLIT_MAX_RETRIES
+        )))
     }
 
     async fn save_master_files(
