@@ -545,11 +545,22 @@ impl SekaiClient {
             .and_then(|h| h.to_str().ok())
             .unwrap_or("")
             .to_lowercase();
+        let content_encoding = resp
+            .headers()
+            .get("content-encoding")
+            .and_then(|h| h.to_str().ok())
+            .unwrap_or("")
+            .to_string();
 
         let body = resp
             .bytes()
             .await
-            .map_err(|e| AppError::NetworkError(e.to_string()))?;
+            .map_err(|e| {
+                AppError::NetworkError(format!(
+                    "failed to read response body (status={}, content-type={}, content-encoding={}): {}",
+                    status, content_type, content_encoding, e
+                ))
+            })?;
 
         if content_type.contains("octet-stream") || content_type.contains("binary") {
             let sekai_status = SekaiHttpStatus::from_code(status)?;
@@ -596,10 +607,21 @@ impl SekaiClient {
             .and_then(|h| h.to_str().ok())
             .unwrap_or("")
             .to_lowercase();
+        let content_encoding = resp
+            .headers()
+            .get("content-encoding")
+            .and_then(|h| h.to_str().ok())
+            .unwrap_or("")
+            .to_string();
         let body = resp
             .bytes()
             .await
-            .map_err(|e| AppError::NetworkError(e.to_string()))?;
+            .map_err(|e| {
+                AppError::NetworkError(format!(
+                    "failed to read response body (status={}, content-type={}, content-encoding={}): {}",
+                    status, content_type, content_encoding, e
+                ))
+            })?;
         if content_type.contains("octet-stream") || content_type.contains("binary") {
             let sekai_status = SekaiHttpStatus::from_code(status)?;
             match sekai_status {
