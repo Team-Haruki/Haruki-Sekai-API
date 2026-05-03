@@ -13,15 +13,25 @@ fn unique_key_override(table_name: &str) -> Option<serde_json::Value> {
         "cardcostume3d" => Some(vec![vec!["costume3_d_id", "server_region"]]),
         "cardraritie" => Some(vec![vec!["card_rarity_type", "server_region"]]),
         "eventmusic" => Some(vec![vec!["event_id", "music_id", "server_region"]]),
-        "masterlesson" => Some(vec![vec!["card_rarity_type", "master_rank", "server_region"]]),
-        "worldbloomdifferentattributebonuse" => Some(vec![vec!["attribute_count", "server_region"]]),
+        "masterlesson" => Some(vec![vec![
+            "card_rarity_type",
+            "master_rank",
+            "server_region",
+        ]]),
+        "worldbloomdifferentattributebonuse" => {
+            Some(vec![vec!["attribute_count", "server_region"]])
+        }
         "worldbloomsupportdeckbonuse" => Some(vec![vec!["card_rarity_type", "server_region"]]),
         // Tables where id exists in model but is missing/non-unique in JSON data
         "eventcard" => Some(vec![vec!["card_id", "event_id", "server_region"]]),
         "level" => Some(vec![vec!["level_type", "level", "server_region"]]),
         "musictag" => Some(vec![vec!["music_id", "music_tag", "server_region"]]),
         "charactermissionv2parametergroup" => Some(vec![vec!["game_id", "seq", "server_region"]]),
-        "resourceboxe" => Some(vec![vec!["resource_box_purpose", "game_id", "server_region"]]),
+        "resourceboxe" => Some(vec![vec![
+            "resource_box_purpose",
+            "game_id",
+            "server_region",
+        ]]),
         // ngwords: data has genuine duplicates, no unique key possible
         "ngword" => Some(vec![]),
         _ => None,
@@ -45,8 +55,8 @@ fn extract_root_type(file_content: &str) -> Option<(String, String)> {
 
 /// Derives the EntGo schema name (PascalCase singular) from the root struct name.
 fn derive_schema_name(root_struct: &str) -> String {
-    if root_struct.ends_with("Element") {
-        root_struct[..root_struct.len() - 7].to_string()
+    if let Some(schema_name) = root_struct.strip_suffix("Element") {
+        schema_name.to_string()
     } else {
         root_struct.to_string()
     }
@@ -249,7 +259,10 @@ fn extract_simple_enums(file_content: &str) -> std::collections::HashSet<String>
 
 /// Maps a Rust type to an EntGo-compatible type string.
 /// `simple_enums` is the set of enum names that serialize as plain strings.
-fn rust_type_to_ent_type(rust_type: &str, simple_enums: &std::collections::HashSet<String>) -> String {
+fn rust_type_to_ent_type(
+    rust_type: &str,
+    simple_enums: &std::collections::HashSet<String>,
+) -> String {
     let inner = if rust_type.starts_with("Option<") && rust_type.ends_with('>') {
         &rust_type[7..rust_type.len() - 1]
     } else {
@@ -401,7 +414,8 @@ fn main() {
 
         // Generate EntGo schema file with explicit table name annotation
         let schema_name = derive_schema_name(&root_struct);
-        let go_code = generate_ent_go_schema(&schema_name, &table_name_plural, &columns, &unique_keys);
+        let go_code =
+            generate_ent_go_schema(&schema_name, &table_name_plural, &columns, &unique_keys);
         let go_file = ent_path.join(format!("{}.go", table_name_plural));
         fs::write(&go_file, &go_code).expect("Failed to write Go schema file");
         go_files_written += 1;
@@ -424,5 +438,8 @@ fn main() {
     println!("Processed: {}", processed);
     println!("Skipped:   {}", skipped);
     println!("Schema JSON: {}", schema_output);
-    println!("Go schemas:  {} files in {}", go_files_written, ent_output_dir);
+    println!(
+        "Go schemas:  {} files in {}",
+        go_files_written, ent_output_dir
+    );
 }

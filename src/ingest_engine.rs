@@ -17,9 +17,13 @@ struct TableInfo {
     unique_keys: Option<Vec<Vec<String>>>,
 }
 
+type ColumnTypeMap = HashMap<String, String>;
+type UniqueKeys = Vec<Vec<String>>;
+type SchemaMap = HashMap<String, (ColumnTypeMap, UniqueKeys)>;
+
 pub struct IngestionEngine {
     db: DatabaseConnection,
-    schema_map: HashMap<String, (HashMap<String, String>, Vec<Vec<String>>)>, // table -> (column -> type, unique_keys)
+    schema_map: SchemaMap, // table -> (column -> type, unique_keys)
     file_to_table: HashMap<String, String>,
 }
 
@@ -154,7 +158,12 @@ impl IngestionEngine {
         let db_cols_owned = db_cols.clone();
         let region_str = region.to_string();
         let (column_names, rows) = tokio::task::spawn_blocking(move || {
-            build_insert_data(&json_content, &db_cols_owned, &region_str, has_server_region)
+            build_insert_data(
+                &json_content,
+                &db_cols_owned,
+                &region_str,
+                has_server_region,
+            )
         })
         .await??;
 
@@ -179,9 +188,7 @@ impl IngestionEngine {
         } else {
             let mut del = Query::delete();
             del.from_table(Alias::new(&table_name));
-            txn.execute(&del)
-                .await
-                .context("Failed to clear table")?;
+            txn.execute(&del).await.context("Failed to clear table")?;
         }
 
         let mut insert_stmt = InsertStatement::new()
@@ -191,7 +198,7 @@ impl IngestionEngine {
 
         // PostgreSQL limits bind parameters to 65535 per query.
         // Divide by column count (minimum 1) to stay safely under the limit.
-        let batch_size = (65_535 / column_names.len().max(1)).min(5_000).max(1);
+        let batch_size = (65_535 / column_names.len().max(1)).clamp(1, 5_000);
         let mut rows_iter = rows.into_iter();
         loop {
             let chunk: Vec<Vec<sea_orm::sea_query::SimpleExpr>> =
