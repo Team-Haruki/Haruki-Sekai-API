@@ -1,4 +1,4 @@
-FROM rust:1.92-alpine AS builder
+FROM rust:1.95-alpine AS builder
 RUN apk add --no-cache musl-dev openssl-dev openssl-libs-static cmake make perl
 WORKDIR /app
 COPY . .
