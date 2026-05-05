@@ -1,5 +1,5 @@
-use aes::cipher::{BlockDecryptMut, BlockEncryptMut, KeyIvInit};
 use aes::Aes128;
+use cbc::cipher::{block_padding::NoPadding, BlockModeDecrypt, BlockModeEncrypt, KeyIvInit};
 use indexmap::IndexMap;
 use rmp_serde as rmps;
 use serde::{Deserialize, Serialize};
@@ -48,8 +48,7 @@ impl SekaiCryptor {
         let msgpack_data = rmps::to_vec(data)?;
         let padded = pkcs7_pad(&msgpack_data, 16);
         let encryptor = Aes128CbcEnc::new(&self.key.into(), &self.iv.into());
-        let encrypted =
-            encryptor.encrypt_padded_vec_mut::<aes::cipher::block_padding::NoPadding>(&padded);
+        let encrypted = encryptor.encrypt_padded_vec::<NoPadding>(&padded);
         Ok(encrypted)
     }
 
@@ -59,8 +58,7 @@ impl SekaiCryptor {
         }
         let padded = pkcs7_pad(data, 16);
         let encryptor = Aes128CbcEnc::new(&self.key.into(), &self.iv.into());
-        let encrypted =
-            encryptor.encrypt_padded_vec_mut::<aes::cipher::block_padding::NoPadding>(&padded);
+        let encrypted = encryptor.encrypt_padded_vec::<NoPadding>(&padded);
         Ok(encrypted)
     }
 
@@ -76,7 +74,7 @@ impl SekaiCryptor {
         let decryptor = Aes128CbcDec::new(&self.key.into(), &self.iv.into());
         let mut buf = data.to_vec();
         let decrypted = decryptor
-            .decrypt_padded_mut::<aes::cipher::block_padding::NoPadding>(&mut buf)
+            .decrypt_padded::<NoPadding>(&mut buf)
             .map_err(|e| AppError::CryptoError(format!("Decryption failed: {}", e)))?;
         let unpadded = pkcs7_unpad(decrypted)?;
         let result: T = rmps::from_slice(unpadded)?;
@@ -98,7 +96,7 @@ impl SekaiCryptor {
         let decryptor = Aes128CbcDec::new(&self.key.into(), &self.iv.into());
         let mut buf = data.to_vec();
         let decrypted = decryptor
-            .decrypt_padded_mut::<aes::cipher::block_padding::NoPadding>(&mut buf)
+            .decrypt_padded::<NoPadding>(&mut buf)
             .map_err(|e| AppError::CryptoError(format!("Decryption failed: {}", e)))?;
         let unpadded = pkcs7_unpad(decrypted)?;
         let result = msgpack_to_ordered_value(unpadded)?;
@@ -125,7 +123,7 @@ impl SekaiCryptor {
         let decryptor = Aes128CbcDec::new(&self.key.into(), &self.iv.into());
         let mut buf = data.to_vec();
         let decrypted = decryptor
-            .decrypt_padded_mut::<aes::cipher::block_padding::NoPadding>(&mut buf)
+            .decrypt_padded::<NoPadding>(&mut buf)
             .map_err(|e| AppError::CryptoError(format!("Decryption failed: {}", e)))?;
 
         let unpadded = pkcs7_unpad(decrypted)?;
