@@ -29,7 +29,7 @@ redis = { version = "1.0.4", features = ["tokio-comp", "connection-manager"] }
 tokio-cron-scheduler = "0.15.1"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.22", features = ["env-filter", "json"] }
-uuid = { version = "1.21.0", features = ["v4"] }
+uuid = { version = "1.23.1", features = ["v4"] }
 thiserror = "2.0.18"
 anyhow = "1.0.102"
 parking_lot = "0.12.5"
