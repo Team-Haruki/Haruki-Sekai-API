@@ -1,18 +1,20 @@
+use std::fmt::Write as _;
 use std::path::Path;
+use std::process::{Command, Output};
 
-use git2::{
-    Cred, DiffOptions, ErrorCode, IndexAddOption, ProxyOptions, PushOptions, RemoteCallbacks,
-    Repository, Signature, StatusOptions,
-};
 use tracing::info;
 
-use crate::config::GitConfig;
+use crate::config::{GitConfig, GitSigningFormat};
 use crate::error::AppError;
 
 pub struct GitHelper {
     pub username: String,
     pub email: String,
     pub password: String,
+    pub sign_commits: bool,
+    pub signing_format: GitSigningFormat,
+    pub signing_key: String,
+    pub signing_program: String,
     pub proxy: Option<String>,
 }
 
@@ -22,6 +24,10 @@ impl GitHelper {
             username: config.username.clone(),
             email: config.email.clone(),
             password: config.password.clone(),
+            sign_commits: config.sign_commits,
+            signing_format: config.signing_format,
+            signing_key: config.signing_key.clone(),
+            signing_program: config.signing_program.clone(),
             proxy,
         }
     }
@@ -35,217 +41,202 @@ impl GitHelper {
             )));
         }
 
-        let repo = Repository::discover(path)
-            .map_err(|e| AppError::NetworkError(format!("Failed to open git repository: {}", e)))?;
-
-        if !self.has_changes(&repo)? {
-            if !self.has_unpushed_commits(&repo)? {
+        if !self.has_changes(repo_path)? {
+            if !self.has_unpushed_commits(repo_path)? {
                 info!("No changes to commit or push");
                 return Ok(false);
             }
             info!("Found unpushed commits");
         } else {
-            self.stage_all(&repo)?;
-
+            self.stage_all(repo_path)?;
             let commit_msg = format!("Sekai master data version {}", data_version);
-            let author = "Haruki Sekai Master Update Bot";
-            let author_email = "no-reply@mail.seiunx.com";
-            self.commit(&repo, &commit_msg, author, author_email)?;
+            self.commit(
+                repo_path,
+                &commit_msg,
+                "Haruki Sekai Master Update Bot",
+                "no-reply@mail.seiunx.com",
+            )?;
             info!("Committed changes: {}", commit_msg);
         }
 
-        self.push(&repo)?;
+        self.push(repo_path)?;
         info!("Pushed changes successfully");
         Ok(true)
     }
 
-    fn has_changes(&self, repo: &Repository) -> Result<bool, AppError> {
-        let mut opts = StatusOptions::new();
-        opts.include_untracked(true)
-            .recurse_untracked_dirs(true)
-            .include_ignored(false);
-
-        let statuses = repo
-            .statuses(Some(&mut opts))
-            .map_err(|e| AppError::NetworkError(format!("Failed to get git status: {}", e)))?;
-
-        Ok(!statuses.is_empty())
+    fn git(&self, repo_path: &str) -> Command {
+        let mut command = Command::new("git");
+        command.arg("-C").arg(repo_path);
+        command
     }
 
-    fn has_unpushed_commits(&self, repo: &Repository) -> Result<bool, AppError> {
-        let head = match repo.head() {
-            Ok(h) => h,
-            Err(e) if e.code() == ErrorCode::UnbornBranch => return Ok(false),
-            Err(e) => return Err(AppError::NetworkError(format!("Failed to get HEAD: {}", e))),
-        };
+    fn run(&self, mut command: Command, action: &str) -> Result<Output, AppError> {
+        let output = command
+            .output()
+            .map_err(|e| AppError::NetworkError(format!("Failed to run git {}: {}", action, e)))?;
 
-        let local_oid = head.target().ok_or_else(|| {
-            AppError::NetworkError("HEAD does not point to a valid commit".to_string())
-        })?;
-
-        let branch = repo
-            .find_branch(head.shorthand().unwrap_or("main"), git2::BranchType::Local)
-            .map_err(|e| AppError::NetworkError(format!("Failed to find local branch: {}", e)))?;
-
-        let upstream = match branch.upstream() {
-            Ok(u) => u,
-            Err(_) => return Ok(false),
-        };
-
-        let upstream_oid = upstream.get().target().ok_or_else(|| {
-            AppError::NetworkError("Upstream does not point to a valid commit".to_string())
-        })?;
-
-        let (ahead, _behind) = repo
-            .graph_ahead_behind(local_oid, upstream_oid)
-            .map_err(|e| AppError::NetworkError(format!("Failed to compare commits: {}", e)))?;
-
-        Ok(ahead > 0)
-    }
-
-    fn stage_all(&self, repo: &Repository) -> Result<(), AppError> {
-        let mut index = repo
-            .index()
-            .map_err(|e| AppError::NetworkError(format!("Failed to get index: {}", e)))?;
-
-        index
-            .add_all(["*"].iter(), IndexAddOption::DEFAULT, None)
-            .map_err(|e| AppError::NetworkError(format!("Failed to stage files: {}", e)))?;
-
-        // Also handle deletions: update index to remove files that no longer exist on disk
-        let mut diff_opts = DiffOptions::new();
-        let diff = repo
-            .diff_index_to_workdir(Some(&index), Some(&mut diff_opts))
-            .map_err(|e| AppError::NetworkError(format!("Failed to diff index: {}", e)))?;
-
-        let deleted_paths: Vec<String> = diff
-            .deltas()
-            .filter(|d| d.status() == git2::Delta::Deleted)
-            .filter_map(|d| d.old_file().path())
-            .map(|p| p.to_string_lossy().to_string())
-            .collect();
-
-        for path in &deleted_paths {
-            let _ = index.remove_path(Path::new(path));
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let detail = stderr.trim();
+            let detail = if detail.is_empty() {
+                output.status.to_string()
+            } else {
+                detail.to_string()
+            };
+            return Err(AppError::NetworkError(format!(
+                "git {} failed: {}",
+                action, detail
+            )));
         }
 
-        index
-            .write()
-            .map_err(|e| AppError::NetworkError(format!("Failed to write index: {}", e)))?;
+        Ok(output)
+    }
 
+    fn has_changes(&self, repo_path: &str) -> Result<bool, AppError> {
+        let mut cmd = self.git(repo_path);
+        cmd.args(["status", "--porcelain"]);
+        let output = self.run(cmd, "status")?;
+        Ok(!output.stdout.is_empty())
+    }
+
+    fn has_unpushed_commits(&self, repo_path: &str) -> Result<bool, AppError> {
+        // Errors when there's no upstream or HEAD is unborn — both mean "nothing to push".
+        let output = self
+            .git(repo_path)
+            .args(["rev-list", "--count", "@{u}..HEAD"])
+            .output()
+            .map_err(|e| AppError::NetworkError(format!("Failed to run git rev-list: {}", e)))?;
+        if !output.status.success() {
+            return Ok(false);
+        }
+        let count: u32 = String::from_utf8_lossy(&output.stdout)
+            .trim()
+            .parse()
+            .unwrap_or(0);
+        Ok(count > 0)
+    }
+
+    fn stage_all(&self, repo_path: &str) -> Result<(), AppError> {
+        let mut cmd = self.git(repo_path);
+        cmd.args(["add", "-A"]);
+        self.run(cmd, "add")?;
         Ok(())
     }
 
     fn commit(
         &self,
-        repo: &Repository,
+        repo_path: &str,
         message: &str,
         author_name: &str,
         author_email: &str,
     ) -> Result<(), AppError> {
-        let sig_author = Signature::now(author_name, author_email).map_err(|e| {
-            AppError::NetworkError(format!("Failed to create author signature: {}", e))
-        })?;
+        let mut cmd = self.git(repo_path);
 
-        let sig_committer = Signature::now(&self.username, &self.email).map_err(|e| {
-            AppError::NetworkError(format!("Failed to create committer signature: {}", e))
-        })?;
-
-        let mut index = repo
-            .index()
-            .map_err(|e| AppError::NetworkError(format!("Failed to get index: {}", e)))?;
-
-        let tree_oid = index
-            .write_tree()
-            .map_err(|e| AppError::NetworkError(format!("Failed to write tree: {}", e)))?;
-
-        let tree = repo
-            .find_tree(tree_oid)
-            .map_err(|e| AppError::NetworkError(format!("Failed to find tree: {}", e)))?;
-
-        let parent_commit = match repo.head() {
-            Ok(head) => {
-                let oid = head
-                    .target()
-                    .ok_or_else(|| AppError::NetworkError("HEAD has no target".to_string()))?;
-                Some(repo.find_commit(oid).map_err(|e| {
-                    AppError::NetworkError(format!("Failed to find parent commit: {}", e))
-                })?)
+        if self.sign_commits {
+            let (format, program_key) = match self.signing_format {
+                GitSigningFormat::Gpg => ("openpgp", "gpg.program"),
+                GitSigningFormat::Ssh => ("ssh", "gpg.ssh.program"),
+            };
+            cmd.arg("-c").arg(format!("gpg.format={}", format));
+            if !self.signing_program.is_empty() {
+                cmd.arg("-c")
+                    .arg(format!("{}={}", program_key, self.signing_program));
             }
-            Err(e) if e.code() == ErrorCode::UnbornBranch => None,
-            Err(e) => return Err(AppError::NetworkError(format!("Failed to get HEAD: {}", e))),
+            if !self.signing_key.is_empty() {
+                cmd.arg("-c")
+                    .arg(format!("user.signingkey={}", self.signing_key));
+            }
+            cmd.arg("commit").arg("-S");
+        } else {
+            cmd.arg("commit");
+        }
+
+        cmd.arg("-m")
+            .arg(message)
+            .env("GIT_AUTHOR_NAME", author_name)
+            .env("GIT_AUTHOR_EMAIL", author_email)
+            .env("GIT_COMMITTER_NAME", &self.username)
+            .env("GIT_COMMITTER_EMAIL", &self.email);
+
+        self.run(cmd, "commit")?;
+        Ok(())
+    }
+
+    fn push(&self, repo_path: &str) -> Result<(), AppError> {
+        let head = self.run(
+            {
+                let mut c = self.git(repo_path);
+                c.args(["symbolic-ref", "--short", "HEAD"]);
+                c
+            },
+            "symbolic-ref",
+        )?;
+        let branch = String::from_utf8_lossy(&head.stdout).trim().to_string();
+
+        let push_target = if self.password.is_empty() {
+            "origin".to_string()
+        } else {
+            let remote = self.run(
+                {
+                    let mut c = self.git(repo_path);
+                    c.args(["remote", "get-url", "origin"]);
+                    c
+                },
+                "remote get-url",
+            )?;
+            let url = String::from_utf8_lossy(&remote.stdout).trim().to_string();
+            inject_credentials(&url, &self.username, &self.password)?
         };
 
-        let parents: Vec<&git2::Commit> = parent_commit.iter().collect();
+        let refspec = format!("refs/heads/{branch}:refs/heads/{branch}");
 
-        repo.commit(
-            Some("HEAD"),
-            &sig_author,
-            &sig_committer,
-            message,
-            &tree,
-            &parents,
-        )
-        .map_err(|e| AppError::NetworkError(format!("Failed to commit: {}", e)))?;
-
-        Ok(())
-    }
-
-    fn push(&self, repo: &Repository) -> Result<(), AppError> {
-        let head = repo
-            .head()
-            .map_err(|e| AppError::NetworkError(format!("Failed to get HEAD: {}", e)))?;
-
-        let branch_name = head.shorthand().unwrap_or("main");
-        let refspec = format!("refs/heads/{}:refs/heads/{}", branch_name, branch_name);
-
-        let mut remote = repo.find_remote("origin").map_err(|e| {
-            AppError::NetworkError(format!("Failed to find remote 'origin': {}", e))
-        })?;
-
-        let mut callbacks = RemoteCallbacks::new();
-
-        if !self.password.is_empty() {
-            let username = self.username.clone();
-            let password = self.password.clone();
-            callbacks.credentials(move |_url, _username_from_url, _allowed_types| {
-                Cred::userpass_plaintext(&username, &password)
-            });
-        }
-
-        // Report push errors via the callback
-        callbacks.push_update_reference(|refname, status| {
-            if let Some(msg) = status {
-                Err(git2::Error::from_str(&format!(
-                    "Failed to push ref {}: {}",
-                    refname, msg
-                )))
-            } else {
-                Ok(())
-            }
-        });
-
-        let mut push_opts = PushOptions::new();
-        push_opts.remote_callbacks(callbacks);
-
-        if let Some(ref proxy_url) = self.proxy {
-            if !proxy_url.is_empty() {
-                let mut proxy_opts = ProxyOptions::new();
-                proxy_opts.url(proxy_url);
-                push_opts.proxy_options(proxy_opts);
+        let mut cmd = self.git(repo_path);
+        if let Some(proxy) = self.proxy.as_deref() {
+            if !proxy.is_empty() {
+                cmd.arg("-c").arg(format!("http.proxy={}", proxy));
             }
         }
+        cmd.args(["push", &push_target, &refspec])
+            .env("GIT_TERMINAL_PROMPT", "0");
 
-        remote
-            .push(&[&refspec], Some(&mut push_opts))
-            .map_err(|e| {
-                let msg = e.message().to_string();
-                if msg.contains("up-to-date") {
-                    return AppError::NetworkError("Already up-to-date".to_string());
-                }
-                AppError::NetworkError(format!("Git push failed: {}", msg))
-            })?;
-
+        self.run(cmd, "push")?;
         Ok(())
     }
+}
+
+fn inject_credentials(url: &str, username: &str, password: &str) -> Result<String, AppError> {
+    let scheme_end = if let Some(rest) = url.strip_prefix("https://") {
+        ("https://", rest)
+    } else if let Some(rest) = url.strip_prefix("http://") {
+        ("http://", rest)
+    } else {
+        return Err(AppError::NetworkError(format!(
+            "Cannot inject credentials into non-HTTP(S) remote URL: {}",
+            url
+        )));
+    };
+    let (scheme, rest) = scheme_end;
+    let rest = match rest.find('@') {
+        Some(at) if !rest[..at].contains('/') => &rest[at + 1..],
+        _ => rest,
+    };
+    Ok(format!(
+        "{}{}:{}@{}",
+        scheme,
+        pct_encode(username),
+        pct_encode(password),
+        rest
+    ))
+}
+
+fn pct_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        if matches!(b, b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~') {
+            out.push(b as char);
+        } else {
+            let _ = write!(out, "%{:02X}", b);
+        }
+    }
+    out
 }
