@@ -37,7 +37,6 @@ regex = "1.12.3"
 chrono = "0.4.44"
 num_enum = "0.7.5"
 notify = "8.2.0"
-git2 = { version = "0.20.4", features = ["vendored-openssl"] }
 
 [profile.release]
 lto = true

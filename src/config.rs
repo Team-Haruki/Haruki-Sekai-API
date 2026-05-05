@@ -110,6 +110,15 @@ pub struct DatabaseConfig {
     pub max_connections: u32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum GitSigningFormat {
+    #[default]
+    #[serde(alias = "openpgp")]
+    Gpg,
+    Ssh,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct GitConfig {
     #[serde(default)]
@@ -120,6 +129,14 @@ pub struct GitConfig {
     pub email: String,
     #[serde(default)]
     pub password: String,
+    #[serde(default)]
+    pub sign_commits: bool,
+    #[serde(default)]
+    pub signing_format: GitSigningFormat,
+    #[serde(default)]
+    pub signing_key: String,
+    #[serde(default)]
+    pub signing_program: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -214,6 +231,10 @@ impl Default for GitConfig {
             username: "".to_string(),
             email: "".to_string(),
             password: "".to_string(),
+            sign_commits: false,
+            signing_format: GitSigningFormat::default(),
+            signing_key: "".to_string(),
+            signing_program: "".to_string(),
         }
     }
 }

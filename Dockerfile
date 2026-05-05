@@ -1,5 +1,5 @@
 FROM rust:1.95-alpine AS builder
-RUN apk add --no-cache musl-dev openssl-dev openssl-libs-static cmake make perl
+RUN apk add --no-cache musl-dev
 WORKDIR /app
 COPY . .
 ARG VERSION=dev
@@ -11,7 +11,7 @@ RUN if [ "$VERSION" != "dev" ]; then \
 RUN cargo build --release
 
 FROM alpine:3.23
-RUN apk --no-cache add ca-certificates tzdata
+RUN apk --no-cache add ca-certificates tzdata git gnupg openssh-keygen
 WORKDIR /app
 COPY --from=builder /app/target/release/haruki-sekai-api .
 COPY Data ./Data
