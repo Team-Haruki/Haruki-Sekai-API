@@ -6,6 +6,10 @@ git:
   username: ""
   email: "@users.noreply.github.com"
   password: ""
+  sign_commits: false
+  signing_format: "gpg" # gpg | ssh
+  signing_key: "" # GPG key id, SSH public/private key path, or SSH public key
+  signing_program: "" # optional: gpg.program for GPG or gpg.ssh.program for SSH
 
 redis:
   enabled: true # set it to false if not using redis
