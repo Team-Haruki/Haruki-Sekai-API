@@ -10,7 +10,7 @@ RUN if [ "$VERSION" != "dev" ]; then \
     fi
 RUN cargo build --release
 
-FROM alpine:3.22
+FROM alpine:3.23
 RUN apk --no-cache add ca-certificates tzdata
 WORKDIR /app
 COPY --from=builder /app/target/release/haruki-sekai-api .
