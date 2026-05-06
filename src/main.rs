@@ -38,12 +38,7 @@ async fn main() -> anyhow::Result<()> {
     let app = create_router(state.clone());
 
     let _scheduler = if run_updaters_inproc {
-        match updater::start_scheduler(
-            &state.clients,
-            &state.config,
-            state.master_db.clone(),
-        )
-        .await
+        match updater::start_scheduler(&state.clients, &state.config, state.master_db.clone()).await
         {
             Ok(s) => Some(s),
             Err(e) => {

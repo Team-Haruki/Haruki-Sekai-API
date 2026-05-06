@@ -406,8 +406,14 @@ fn load_secret(file_field: &str, target: &mut String, ctx: &str) -> anyhow::Resu
     if file_field.is_empty() {
         return Ok(());
     }
-    let raw = std::fs::read_to_string(file_field)
-        .map_err(|e| anyhow::anyhow!("Failed to read secret file for {} ('{}'): {}", ctx, file_field, e))?;
+    let raw = std::fs::read_to_string(file_field).map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to read secret file for {} ('{}'): {}",
+            ctx,
+            file_field,
+            e
+        )
+    })?;
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return Err(anyhow::anyhow!(
@@ -476,8 +482,7 @@ redis:
     fn loads_example_yaml_unchanged() {
         let _g = ENV_LOCK.lock().unwrap();
         let mut guard = EnvGuard::new();
-        let example =
-            std::fs::read_to_string("haruki-sekai-configs.example.yaml").unwrap();
+        let example = std::fs::read_to_string("haruki-sekai-configs.example.yaml").unwrap();
         let tmp = tempdir();
         let path = write_yaml(&tmp, &example);
         guard.set("CONFIG_PATH", path.to_str().unwrap());
@@ -545,10 +550,7 @@ backend:
         let path = write_yaml(&tmp, MINIMAL_YAML);
         guard.set("CONFIG_PATH", path.to_str().unwrap());
         guard.set("HARUKI_DATABASE__DSN", "postgres://from-env/db");
-        guard.set(
-            "HARUKI_DATABASE__DSN_FILE",
-            secret_path.to_str().unwrap(),
-        );
+        guard.set("HARUKI_DATABASE__DSN_FILE", secret_path.to_str().unwrap());
 
         let cfg = Config::load().unwrap();
         assert_eq!(cfg.database.dsn, "postgres://from-file/db");
