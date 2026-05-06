@@ -21,6 +21,124 @@
 6. Open Terminal, and `cd` to the directory
 7. Run `haruki-sekai-api`
 
+## Deployment matrix
+
+| Target              | Recipe                                                                                                                        |
+| ------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| Local / single host | Edit `haruki-sekai-configs.yaml` and run `./haruki-sekai-api`. Updater runs in-process (`backend.run_updaters_inproc=true`).  |
+| Single Docker       | `docker run -v ./haruki-sekai-configs.yaml:/app/haruki-sekai-configs.yaml -p 9999:9999 ghcr.io/team-haruki/haruki-sekai-api`. |
+| Kubernetes (Helm)   | `helm install haruki deploy/helm/haruki-sekai-api -f my-values.yaml` — see `deploy/helm/haruki-sekai-api/values.yaml`.        |
+| Kubernetes (raw)    | `kubectl apply -f deploy/k8s/all-in-one.yaml` — minimal copy-edit example (see `deploy/k8s/README.md`).                       |
+
+The Kubernetes targets run two Deployments off the same image: an
+horizontally-scaled API (`./haruki-sekai-api`) with
+`backend.run_updaters_inproc=false`, plus a singleton updater
+(`./haruki-sekai-updater`, `replicas: 1`) that owns scheduled jobs.
+
+## Configuration sources
+
+`haruki-sekai-api` loads configuration from the following sources, in order of
+increasing priority. Local single-file deployments only need step 2 — the rest
+are opt-in for container / Kubernetes use.
+
+1. Built-in defaults.
+2. The YAML file pointed to by `CONFIG_PATH` (default
+   `./haruki-sekai-configs.yaml`).
+3. Environment variables prefixed with `HARUKI_`. Nested keys use `__` as the
+   separator. Examples:
+   - `HARUKI_BACKEND__PORT=9999`
+   - `HARUKI_REDIS__URL=redis://:pass@redis.svc:6379/0`
+   - `HARUKI_SERVERS__JP__AES_KEY_HEX=...`
+4. `*_file` fields. For any sensitive setting `foo`, you may set `foo_file`
+   to a path; the trimmed contents of that file replace `foo`. This is the
+   intended way to consume Kubernetes Secret / Docker secret mounts.
+   Available: `database.dsn_file`, `master_database.dsn_file`,
+   `redis.password_file`, `redis.url_file`,
+   `backend.sekai_user_jwt_signing_key_file`,
+   `git.password_file`, `git.signing_key_file`,
+   `servers.<region>.aes_key_hex_file`,
+   `servers.<region>.aes_iv_hex_file`,
+   `asset_updater_servers[N].authorization_file`.
+
+If `CONFIG_PATH` is unset and the default YAML file is missing, the service
+starts from defaults + env vars only (a warning is logged). If `CONFIG_PATH`
+is explicitly set but points at a missing file, startup fails fast.
+
+### Persistent storage
+
+Kubernetes deployments can stay stateless by default, but multi-replica
+installations usually need PVCs for paths that are backed by files:
+
+| Path setting | Recommended volume | Notes |
+| ------------ | ------------------ | ----- |
+| `servers.<region>.account_dir` | RWX PVC mounted on API and updater | Required when API replicas share account files; the updater also initializes clients and reads this directory. Use NFS, Longhorn, EFS, Filestore, or another RWX-capable StorageClass. |
+| `servers.<region>.master_dir` | RWO PVC mounted on updater | The API does not read this path. The singleton updater writes master data and may run `git push`, so a normal filesystem is required. |
+| `servers.<region>.version_path` / `nuverse_structure_file_path` | Same updater PVC as `master_dir` | These files are updater-owned and can live under the master-data mount. |
+
+The Helm chart exposes `persistence.accounts.*` and `persistence.master.*`;
+both are disabled by default. After enabling a PVC, set the matching server
+path fields through YAML or `HARUKI_SERVERS__<REGION>__...` env vars so they
+point under the configured mount path.
+
+### Kubernetes deployment sketch
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: haruki-sekai-config
+data:
+  HARUKI_BACKEND__PORT: "9999"
+  HARUKI_REDIS__ENABLED: "true"
+  HARUKI_REDIS__URL: "redis://redis.default.svc:6379/0"
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: haruki-sekai-secrets
+type: Opaque
+stringData:
+  jwt_key: "replace-me"
+  db_dsn: "postgres://user:pass@pg/db?sslmode=disable"
+  jp_aes_key: "deadbeef..."
+  jp_aes_iv:  "cafebabe..."
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: haruki-sekai-api
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: haruki-sekai-api } }
+  template:
+    metadata: { labels: { app: haruki-sekai-api } }
+    spec:
+      containers:
+        - name: api
+          image: ghcr.io/team-haruki/haruki-sekai-api:latest
+          envFrom:
+            - configMapRef: { name: haruki-sekai-config }
+          env:
+            - name: HARUKI_BACKEND__SEKAI_USER_JWT_SIGNING_KEY_FILE
+              value: /run/secrets/haruki/jwt_key
+            - name: HARUKI_DATABASE__DSN_FILE
+              value: /run/secrets/haruki/db_dsn
+            - name: HARUKI_SERVERS__JP__AES_KEY_HEX_FILE
+              value: /run/secrets/haruki/jp_aes_key
+            - name: HARUKI_SERVERS__JP__AES_IV_HEX_FILE
+              value: /run/secrets/haruki/jp_aes_iv
+          volumeMounts:
+            - { name: secrets, mountPath: /run/secrets/haruki, readOnly: true }
+          ports: [{ containerPort: 9999 }]
+      volumes:
+        - name: secrets
+          secret: { secretName: haruki-sekai-secrets }
+```
+
+No `haruki-sekai-configs.yaml` is mounted — the deployment runs entirely from
+ConfigMap + Secret. To layer a partial YAML on top, mount it at any path and
+set `CONFIG_PATH` to point at it.
+
 ## License
 
 This project is licensed under the MIT License.

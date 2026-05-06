@@ -13,13 +13,41 @@ const COLOR_YELLOW: &str = "\x1b[33m";
 const COLOR_RED: &str = "\x1b[31m";
 const COLOR_RESET: &str = "\x1b[0m";
 
-pub fn init() {
+/// Initialize the global tracing subscriber.
+///
+/// `format` accepts `"text"` (default, colored single-line) or `"json"` (one
+/// JSON object per line, suitable for stdout-based log shippers in K8s).
+/// Unknown values fall back to text with a stderr warning.
+pub fn init(format: &str) {
     let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("haruki_sekai_api=info,warn"));
-    let _ = tracing_subscriber::fmt()
-        .event_format(ColoredFormatter)
-        .with_env_filter(env_filter)
-        .try_init();
+
+    match format {
+        "json" => {
+            let _ = tracing_subscriber::fmt()
+                .json()
+                .with_current_span(true)
+                .with_span_list(false)
+                .with_env_filter(env_filter)
+                .try_init();
+        }
+        "text" => {
+            let _ = tracing_subscriber::fmt()
+                .event_format(ColoredFormatter)
+                .with_env_filter(env_filter)
+                .try_init();
+        }
+        other => {
+            eprintln!(
+                "warning: unknown log_format '{}', falling back to 'text'",
+                other
+            );
+            let _ = tracing_subscriber::fmt()
+                .event_format(ColoredFormatter)
+                .with_env_filter(env_filter)
+                .try_init();
+        }
+    }
 }
 
 struct ColoredFormatter;

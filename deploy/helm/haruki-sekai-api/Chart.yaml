@@ -1,0 +1,15 @@
+apiVersion: v2
+name: haruki-sekai-api
+description: Haruki Sekai API — Project Sekai regional proxy for HarukiBot.
+type: application
+version: 0.1.0
+appVersion: "6.0.0"
+home: https://github.com/Team-Haruki/Haruki-Sekai-API
+sources:
+  - https://github.com/Team-Haruki/Haruki-Sekai-API
+keywords:
+  - haruki
+  - sekai
+  - proxy
+maintainers:
+  - name: Haruki Dev Team

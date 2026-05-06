@@ -1,3 +1,29 @@
+# =============================================================================
+# Haruki Sekai API configuration
+# =============================================================================
+# Multi-source loading (priority, low -> high):
+#   1. Built-in defaults
+#   2. This YAML file (path: $CONFIG_PATH, default ./haruki-sekai-configs.yaml)
+#   3. Environment variables prefixed with HARUKI_, with `__` for nested keys
+#        examples:
+#          HARUKI_BACKEND__PORT=9999
+#          HARUKI_REDIS__URL=redis://:pass@redis.svc:6379/0
+#          HARUKI_SERVERS__JP__AES_KEY_HEX=deadbeef...
+#   4. Secret-file fields (`*_file`): for any sensitive setting, set its
+#      `_file` companion to a path; the trimmed file contents replace the
+#      plain field. This pairs with K8s Secret/Docker secret mounts.
+#        e.g. database.dsn_file, redis.password_file, redis.url_file,
+#             backend.sekai_user_jwt_signing_key_file,
+#             git.password_file, git.signing_key_file,
+#             servers.<region>.aes_key_hex_file,
+#             servers.<region>.aes_iv_hex_file,
+#             asset_updater_servers[N].authorization_file
+#
+# Local single-file deployments need none of the above — this YAML alone works.
+# The default YAML path being absent is OK *only* when CONFIG_PATH is unset
+# (intended for K8s ConfigMap/Secret-only deployments).
+# =============================================================================
+
 proxy: ""
 jp_sekai_cookie_url: ""
 
@@ -16,6 +42,7 @@ redis:
   host: "127.0.0.1"
   port: 6379
   password: "" # keep it empty if no password
+  # url: "redis://:pass@host:6379/0"  # if non-empty, takes precedence over host/port/password
 
 backend:
   host: "0.0.0.0"
@@ -24,10 +51,17 @@ backend:
   ssl_cert: ""
   ssl_key: ""
   log_level: "INFO"
-  main_log_file: "./main.log" # output to console if empty
-  access_log: "${time} ${ip} ${status} ${method} ${path}\n"
-  access_log_path: "./access.log" # output to console if empty
+  log_format: "text" # "text" (colored single-line, default) or "json" (one JSON object per line, K8s-friendly)
+  main_log_file: "" # currently unused; all logs go to stdout via tracing
+  access_log: "" # currently unused; tower-http TraceLayer emits DEBUG spans through tracing
+  access_log_path: "" # currently unused; see above
   sekai_user_jwt_signing_key: ""
+  # Run master / app-hash / cookie-refresh cron jobs inside this process.
+  # Default: true (single-process / local deployment).
+  # In multi-replica K8s setups, set this to false on the API Deployment and
+  # run the bundled `haruki-sekai-updater` binary as a separate replicas=1
+  # Deployment to avoid duplicate cron firings and git-push races.
+  run_updaters_inproc: true
   enable_trust_proxy: true
   trusted_proxies:
     - "127.0.0.0/8"

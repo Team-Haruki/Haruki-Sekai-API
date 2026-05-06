@@ -1,0 +1,140 @@
+# Default values for haruki-sekai-api.
+# Every field listed here is overridable via `--set` or a custom values file.
+
+image:
+  repository: ghcr.io/team-haruki/haruki-sekai-api
+  # If empty, falls back to .Chart.AppVersion.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+nameOverride: ""
+fullnameOverride: ""
+
+# Plain (non-secret) configuration injected as HARUKI_* env vars on both
+# the API Deployment and the updater Deployment. Use `__` to nest, e.g.
+#   HARUKI_BACKEND__PORT: "9999"
+#   HARUKI_REDIS__ENABLED: "true"
+#   HARUKI_REDIS__URL: "redis://redis:6379/0"
+#   HARUKI_SERVERS__JP__ENABLED: "true"
+env:
+  HARUKI_BACKEND__PORT: "9999"
+  HARUKI_BACKEND__LOG_FORMAT: "json"
+  HARUKI_BACKEND__RUN_UPDATERS_INPROC: "false"
+
+# Secret-file plumbing: mounts an existing K8s Secret at `mountPath` and
+# generates HARUKI_*_FILE env vars pointing at each mounted key.
+secrets:
+  # Name of an existing Opaque Secret. If empty, no secret is mounted.
+  existing: ""
+  mountPath: /run/secrets/haruki
+  # Map: secretKey -> envVarName. Each entry creates an env var with value
+  # `<mountPath>/<secretKey>`. Example:
+  #   db_dsn: HARUKI_DATABASE__DSN_FILE
+  #   jwt_key: HARUKI_BACKEND__SEKAI_USER_JWT_SIGNING_KEY_FILE
+  #   jp_aes_key: HARUKI_SERVERS__JP__AES_KEY_HEX_FILE
+  #   jp_aes_iv: HARUKI_SERVERS__JP__AES_IV_HEX_FILE
+  fileEnv: {}
+
+# Optional: mount a full YAML config from a Secret at a custom path and set
+# CONFIG_PATH to it. Useful for migrating an existing local YAML into K8s
+# without splitting it field-by-field. When disabled, only env+fileEnv apply.
+configFile:
+  enabled: false
+  existingSecret: ""
+  key: haruki-sekai-configs.yaml
+  mountPath: /etc/haruki/haruki-sekai-configs.yaml
+
+# Optional persistent volumes. Disabled by default so the chart can still run
+# statelessly for development / single-replica deployments.
+#
+# Point server path env vars at subdirectories under these mount paths, e.g.
+#   HARUKI_SERVERS__JP__ACCOUNT_DIR: "/app/Data/accounts/jp"
+#   HARUKI_SERVERS__JP__MASTER_DIR: "/app/Data/master/jp/master"
+#   HARUKI_SERVERS__JP__VERSION_PATH: "/app/Data/master/jp/version.json"
+persistence:
+  master:
+    enabled: false
+    existingClaim: ""
+    mountPath: /app/Data/master
+    accessMode: ReadWriteOnce
+    size: 10Gi
+    # Empty uses the cluster default StorageClass.
+    storageClass: ""
+  accounts:
+    enabled: false
+    existingClaim: ""
+    mountPath: /app/Data/accounts
+    accessMode: ReadWriteMany
+    size: 1Gi
+    # Empty uses the cluster default StorageClass.
+    storageClass: ""
+
+api:
+  replicaCount: 2
+  podAnnotations: {}
+  podLabels: {}
+  resources: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  service:
+    type: ClusterIP
+    port: 9999
+    annotations: {}
+  ingress:
+    enabled: false
+    className: ""
+    annotations: {}
+    hosts: []
+      # - host: haruki.example.com
+      #   paths:
+      #     - path: /
+      #       pathType: Prefix
+    tls: []
+      # - secretName: haruki-tls
+      #   hosts:
+      #     - haruki.example.com
+  livenessProbe:
+    httpGet:
+      path: /healthz
+      port: http
+    initialDelaySeconds: 5
+    periodSeconds: 10
+  readinessProbe:
+    httpGet:
+      path: /readyz
+      port: http
+    initialDelaySeconds: 5
+    periodSeconds: 10
+
+updater:
+  enabled: true
+  podAnnotations: {}
+  podLabels: {}
+  resources: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  # Updater is stateful (git working tree, master_dir). Always 1 replica.
+  # Override only if you understand the implications.
+  replicaCount: 1
+
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: false
+  capabilities:
+    drop:
+      - ALL
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}

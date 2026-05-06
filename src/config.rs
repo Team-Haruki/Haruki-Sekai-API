@@ -1,9 +1,10 @@
+use figment::providers::{Env, Format, Yaml};
+use figment::Figment;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::env;
-use std::fs::File;
-use std::io::BufReader;
 use std::path::Path;
+use tracing::warn;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -46,7 +47,7 @@ impl std::str::FromStr for ServerRegion {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RedisConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -56,9 +57,15 @@ pub struct RedisConfig {
     pub port: u16,
     #[serde(default)]
     pub password: String,
+    #[serde(default)]
+    pub password_file: String,
+    #[serde(default)]
+    pub url: String,
+    #[serde(default)]
+    pub url_file: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BackendConfig {
     #[serde(default = "default_host")]
     pub host: String,
@@ -72,6 +79,8 @@ pub struct BackendConfig {
     pub ssl_key: String,
     #[serde(default = "default_log_level")]
     pub log_level: String,
+    #[serde(default = "default_log_format")]
+    pub log_format: String,
     #[serde(default)]
     pub main_log_file: String,
     #[serde(default)]
@@ -81,11 +90,15 @@ pub struct BackendConfig {
     #[serde(default)]
     pub sekai_user_jwt_signing_key: String,
     #[serde(default)]
+    pub sekai_user_jwt_signing_key_file: String,
+    #[serde(default)]
     pub enable_trust_proxy: bool,
     #[serde(default)]
     pub trusted_proxies: Vec<String>,
     #[serde(default)]
     pub proxy_header: String,
+    #[serde(default = "default_run_updaters_inproc")]
+    pub run_updaters_inproc: bool,
 }
 
 fn default_host() -> String {
@@ -97,8 +110,14 @@ fn default_port() -> u16 {
 fn default_log_level() -> String {
     "info".to_string()
 }
+fn default_log_format() -> String {
+    "text".to_string()
+}
+fn default_run_updaters_inproc() -> bool {
+    true
+}
 
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct DatabaseConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -107,10 +126,12 @@ pub struct DatabaseConfig {
     #[serde(default)]
     pub dsn: String,
     #[serde(default)]
+    pub dsn_file: String,
+    #[serde(default)]
     pub max_connections: u32,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum GitSigningFormat {
     #[default]
@@ -119,7 +140,7 @@ pub enum GitSigningFormat {
     Ssh,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GitConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -130,16 +151,20 @@ pub struct GitConfig {
     #[serde(default)]
     pub password: String,
     #[serde(default)]
+    pub password_file: String,
+    #[serde(default)]
     pub sign_commits: bool,
     #[serde(default)]
     pub signing_format: GitSigningFormat,
     #[serde(default)]
     pub signing_key: String,
     #[serde(default)]
+    pub signing_key_file: String,
+    #[serde(default)]
     pub signing_program: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -162,7 +187,11 @@ pub struct ServerConfig {
     #[serde(default)]
     pub aes_key_hex: String,
     #[serde(default)]
+    pub aes_key_hex_file: String,
+    #[serde(default)]
     pub aes_iv_hex: String,
+    #[serde(default)]
+    pub aes_iv_hex_file: String,
     #[serde(default)]
     pub enable_master_updater: bool,
     #[serde(default)]
@@ -173,7 +202,7 @@ pub struct ServerConfig {
     pub app_hash_updater_cron: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppHashSource {
     #[serde(rename = "type")]
     pub source_type: String,
@@ -183,14 +212,16 @@ pub struct AppHashSource {
     pub url: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AssetUpdaterInfo {
     pub url: String,
     #[serde(default)]
     pub authorization: String,
+    #[serde(default)]
+    pub authorization_file: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     #[serde(default)]
     pub proxy: String,
@@ -200,6 +231,7 @@ pub struct Config {
     pub git: GitConfig,
     #[serde(default)]
     pub redis: RedisConfig,
+    #[serde(default)]
     pub backend: BackendConfig,
     #[serde(default)]
     pub database: DatabaseConfig,
@@ -220,6 +252,32 @@ impl Default for RedisConfig {
             host: "localhost".to_string(),
             port: 6379,
             password: "".to_string(),
+            password_file: "".to_string(),
+            url: "".to_string(),
+            url_file: "".to_string(),
+        }
+    }
+}
+
+impl Default for BackendConfig {
+    fn default() -> Self {
+        Self {
+            host: default_host(),
+            port: default_port(),
+            ssl: false,
+            ssl_cert: "".to_string(),
+            ssl_key: "".to_string(),
+            log_level: default_log_level(),
+            log_format: default_log_format(),
+            main_log_file: "".to_string(),
+            access_log: "".to_string(),
+            access_log_path: "".to_string(),
+            sekai_user_jwt_signing_key: "".to_string(),
+            sekai_user_jwt_signing_key_file: "".to_string(),
+            enable_trust_proxy: false,
+            trusted_proxies: Vec::new(),
+            proxy_header: "".to_string(),
+            run_updaters_inproc: default_run_updaters_inproc(),
         }
     }
 }
@@ -231,24 +289,299 @@ impl Default for GitConfig {
             username: "".to_string(),
             email: "".to_string(),
             password: "".to_string(),
+            password_file: "".to_string(),
             sign_commits: false,
             signing_format: GitSigningFormat::default(),
             signing_key: "".to_string(),
+            signing_key_file: "".to_string(),
             signing_program: "".to_string(),
         }
     }
 }
 
 impl Config {
+    /// Load configuration with the priority chain:
+    /// `defaults` < `YAML file` < `HARUKI_*` env vars < `*_file` secret files.
+    ///
+    /// `CONFIG_PATH` env var selects the YAML file (default: `haruki-sekai-configs.yaml`
+    /// in the current directory). When `CONFIG_PATH` is **explicitly set**, a missing
+    /// file is a fatal error. When unset and the default file is missing, we log a
+    /// warning and continue with defaults + env — this enables YAML-less deployments
+    /// (e.g. K8s ConfigMap/Secret only) without breaking local usage.
     pub fn load() -> anyhow::Result<Self> {
-        let config_path =
-            env::var("CONFIG_PATH").unwrap_or_else(|_| "haruki-sekai-configs.yaml".to_string());
+        let (config_path, explicit) = match env::var("CONFIG_PATH") {
+            Ok(p) => (p, true),
+            Err(_) => ("haruki-sekai-configs.yaml".to_string(), false),
+        };
+
+        let mut figment = Figment::new();
         let path = Path::new(&config_path);
-        let file = File::open(path)
-            .map_err(|e| anyhow::anyhow!("Failed to open config file '{}': {}", config_path, e))?;
-        let reader = BufReader::new(file);
-        let config: Config = serde_yaml::from_reader(reader)
-            .map_err(|e| anyhow::anyhow!("Failed to parse config: {}", e))?;
+        if path.exists() {
+            figment = figment.merge(Yaml::file(path));
+        } else if explicit {
+            return Err(anyhow::anyhow!(
+                "Config file '{}' (from CONFIG_PATH) does not exist",
+                config_path
+            ));
+        } else {
+            warn!(
+                "Config file '{}' not found; loading from defaults and HARUKI_* env vars only",
+                config_path
+            );
+        }
+
+        figment = figment.merge(Env::prefixed("HARUKI_").split("__"));
+
+        let mut config: Config = figment
+            .extract()
+            .map_err(|e| anyhow::anyhow!("Failed to load config: {}", e))?;
+
+        config.resolve_secret_files()?;
         Ok(config)
+    }
+
+    /// For every `*_file` field that is non-empty, read the referenced file and
+    /// place its trimmed contents into the matching plaintext field. Files that
+    /// don't exist or are empty after trimming are treated as fatal — silent
+    /// fallthrough would risk shipping with an unset secret.
+    fn resolve_secret_files(&mut self) -> anyhow::Result<()> {
+        load_secret(
+            &self.backend.sekai_user_jwt_signing_key_file,
+            &mut self.backend.sekai_user_jwt_signing_key,
+            "backend.sekai_user_jwt_signing_key_file",
+        )?;
+        load_secret(
+            &self.database.dsn_file,
+            &mut self.database.dsn,
+            "database.dsn_file",
+        )?;
+        load_secret(
+            &self.master_database.dsn_file,
+            &mut self.master_database.dsn,
+            "master_database.dsn_file",
+        )?;
+        load_secret(
+            &self.redis.password_file,
+            &mut self.redis.password,
+            "redis.password_file",
+        )?;
+        load_secret(&self.redis.url_file, &mut self.redis.url, "redis.url_file")?;
+        load_secret(
+            &self.git.password_file,
+            &mut self.git.password,
+            "git.password_file",
+        )?;
+        load_secret(
+            &self.git.signing_key_file,
+            &mut self.git.signing_key,
+            "git.signing_key_file",
+        )?;
+
+        for (region, server) in self.servers.iter_mut() {
+            load_secret(
+                &server.aes_key_hex_file,
+                &mut server.aes_key_hex,
+                &format!("servers.{}.aes_key_hex_file", region.as_str()),
+            )?;
+            load_secret(
+                &server.aes_iv_hex_file,
+                &mut server.aes_iv_hex,
+                &format!("servers.{}.aes_iv_hex_file", region.as_str()),
+            )?;
+        }
+
+        for (idx, asset) in self.asset_updater_servers.iter_mut().enumerate() {
+            load_secret(
+                &asset.authorization_file,
+                &mut asset.authorization,
+                &format!("asset_updater_servers[{}].authorization_file", idx),
+            )?;
+        }
+
+        Ok(())
+    }
+}
+
+fn load_secret(file_field: &str, target: &mut String, ctx: &str) -> anyhow::Result<()> {
+    if file_field.is_empty() {
+        return Ok(());
+    }
+    let raw = std::fs::read_to_string(file_field)
+        .map_err(|e| anyhow::anyhow!("Failed to read secret file for {} ('{}'): {}", ctx, file_field, e))?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(anyhow::anyhow!(
+            "Secret file for {} ('{}') is empty after trimming",
+            ctx,
+            file_field
+        ));
+    }
+    *target = trimmed.to_string();
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use std::sync::Mutex;
+
+    // Env-mutating tests must run serially.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct EnvGuard {
+        keys: Vec<String>,
+        prev_cwd: std::path::PathBuf,
+    }
+    impl EnvGuard {
+        fn new() -> Self {
+            Self {
+                keys: Vec::new(),
+                prev_cwd: env::current_dir().unwrap(),
+            }
+        }
+        fn set(&mut self, k: &str, v: &str) {
+            self.keys.push(k.to_string());
+            unsafe { env::set_var(k, v) };
+        }
+    }
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for k in &self.keys {
+                unsafe { env::remove_var(k) };
+            }
+            unsafe { env::remove_var("CONFIG_PATH") };
+            let _ = env::set_current_dir(&self.prev_cwd);
+        }
+    }
+
+    fn write_yaml(dir: &std::path::Path, body: &str) -> std::path::PathBuf {
+        let p = dir.join("haruki-sekai-configs.yaml");
+        let mut f = std::fs::File::create(&p).unwrap();
+        f.write_all(body.as_bytes()).unwrap();
+        p
+    }
+
+    const MINIMAL_YAML: &str = r#"
+backend:
+  host: "0.0.0.0"
+  port: 9999
+redis:
+  enabled: false
+  host: "127.0.0.1"
+  port: 6379
+"#;
+
+    #[test]
+    fn loads_example_yaml_unchanged() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let mut guard = EnvGuard::new();
+        let example =
+            std::fs::read_to_string("haruki-sekai-configs.example.yaml").unwrap();
+        let tmp = tempdir();
+        let path = write_yaml(&tmp, &example);
+        guard.set("CONFIG_PATH", path.to_str().unwrap());
+
+        let cfg = Config::load().expect("example yaml must load");
+        assert_eq!(cfg.backend.host, "0.0.0.0");
+        assert_eq!(cfg.backend.port, 9999);
+        assert!(cfg.backend.enable_trust_proxy);
+        assert_eq!(cfg.redis.host, "127.0.0.1");
+        assert_eq!(cfg.redis.port, 6379);
+        assert!(cfg.database.enabled);
+        assert_eq!(cfg.database.driver, "postgres");
+        assert_eq!(cfg.servers.len(), 5);
+    }
+
+    #[test]
+    fn env_overrides_yaml() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let mut guard = EnvGuard::new();
+        let tmp = tempdir();
+        let path = write_yaml(&tmp, MINIMAL_YAML);
+        guard.set("CONFIG_PATH", path.to_str().unwrap());
+        guard.set("HARUKI_BACKEND__PORT", "12345");
+        guard.set("HARUKI_REDIS__HOST", "redis.svc");
+
+        let cfg = Config::load().unwrap();
+        assert_eq!(cfg.backend.port, 12345);
+        assert_eq!(cfg.backend.host, "0.0.0.0"); // unchanged
+        assert_eq!(cfg.redis.host, "redis.svc");
+    }
+
+    #[test]
+    fn secret_file_overrides_field() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let mut guard = EnvGuard::new();
+        let tmp = tempdir();
+
+        let secret_path = tmp.join("jwt.key");
+        std::fs::write(&secret_path, "from-secret-file\n").unwrap();
+
+        let yaml = format!(
+            r#"
+backend:
+  sekai_user_jwt_signing_key: "from-yaml"
+  sekai_user_jwt_signing_key_file: "{}"
+"#,
+            secret_path.to_str().unwrap()
+        );
+        let path = write_yaml(&tmp, &yaml);
+        guard.set("CONFIG_PATH", path.to_str().unwrap());
+
+        let cfg = Config::load().unwrap();
+        assert_eq!(cfg.backend.sekai_user_jwt_signing_key, "from-secret-file");
+    }
+
+    #[test]
+    fn secret_file_beats_env_for_same_field() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let mut guard = EnvGuard::new();
+        let tmp = tempdir();
+
+        let secret_path = tmp.join("dsn");
+        std::fs::write(&secret_path, "postgres://from-file/db").unwrap();
+
+        let path = write_yaml(&tmp, MINIMAL_YAML);
+        guard.set("CONFIG_PATH", path.to_str().unwrap());
+        guard.set("HARUKI_DATABASE__DSN", "postgres://from-env/db");
+        guard.set(
+            "HARUKI_DATABASE__DSN_FILE",
+            secret_path.to_str().unwrap(),
+        );
+
+        let cfg = Config::load().unwrap();
+        assert_eq!(cfg.database.dsn, "postgres://from-file/db");
+    }
+
+    #[test]
+    fn missing_default_yaml_warns_but_loads() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let mut guard = EnvGuard::new();
+        let tmp = tempdir();
+        env::set_current_dir(&tmp).unwrap();
+        guard.set("HARUKI_BACKEND__PORT", "8888");
+
+        let cfg = Config::load().expect("should load with no yaml file");
+        assert_eq!(cfg.backend.port, 8888);
+        assert_eq!(cfg.backend.host, "0.0.0.0"); // default
+    }
+
+    #[test]
+    fn explicit_missing_config_path_is_error() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let mut guard = EnvGuard::new();
+        guard.set("CONFIG_PATH", "/tmp/definitely-does-not-exist-haruki.yaml");
+        assert!(Config::load().is_err());
+    }
+
+    fn tempdir() -> std::path::PathBuf {
+        let p = std::env::temp_dir().join(format!(
+            "haruki-cfg-test-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&p).unwrap();
+        p
     }
 }

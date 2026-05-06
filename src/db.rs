@@ -68,7 +68,9 @@ pub async fn init_master_db(config: &DatabaseConfig) -> Result<DatabaseConnectio
 }
 
 pub async fn init_redis(config: &RedisConfig) -> Result<redis::aio::ConnectionManager, AppError> {
-    let url = if config.password.is_empty() {
+    let url = if !config.url.is_empty() {
+        config.url.clone()
+    } else if config.password.is_empty() {
         format!("redis://{}:{}", config.host, config.port)
     } else {
         format!(
