@@ -58,13 +58,25 @@ struct ComponentStatus {
 
 impl ComponentStatus {
     fn disabled() -> Self {
-        Self { enabled: false, ok: true, error: None }
+        Self {
+            enabled: false,
+            ok: true,
+            error: None,
+        }
     }
     fn ok() -> Self {
-        Self { enabled: true, ok: true, error: None }
+        Self {
+            enabled: true,
+            ok: true,
+            error: None,
+        }
     }
     fn fail(e: impl ToString) -> Self {
-        Self { enabled: true, ok: false, error: Some(e.to_string()) }
+        Self {
+            enabled: true,
+            ok: false,
+            error: Some(e.to_string()),
+        }
     }
 }
 
@@ -106,7 +118,11 @@ pub async fn readiness(State(state): State<Arc<MainAppState>>) -> impl IntoRespo
         master_database,
         redis,
     };
-    let code = if all_ok { StatusCode::OK } else { StatusCode::SERVICE_UNAVAILABLE };
+    let code = if all_ok {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
     (code, Json(body))
 }
 
