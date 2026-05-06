@@ -1,0 +1,18 @@
+{{- if and .Values.persistence.master.enabled (not .Values.persistence.master.existingClaim) -}}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "haruki.masterClaimName" . }}
+  labels:
+    {{- include "haruki.labels" . | nindent 4 }}
+    app.kubernetes.io/component: updater
+spec:
+  accessModes:
+    - {{ .Values.persistence.master.accessMode | quote }}
+  resources:
+    requests:
+      storage: {{ .Values.persistence.master.size | quote }}
+  {{- if .Values.persistence.master.storageClass }}
+  storageClassName: {{ .Values.persistence.master.storageClass | quote }}
+  {{- end }}
+{{- end }}

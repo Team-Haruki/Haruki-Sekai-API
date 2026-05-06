@@ -1,0 +1,66 @@
+{{- if .Values.updater.enabled -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "haruki.fullname" . }}-updater
+  labels:
+    {{- include "haruki.labels" . | nindent 4 }}
+    app.kubernetes.io/component: updater
+spec:
+  replicas: {{ .Values.updater.replicaCount }}
+  strategy:
+    # Updater holds local state (git working tree, master_dir). Avoid running
+    # two replicas concurrently during rolling updates.
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "haruki.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: updater
+  template:
+    metadata:
+      labels:
+        {{- include "haruki.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: updater
+        {{- with .Values.updater.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.updater.podAnnotations }}
+      annotations: {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "haruki.serviceAccountName" . }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext: {{- toYaml .Values.securityContext | nindent 8 }}
+      containers:
+        - name: updater
+          image: {{ include "haruki.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext: {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          command: ["./haruki-sekai-updater"]
+          env:
+            {{- include "haruki.updaterEnvBlock" . | nindent 12 }}
+            # Updater is the singleton that owns scheduled jobs; force-on regardless
+            # of the API-side toggle.
+            - name: HARUKI_BACKEND__RUN_UPDATERS_INPROC
+              value: "true"
+          {{- if or .Values.secrets.existing .Values.configFile.enabled .Values.persistence.accounts.enabled .Values.persistence.master.enabled }}
+          volumeMounts:
+            {{- include "haruki.updaterVolumeMounts" . | nindent 12 }}
+          {{- end }}
+          resources: {{- toYaml .Values.updater.resources | nindent 12 }}
+      {{- if or .Values.secrets.existing .Values.configFile.enabled .Values.persistence.accounts.enabled .Values.persistence.master.enabled }}
+      volumes:
+        {{- include "haruki.updaterVolumes" . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.updater.nodeSelector }}
+      nodeSelector: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.updater.affinity }}
+      affinity: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.updater.tolerations }}
+      tolerations: {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

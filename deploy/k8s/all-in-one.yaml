@@ -1,0 +1,197 @@
+# Minimal Kubernetes manifests for haruki-sekai-api.
+# Topology: API Deployment (horizontally scalable) + Updater Deployment (singleton).
+# Replace placeholders marked with `# TODO` before applying.
+#
+# Apply with:
+#   kubectl apply -n <namespace> -f deploy/k8s/all-in-one.yaml
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: haruki-sekai-config
+data:
+  # Non-secret configuration. Use HARUKI_<UPPER_SNAKE>__<NESTED> keys.
+  HARUKI_BACKEND__PORT: "9999"
+  HARUKI_BACKEND__LOG_FORMAT: "json"
+  HARUKI_BACKEND__RUN_UPDATERS_INPROC: "false"   # API replicas don't run cron
+  HARUKI_REDIS__ENABLED: "true"
+  HARUKI_REDIS__URL: "redis://redis.default.svc:6379/0"
+  HARUKI_DATABASE__ENABLED: "true"
+  HARUKI_DATABASE__DRIVER: "postgres"
+  HARUKI_DATABASE__MAX_CONNECTIONS: "25"
+  # Add HARUKI_SERVERS__<REGION>__* for each region you want to enable.
+  # If you enable the optional PVC examples below, point server paths under them:
+  # HARUKI_SERVERS__JP__ACCOUNT_DIR: "/app/Data/accounts/jp"
+  # HARUKI_SERVERS__JP__MASTER_DIR: "/app/Data/master/jp/master"
+  # HARUKI_SERVERS__JP__VERSION_PATH: "/app/Data/master/jp/version.json"
+  # HARUKI_SERVERS__TW__NUVERSE_STRUCTURE_FILE_PATH: "/app/Data/master/tw/structure.json"
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: haruki-sekai-secrets
+type: Opaque
+stringData:
+  # TODO: replace placeholder values before apply.
+  jwt_key: "REPLACE_ME"
+  db_dsn: "postgres://user:pass@pg/db?sslmode=disable"
+  jp_aes_key: "REPLACE_HEX"
+  jp_aes_iv: "REPLACE_HEX"
+# ---
+# Optional persistent storage examples. Uncomment and adjust StorageClass/size if
+# you need shared account files across API replicas or durable updater output.
+#
+# apiVersion: v1
+# kind: PersistentVolumeClaim
+# metadata:
+#   name: haruki-sekai-accounts
+# spec:
+#   accessModes: ["ReadWriteMany"] # Required when API replicas > 1.
+#   resources:
+#     requests:
+#       storage: 1Gi
+#   # storageClassName: nfs-rwx
+#
+# ---
+# apiVersion: v1
+# kind: PersistentVolumeClaim
+# metadata:
+#   name: haruki-sekai-master
+# spec:
+#   accessModes: ["ReadWriteOnce"] # Updater is singleton; RWO is enough.
+#   resources:
+#     requests:
+#       storage: 10Gi
+#   # storageClassName: standard
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: haruki-sekai-api
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: haruki-sekai-api
+    app.kubernetes.io/component: api
+  ports:
+    - name: http
+      port: 9999
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: haruki-sekai-api
+  labels:
+    app.kubernetes.io/name: haruki-sekai-api
+    app.kubernetes.io/component: api
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: haruki-sekai-api
+      app.kubernetes.io/component: api
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: haruki-sekai-api
+        app.kubernetes.io/component: api
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+      containers:
+        - name: api
+          image: ghcr.io/team-haruki/haruki-sekai-api:latest # TODO pin a version
+          imagePullPolicy: IfNotPresent
+          command: ["./haruki-sekai-api"]
+          ports:
+            - { name: http, containerPort: 9999 }
+          envFrom:
+            - configMapRef: { name: haruki-sekai-config }
+          env:
+            - { name: HARUKI_BACKEND__SEKAI_USER_JWT_SIGNING_KEY_FILE, value: /run/secrets/haruki/jwt_key }
+            - { name: HARUKI_DATABASE__DSN_FILE,                         value: /run/secrets/haruki/db_dsn }
+            - { name: HARUKI_SERVERS__JP__AES_KEY_HEX_FILE,              value: /run/secrets/haruki/jp_aes_key }
+            - { name: HARUKI_SERVERS__JP__AES_IV_HEX_FILE,               value: /run/secrets/haruki/jp_aes_iv }
+          volumeMounts:
+            - { name: secrets, mountPath: /run/secrets/haruki, readOnly: true }
+            # Uncomment with the haruki-sekai-accounts PVC above.
+            # - { name: accounts, mountPath: /app/Data/accounts }
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet: { path: /readyz, port: http }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+            capabilities: { drop: ["ALL"] }
+      volumes:
+        - name: secrets
+          secret: { secretName: haruki-sekai-secrets }
+        # Uncomment with the haruki-sekai-accounts PVC above.
+        # - name: accounts
+        #   persistentVolumeClaim: { claimName: haruki-sekai-accounts }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: haruki-sekai-updater
+  labels:
+    app.kubernetes.io/name: haruki-sekai-api
+    app.kubernetes.io/component: updater
+spec:
+  replicas: 1
+  strategy: { type: Recreate }   # singleton; avoid concurrent rolling pods
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: haruki-sekai-api
+      app.kubernetes.io/component: updater
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: haruki-sekai-api
+        app.kubernetes.io/component: updater
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+      containers:
+        - name: updater
+          image: ghcr.io/team-haruki/haruki-sekai-api:latest # TODO pin a version
+          imagePullPolicy: IfNotPresent
+          command: ["./haruki-sekai-updater"]
+          envFrom:
+            - configMapRef: { name: haruki-sekai-config }
+          env:
+            # Force-on for the updater Deployment, regardless of the ConfigMap value.
+            - { name: HARUKI_BACKEND__RUN_UPDATERS_INPROC,               value: "true" }
+            - { name: HARUKI_BACKEND__SEKAI_USER_JWT_SIGNING_KEY_FILE,   value: /run/secrets/haruki/jwt_key }
+            - { name: HARUKI_DATABASE__DSN_FILE,                         value: /run/secrets/haruki/db_dsn }
+            - { name: HARUKI_SERVERS__JP__AES_KEY_HEX_FILE,              value: /run/secrets/haruki/jp_aes_key }
+            - { name: HARUKI_SERVERS__JP__AES_IV_HEX_FILE,               value: /run/secrets/haruki/jp_aes_iv }
+          volumeMounts:
+            - { name: secrets, mountPath: /run/secrets/haruki, readOnly: true }
+            # Updater also initializes clients, so it needs account files too.
+            # - { name: accounts, mountPath: /app/Data/accounts }
+            # - { name: master, mountPath: /app/Data/master }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+            capabilities: { drop: ["ALL"] }
+      volumes:
+        - name: secrets
+          secret: { secretName: haruki-sekai-secrets }
+        # Uncomment with the optional PVCs above.
+        # - name: accounts
+        #   persistentVolumeClaim: { claimName: haruki-sekai-accounts }
+        # - name: master
+        #   persistentVolumeClaim: { claimName: haruki-sekai-master }

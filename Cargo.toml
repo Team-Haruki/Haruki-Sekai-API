@@ -37,6 +37,7 @@ regex = "1.12.3"
 chrono = "0.4.44"
 num_enum = "0.7.6"
 notify = "8.2.0"
+figment = { version = "0.10.19", features = ["yaml", "env"] }
 
 [profile.release]
 lto = "thin"

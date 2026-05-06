@@ -1,10 +1,12 @@
 pub mod api;
+pub mod bootstrap;
 pub mod client;
 pub mod config;
 pub mod crypto;
 pub mod db;
 pub mod error;
 pub mod ingest_engine;
+pub mod logging;
 pub mod models;
 pub mod updater;
 pub mod utils;
