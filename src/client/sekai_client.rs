@@ -807,10 +807,10 @@ impl SekaiClient {
         ))
     }
 
-    pub async fn get_cp_mysekai_image(&self, path: &str) -> Result<Vec<u8>, AppError> {
+    async fn get_cp_image(&self, relative_path: &str) -> Result<Vec<u8>, AppError> {
         let session = self.get_session().ok_or(AppError::NoClientAvailable)?;
-        let path_clean = path.trim_start_matches('/');
-        let image_url = format!("{}/image/mysekai-photo/{}", self.config.api_url, path_clean);
+        let path_clean = relative_path.trim_start_matches('/');
+        let image_url = format!("{}/{}", self.config.api_url, path_clean);
         let req = self.prepare_request(&session, reqwest::Method::GET, &image_url);
         let resp = req
             .send()
@@ -828,6 +828,22 @@ impl SekaiClient {
             .await
             .map_err(|e| AppError::NetworkError(e.to_string()))?;
         Ok(bytes.to_vec())
+    }
+
+    pub async fn get_cp_mysekai_image(&self, path: &str) -> Result<Vec<u8>, AppError> {
+        self.get_cp_image(&format!("image/mysekai-photo/{}", path.trim_start_matches('/')))
+            .await
+    }
+
+    pub async fn get_cp_custom_profile_card_thumbnail(
+        &self,
+        path: &str,
+    ) -> Result<Vec<u8>, AppError> {
+        self.get_cp_image(&format!(
+            "image/custom-profile-card/thumbnail/{}",
+            path.trim_start_matches('/')
+        ))
+        .await
     }
 
     pub async fn get_nuverse_mysekai_image(
