@@ -16,6 +16,7 @@ const ASSET_UPDATER_CONFLICT_RETRY_DELAY_SECS: u64 = 60;
 const ASSET_UPDATER_MAX_CONFLICT_RETRIES: u8 = 10;
 const CP_MASTER_SPLIT_MAX_RETRIES: u8 = 3;
 const CP_MASTER_SPLIT_RETRY_DELAY_SECS: u64 = 2;
+const CP_MASTER_SPLIT_TIMEOUT_SECS: u64 = 120;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct AssetUpdaterPayload {
@@ -417,7 +418,16 @@ impl MasterUpdater {
         api_path: &str,
     ) -> Result<IndexMap<String, JsonValue>, crate::error::AppError> {
         for attempt in 1..=CP_MASTER_SPLIT_MAX_RETRIES {
-            let resp = match self.client.get(session, api_path, None).await {
+            let resp = match self
+                .client
+                .get_with_timeout(
+                    session,
+                    api_path,
+                    None,
+                    Duration::from_secs(CP_MASTER_SPLIT_TIMEOUT_SECS),
+                )
+                .await
+            {
                 Ok(resp) => resp,
                 Err(e) => {
                     if matches!(e, crate::error::AppError::NetworkError(_))
