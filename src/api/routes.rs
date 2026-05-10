@@ -33,13 +33,16 @@ pub async fn health_check() -> Json<HealthResponse> {
 pub fn create_router(state: Arc<MainAppState>) -> Router {
     START_TIME.get_or_init(Instant::now);
 
-    let public_routes = Router::new().route("/health", get(health_check)).route(
-        "/image/{server}/mysekai/{param1}/{param2}",
-        get(image::get_mysekai_image),
-    ).route(
-        "/image/{server}/custom-profile-card/thumbnail/{param1}/{param2}",
-        get(image::get_custom_profile_card_thumbnail),
-    );
+    let public_routes = Router::new()
+        .route("/health", get(health_check))
+        .route(
+            "/image/{server}/mysekai/{param1}/{param2}",
+            get(image::get_mysekai_image),
+        )
+        .route(
+            "/image/{server}/custom-profile-card/thumbnail/{param1}/{param2}",
+            get(image::get_custom_profile_card_thumbnail),
+        );
 
     let api_routes = Router::new()
         .route("/{server}/{user_id}/profile", get(apis::get_user_profile))

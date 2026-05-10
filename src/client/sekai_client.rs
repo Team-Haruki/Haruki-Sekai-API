@@ -459,6 +459,19 @@ impl SekaiClient {
         data: Option<&T>,
         params: Option<&HashMap<String, String>>,
     ) -> Result<Response, AppError> {
+        self.call_api_with_timeout(session, method, path, data, params, None)
+            .await
+    }
+
+    async fn call_api_with_timeout<T: serde::Serialize>(
+        &self,
+        session: &AccountSession,
+        method: &str,
+        path: &str,
+        data: Option<&T>,
+        params: Option<&HashMap<String, String>>,
+        request_timeout: Option<Duration>,
+    ) -> Result<Response, AppError> {
         let _lock = session.lock_api().await;
         let user_id = session.user_id().to_string();
         let url = format!("{}/api{}", self.config.api_url, path).replace("{userId}", &user_id);
@@ -475,6 +488,9 @@ impl SekaiClient {
                 _ => reqwest::Method::GET,
             };
             let mut req = self.prepare_request(session, method_enum, &url);
+            if let Some(timeout) = request_timeout {
+                req = req.timeout(timeout);
+            }
             if let Some(p) = params {
                 req = req.query(p);
             }
@@ -524,6 +540,17 @@ impl SekaiClient {
             .await
     }
 
+    pub async fn get_with_timeout(
+        &self,
+        session: &AccountSession,
+        path: &str,
+        params: Option<&HashMap<String, String>>,
+        timeout: Duration,
+    ) -> Result<Response, AppError> {
+        self.call_api_with_timeout::<()>(session, "GET", path, None, params, Some(timeout))
+            .await
+    }
+
     pub async fn post<T: serde::Serialize>(
         &self,
         session: &AccountSession,
@@ -556,9 +583,10 @@ impl SekaiClient {
             .bytes()
             .await
             .map_err(|e| {
+                let is_timeout = e.is_timeout();
                 AppError::NetworkError(format!(
-                    "failed to read response body (status={}, content-type={}, content-encoding={}): {}",
-                    status, content_type, content_encoding, e
+                    "failed to read response body (status={}, content-type={}, content-encoding={}, timeout={}): {}",
+                    status, content_type, content_encoding, is_timeout, e
                 ))
             })?;
 
@@ -617,9 +645,10 @@ impl SekaiClient {
             .bytes()
             .await
             .map_err(|e| {
+                let is_timeout = e.is_timeout();
                 AppError::NetworkError(format!(
-                    "failed to read response body (status={}, content-type={}, content-encoding={}): {}",
-                    status, content_type, content_encoding, e
+                    "failed to read response body (status={}, content-type={}, content-encoding={}, timeout={}): {}",
+                    status, content_type, content_encoding, is_timeout, e
                 ))
             })?;
         if content_type.contains("octet-stream") || content_type.contains("binary") {
@@ -831,8 +860,11 @@ impl SekaiClient {
     }
 
     pub async fn get_cp_mysekai_image(&self, path: &str) -> Result<Vec<u8>, AppError> {
-        self.get_cp_image(&format!("image/mysekai-photo/{}", path.trim_start_matches('/')))
-            .await
+        self.get_cp_image(&format!(
+            "image/mysekai-photo/{}",
+            path.trim_start_matches('/')
+        ))
+        .await
     }
 
     pub async fn get_cp_custom_profile_card_thumbnail(
