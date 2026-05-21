@@ -5,8 +5,9 @@ use sea_orm::{ConnectionTrait, DatabaseConnection, TransactionTrait};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::path::{Path, PathBuf};
 use tracing::{info, warn};
+
+use crate::storage::StorageLocation;
 
 // Structure of schema_info.json
 #[derive(serde::Deserialize)]
@@ -91,31 +92,31 @@ impl IngestionEngine {
     /// (DELETE existing region rows → batch INSERT new rows), so a failure in one file
     /// does not roll back others.
     pub async fn ingest_master_data(&self, dir_path: &str, region: &str) -> Result<()> {
-        let path = Path::new(dir_path);
-        if !path.exists() || !path.is_dir() {
-            warn!("Directory {} does not exist", dir_path);
+        let store = StorageLocation::dir(&Default::default(), dir_path, false, "master_dir")?;
+        self.ingest_master_store(&store, region).await
+    }
+
+    pub async fn ingest_master_store(&self, store: &StorageLocation, region: &str) -> Result<()> {
+        if !store.is_available() {
+            warn!("Master storage {} is not available", store.display());
             return Ok(());
         }
 
-        let mut json_files: Vec<PathBuf> = Vec::new();
-        let mut rd = tokio::fs::read_dir(path).await?;
-        while let Some(entry) = rd.next_entry().await? {
-            let p = entry.path();
-            if p.extension().and_then(|s| s.to_str()) == Some("json") {
-                json_files.push(p);
-            }
-        }
+        let json_files = store.list_json_files().await?;
 
         // Process up to CONCURRENCY files at a time. The connection pool will queue
         // transactions that exceed its max_connections; no failures from contention.
         const CONCURRENCY: usize = 8;
         let failed_tables: Vec<String> = futures::stream::iter(json_files)
-            .map(|p| async move {
-                match self.ingest_file(&p, region).await {
+            .map(|entry| async move {
+                match self
+                    .ingest_file(store, &entry.path, &entry.name, region)
+                    .await
+                {
                     Ok(()) => None,
                     Err(e) => {
-                        warn!("Failed to ingest {}: {:#}", p.display(), e);
-                        Some(p.display().to_string())
+                        warn!("Failed to ingest {}: {:#}", entry.path, e);
+                        Some(entry.path)
                     }
                 }
             })
@@ -133,8 +134,14 @@ impl IngestionEngine {
         Ok(())
     }
 
-    async fn ingest_file(&self, path: &Path, region: &str) -> Result<()> {
-        let file_stem = path.file_stem().unwrap().to_str().unwrap();
+    async fn ingest_file(
+        &self,
+        store: &StorageLocation,
+        path: &str,
+        name: &str,
+        region: &str,
+    ) -> Result<()> {
+        let file_stem = name.strip_suffix(".json").unwrap_or(name);
         let table_name = match self.resolve_table_name(file_stem) {
             Some(t) => t,
             None => return Ok(()),
@@ -151,7 +158,7 @@ impl IngestionEngine {
         let has_server_region = db_cols.contains_key("server_region");
 
         // Async file I/O — does not block the runtime.
-        let json_content = tokio::fs::read_to_string(path).await?;
+        let json_content = String::from_utf8(store.read_path(path).await?)?;
 
         // JSON parsing and row-value building are CPU-bound; run on the blocking thread pool
         // so they don't starve other async tasks running concurrently.

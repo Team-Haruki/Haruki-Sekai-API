@@ -17,7 +17,17 @@
 #             git.password_file, git.signing_key_file,
 #             servers.<region>.aes_key_hex_file,
 #             servers.<region>.aes_iv_hex_file,
+#             servers.<region>.*_storage.secret_access_key_file,
+#             servers.<region>.*_storage.access_key_secret_file,
+#             apphash_sources[N].storage.secret_access_key_file,
+#             apphash_sources[N].storage.access_key_secret_file,
 #             asset_updater_servers[N].authorization_file
+#
+# Optional OpenDAL storage blocks can replace selected local paths. Supported
+# schemes compiled into this binary: fs, s3, oss, cos, gcs, azblob, obs.
+# If a storage block is omitted, the legacy path field next to it is used.
+# Local account storage uses notify-based file watching; non-fs account
+# storage uses periodic OpenDAL list/stat polling (`poll_interval_secs`).
 #
 # Local single-file deployments need none of the above — this YAML alone works.
 # The default YAML path being absent is OK *only* when CONFIG_PATH is unset
@@ -87,6 +97,15 @@ master_database:
 apphash_sources: # sources for apphash, to update apphash values periodically
   # - type: file
   #   dir: "/path/to/your/local/apphash_json/directory"
+  # - type: file
+  #   storage:
+  #     scheme: "s3"
+  #     bucket: "haruki-sekai"
+  #     root: "apphash"
+  #     endpoint: "https://s3.example.com"
+  #     region: "auto"
+  #     access_key_id: ""
+  #     secret_access_key_file: "/run/secrets/haruki/s3_secret"
   - type: "url"
     url: "https://apphash.provider.com/apphash_json"
 
@@ -105,10 +124,45 @@ servers:
     aes_key_hex: ""
     aes_iv_hex: ""
     account_dir: ""
+    # account_storage:
+    #   scheme: "s3"
+    #   bucket: "haruki-sekai"
+    #   root: "accounts/jp"
+    #   endpoint: "https://s3.example.com"
+    #   region: "auto"
+    #   access_key_id: ""
+    #   secret_access_key_file: "/run/secrets/haruki/s3_secret"
+    #   poll_interval_secs: 30
     master_dir: ""
+    # master_storage:
+    #   scheme: "s3"
+    #   bucket: "haruki-sekai"
+    #   root: "master/jp"
+    #   endpoint: "https://s3.example.com"
+    #   region: "auto"
+    #   access_key_id: ""
+    #   secret_access_key_file: "/run/secrets/haruki/s3_secret"
     version_path: ""
+    # version_storage:
+    #   scheme: "s3"
+    #   bucket: "haruki-sekai"
+    #   root: "versions"
+    #   path: "jp/version.json"
+    #   endpoint: "https://s3.example.com"
+    #   region: "auto"
+    #   access_key_id: ""
+    #   secret_access_key_file: "/run/secrets/haruki/s3_secret"
     nuverse_master_data_url: ""
     nuverse_structure_file_path: ""
+    # nuverse_structure_storage:
+    #   scheme: "s3"
+    #   bucket: "haruki-sekai"
+    #   root: "nuverse"
+    #   path: "jp/structure.json"
+    #   endpoint: "https://s3.example.com"
+    #   region: "auto"
+    #   access_key_id: ""
+    #   secret_access_key_file: "/run/secrets/haruki/s3_secret"
     enable_master_updater: true # check for master data updates periodically
     master_updater_cron: "7 * * * * *" # cron expression, this mean "execute it at every minute at second 7"
     enable_app_hash_updater: true # check for app hash updates periodically

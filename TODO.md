@@ -13,8 +13,9 @@
 | 4 | 容器与 Helm 资产（非 root Dockerfile + Helm chart + 裸 manifests） | ✅ 完成 |
 | 5 | 远程存储抽象（原 Storage trait 设计） | ❌ 已评估，不实施 — 见下文 |
 | 5' | 共享卷部署支持（PVC values + 文档） | ✅ 完成（推荐替代方案） |
+| 6 | OpenDAL 存储层（显式 opt-in，保留本地默认） | ✅ 完成 |
 
-最新一次回归：`cargo test --lib` 23/23 绿、`cargo clippy --all-targets -- -D warnings` clean。
+最新一次回归：`cargo test --lib` 30 passed（1 ignored）、`cargo clippy --all-targets -- -D warnings` clean。
 
 ## 兼容性硬约束
 
@@ -105,21 +106,20 @@
 
 ---
 
-## Phase 5 — 远程存储抽象（已评估，**不实施**）
+## Phase 5 — 原 Storage trait 方案（已评估，**不实施**）
 
-> 在动手前对所有 28 处使用做了 grep 调研，结论是原 Storage trait 设计在当前代码里没有可行落点，记录原因如下，避免未来重复评估。
+> 这是早期“从零设计 Storage trait”的评估记录。后续 Phase 6 改为采用 OpenDAL
+> 作为薄存储层，且只在显式 `*_storage` 配置时启用。
 
 | 字段 | 实际操作 | 抽象到对象存储是否可行 |
 | --- | --- | --- |
-| `master_dir` | `tokio::fs::write` 每张 master 表 + `git push` 整个目录 | ❌ git 必须真实工作树（P5-5 已承认） |
-| `account_dir` | `fs::read_dir` 启动加载 + `notify::PollWatcher` 监听热重载 | ❌ S3 / GCS 没有 inotify 语义 |
-| `version_path` | 单 JSON 文件，仅 updater 单例读写 | 可行但无收益（无共享需求） |
-| `nuverse_structure_file_path` | 单 JSON 文件，仅 updater 单例读 | 可行但无收益 |
+| `master_dir` | 写每张 master 表 + 可选 `git push` 整个目录 | OpenDAL 可写 master；`git.enabled=true` 仍必须是真实 local fs 工作树 |
+| `account_dir` | 启动加载 + local `notify::PollWatcher` 热重载 | OpenDAL 可 list/read；非 fs 后端改用轮询，fs 后端保留 watcher |
+| `version_path` | API 启动/刷新读取，updater 写入 | 适合 OpenDAL，是 API/updater 共享状态的优先目标 |
+| `nuverse_structure_file_path` | Nuverse master updater 读取 | 适合 OpenDAL |
 
-API 二进制（`./haruki-sekai-api`）grep 确认**根本不读** `master_dir` / `version_path` / `nuverse_structure_file_path`——这些只属于 updater。
-唯一被 API 多副本访问的是 `account_dir`，而它需要文件 watcher。
-
-**结论**：触动 28 个调用点换一个不会有 S3 实现的 trait，是纯亏。"K8s 多副本共享 master 数据"的真正解法是 **ReadWriteMany PVC**，PollWatcher 在 NFS 上工作，且与现有代码 0 冲突。
+**结论更新**：不自建 trait；使用 OpenDAL 封装 read/write/list/stat。PVC 仍是最简单的
+K8s 方案，但对象存储现在是可选部署路径。
 
 - [ ] ~~**P5-1** 设计 `Storage` trait~~（不实施）
 - [ ] ~~**P5-2** `LocalFs` 实现~~（不实施）
@@ -139,8 +139,23 @@ API 二进制（`./haruki-sekai-api`）grep 确认**根本不读** `master_dir` 
 - [x] **P5'-3** README "Configuration sources" 后增 "Persistent storage" 小节，说明：
   - `master_dir`：updater 写、API 不读 → updater 单副本即可，**RWO 足够**；只有当外部还有读者（如 git remote 镜像）才需 RWX。
   - `account_dir`：多 API 副本共享 → 必须 RWX（NFS / Longhorn / EFS / Filestore）。
-  - `version_path` / `nuverse_structure_file_path`：updater 独占，与 `master_dir` 同卷即可。
+  - `version_path`：API 读、updater 写；可用共享卷或 `version_storage`。
+  - `nuverse_structure_file_path`：updater 读；可与 `master_dir` 同卷或使用 `nuverse_structure_storage`。
 - [x] **P5'-4** Helm `values.yaml` 默认 `persistence.*.enabled: false` 保留无状态启动可能（适合开发环境 / 单副本）。
+
+---
+
+## Phase 6 — OpenDAL 存储层（重新评估后实施）
+
+边界：旧路径字段继续默认本地文件语义；只有显式配置 `*_storage` 时才走 OpenDAL。
+
+- [x] **P6-1** 引入 OpenDAL，并提升 MSRV 到 Rust 1.85。
+- [x] **P6-2** 增加 `StorageConfig` 与 secret-file 支持。
+- [x] **P6-3** `version_path` / `nuverse_structure_file_path` 走 storage wrapper。
+- [x] **P6-4** `master_dir` 写入和 DB ingest 走 storage wrapper；`git.enabled=true` 仍要求 local fs。
+- [x] **P6-5** `account_dir` 支持 local fs watcher；非 fs storage 使用 OpenDAL polling。
+- [x] **P6-6** `apphash_sources[type=file]` 支持 OpenDAL storage。
+- [x] **P6-7** 跑完整回归并补充必要测试。
 
 ---
 
@@ -156,6 +171,6 @@ API 二进制（`./haruki-sekai-api`）grep 确认**根本不读** `master_dir` 
 ## 验收清单（每个 Phase 合并前自检）
 
 - [x] `haruki-sekai-configs.example.yaml` 原样加载（`config::tests::loads_example_yaml_unchanged` 锁定基线）。
-- [x] `cargo test --lib` 全绿（23/23），新增字段均有缺省回退测试。
+- [x] `cargo test --lib` 全绿（30 passed，1 ignored），新增字段均有缺省回退测试。
 - [x] `cargo clippy --all-targets -- -D warnings` 无新增告警。
 - [x] README "How to Use" 段落（本地部署）保持原状未改动。

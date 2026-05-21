@@ -1,10 +1,10 @@
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use std::path::Path;
 use tracing::{error, info, warn};
 
-use crate::config::{AppHashSource, ServerRegion};
+use crate::config::{AppHashSource, ServerRegion, StorageConfig};
 use crate::error::AppError;
+use crate::storage::StorageLocation;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppInfo {
@@ -17,7 +17,7 @@ pub struct AppInfo {
 pub struct AppHashUpdater {
     pub region: ServerRegion,
     pub sources: Vec<AppHashSource>,
-    pub version_path: String,
+    pub version_store: StorageLocation,
     pub proxy: Option<String>,
 }
 
@@ -26,14 +26,15 @@ impl AppHashUpdater {
         region: ServerRegion,
         sources: Vec<AppHashSource>,
         version_path: String,
+        version_storage: StorageConfig,
         proxy: Option<String>,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, AppError> {
+        Ok(Self {
             region,
             sources,
-            version_path,
+            version_store: StorageLocation::file(&version_storage, &version_path, "version_path")?,
             proxy,
-        }
+        })
     }
 
     pub async fn check_update(&self) {
@@ -93,7 +94,7 @@ impl AppHashUpdater {
     }
 
     async fn load_current_version(&self) -> Result<AppInfo, AppError> {
-        let data = tokio::fs::read(&self.version_path).await?;
+        let data = self.version_store.read_base().await?;
         #[derive(Deserialize)]
         struct VersionFile {
             #[serde(rename = "appVersion")]
@@ -117,16 +118,16 @@ impl AppHashUpdater {
     }
 
     async fn fetch_from_file(&self, source: &AppHashSource) -> Result<Option<AppInfo>, AppError> {
-        let dir = Path::new(&source.dir);
-        if !tokio::fs::try_exists(dir).await.unwrap_or(false) {
+        let store = StorageLocation::dir(&source.storage, &source.dir, false, "apphash_source")?;
+        if !store.is_available() {
             return Ok(None);
         }
         let region_name = self.region.as_str();
-        let file_path = dir.join(format!("{}.json", region_name));
-        if !tokio::fs::try_exists(&file_path).await.unwrap_or(false) {
-            return Ok(None);
-        }
-        let data = tokio::fs::read(&file_path).await?;
+        let data = match store.read_child(&format!("{}.json", region_name)).await {
+            Ok(data) => data,
+            Err(AppError::NotFound(_)) => return Ok(None),
+            Err(e) => return Err(e),
+        };
         let info: AppInfo = sonic_rs::from_slice(&data)?;
         Ok(Some(info))
     }
@@ -153,7 +154,7 @@ impl AppHashUpdater {
     }
 
     async fn update_version(&self, info: &AppInfo) -> Result<(), AppError> {
-        let data = tokio::fs::read(&self.version_path).await?;
+        let data = self.version_store.read_base().await?;
         let mut version: serde_json::Map<String, serde_json::Value> = sonic_rs::from_slice(&data)?;
         version.insert(
             "appVersion".to_string(),
@@ -164,7 +165,7 @@ impl AppHashUpdater {
             serde_json::Value::String(info.app_hash.clone()),
         );
         let json = sonic_rs::to_string_pretty(&version)?;
-        tokio::fs::write(&self.version_path, json).await?;
+        self.version_store.write_base(json.into_bytes()).await?;
         Ok(())
     }
 }

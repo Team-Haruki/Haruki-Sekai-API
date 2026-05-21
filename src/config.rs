@@ -116,6 +116,9 @@ fn default_log_format() -> String {
 fn default_run_updaters_inproc() -> bool {
     true
 }
+fn default_storage_poll_interval_secs() -> u64 {
+    30
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct DatabaseConfig {
@@ -165,21 +168,96 @@ pub struct GitConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StorageConfig {
+    #[serde(default)]
+    pub scheme: String,
+    #[serde(default)]
+    pub root: String,
+    #[serde(default)]
+    pub path: String,
+    #[serde(default)]
+    pub endpoint: String,
+    #[serde(default)]
+    pub bucket: String,
+    #[serde(default)]
+    pub region: String,
+    #[serde(default)]
+    pub access_key_id: String,
+    #[serde(default)]
+    pub secret_access_key: String,
+    #[serde(default)]
+    pub secret_access_key_file: String,
+    #[serde(default)]
+    pub access_key_secret: String,
+    #[serde(default)]
+    pub access_key_secret_file: String,
+    #[serde(default = "default_storage_poll_interval_secs")]
+    pub poll_interval_secs: u64,
+    #[serde(default)]
+    pub options: HashMap<String, String>,
+}
+
+impl StorageConfig {
+    pub fn is_configured(&self) -> bool {
+        !self.scheme.is_empty()
+            || !self.root.is_empty()
+            || !self.path.is_empty()
+            || !self.endpoint.is_empty()
+            || !self.bucket.is_empty()
+            || !self.region.is_empty()
+            || !self.access_key_id.is_empty()
+            || !self.secret_access_key.is_empty()
+            || !self.secret_access_key_file.is_empty()
+            || !self.access_key_secret.is_empty()
+            || !self.access_key_secret_file.is_empty()
+            || !self.options.is_empty()
+    }
+}
+
+impl Default for StorageConfig {
+    fn default() -> Self {
+        Self {
+            scheme: String::new(),
+            root: String::new(),
+            path: String::new(),
+            endpoint: String::new(),
+            bucket: String::new(),
+            region: String::new(),
+            access_key_id: String::new(),
+            secret_access_key: String::new(),
+            secret_access_key_file: String::new(),
+            access_key_secret: String::new(),
+            access_key_secret_file: String::new(),
+            poll_interval_secs: default_storage_poll_interval_secs(),
+            options: HashMap::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerConfig {
     #[serde(default)]
     pub enabled: bool,
     #[serde(default)]
     pub master_dir: String,
     #[serde(default)]
+    pub master_storage: StorageConfig,
+    #[serde(default)]
     pub version_path: String,
     #[serde(default)]
+    pub version_storage: StorageConfig,
+    #[serde(default)]
     pub account_dir: String,
+    #[serde(default)]
+    pub account_storage: StorageConfig,
     #[serde(default)]
     pub api_url: String,
     #[serde(default)]
     pub nuverse_master_data_url: String,
     #[serde(default)]
     pub nuverse_structure_file_path: String,
+    #[serde(default)]
+    pub nuverse_structure_storage: StorageConfig,
     #[serde(default)]
     pub require_cookies: bool,
     #[serde(default)]
@@ -208,6 +286,8 @@ pub struct AppHashSource {
     pub source_type: String,
     #[serde(default)]
     pub dir: String,
+    #[serde(default)]
+    pub storage: StorageConfig,
     #[serde(default)]
     pub url: String,
 }
@@ -378,6 +458,21 @@ impl Config {
         )?;
 
         for (region, server) in self.servers.iter_mut() {
+            server
+                .account_storage
+                .resolve_secret_files(&format!("servers.{}.account_storage", region.as_str()))?;
+            server
+                .master_storage
+                .resolve_secret_files(&format!("servers.{}.master_storage", region.as_str()))?;
+            server
+                .version_storage
+                .resolve_secret_files(&format!("servers.{}.version_storage", region.as_str()))?;
+            server
+                .nuverse_structure_storage
+                .resolve_secret_files(&format!(
+                    "servers.{}.nuverse_structure_storage",
+                    region.as_str()
+                ))?;
             load_secret(
                 &server.aes_key_hex_file,
                 &mut server.aes_key_hex,
@@ -398,6 +493,28 @@ impl Config {
             )?;
         }
 
+        for (idx, source) in self.apphash_sources.iter_mut().enumerate() {
+            source
+                .storage
+                .resolve_secret_files(&format!("apphash_sources[{}].storage", idx))?;
+        }
+
+        Ok(())
+    }
+}
+
+impl StorageConfig {
+    fn resolve_secret_files(&mut self, ctx: &str) -> anyhow::Result<()> {
+        load_secret(
+            &self.secret_access_key_file,
+            &mut self.secret_access_key,
+            &format!("{}.secret_access_key_file", ctx),
+        )?;
+        load_secret(
+            &self.access_key_secret_file,
+            &mut self.access_key_secret,
+            &format!("{}.access_key_secret_file", ctx),
+        )?;
         Ok(())
     }
 }
@@ -554,6 +671,37 @@ backend:
 
         let cfg = Config::load().unwrap();
         assert_eq!(cfg.database.dsn, "postgres://from-file/db");
+    }
+
+    #[test]
+    fn storage_secret_file_overrides_field() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let mut guard = EnvGuard::new();
+        let tmp = tempdir();
+
+        let secret_path = tmp.join("s3-secret");
+        std::fs::write(&secret_path, "from-storage-file\n").unwrap();
+
+        let yaml = format!(
+            r#"
+servers:
+  jp:
+    version_storage:
+      scheme: "s3"
+      bucket: "haruki"
+      path: "jp/version.json"
+      access_key_id: "key"
+      secret_access_key: "from-yaml"
+      secret_access_key_file: "{}"
+"#,
+            secret_path.to_str().unwrap()
+        );
+        let path = write_yaml(&tmp, &yaml);
+        guard.set("CONFIG_PATH", path.to_str().unwrap());
+
+        let cfg = Config::load().unwrap();
+        let jp = cfg.servers.get(&ServerRegion::Jp).unwrap();
+        assert_eq!(jp.version_storage.secret_access_key, "from-storage-file");
     }
 
     #[test]

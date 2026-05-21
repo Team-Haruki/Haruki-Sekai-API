@@ -8,6 +8,7 @@ pub mod error;
 pub mod ingest_engine;
 pub mod logging;
 pub mod models;
+pub mod storage;
 pub mod updater;
 pub mod utils;
 

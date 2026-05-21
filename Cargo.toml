@@ -4,7 +4,7 @@ version = "6.0.0"
 edition = "2021"
 authors = ["Haruki Dev Team"]
 description = "Haruki Sekai API - Rust Edition"
-rust-version = "1.70"
+rust-version = "1.85"
 
 [dependencies]
 tokio = { version = "1.50.0", features = ["full"] }
@@ -38,6 +38,7 @@ chrono = "0.4.44"
 num_enum = "0.7.6"
 notify = "8.2.0"
 figment = { version = "0.10.19", features = ["yaml", "env"] }
+opendal = { version = "0.56.0", default-features = false, features = ["reqwest-rustls-tls", "executors-tokio", "services-fs", "services-s3", "services-oss", "services-cos", "services-gcs", "services-azblob", "services-obs"] }
 
 [profile.release]
 lto = "thin"
