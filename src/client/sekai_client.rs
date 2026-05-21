@@ -878,6 +878,14 @@ impl SekaiClient {
         .await
     }
 
+    pub async fn get_cp_custom_music_score(&self, path: &str) -> Result<Vec<u8>, AppError> {
+        self.get_cp_image(&format!(
+            "image/blob/custom-music-score/full/{}",
+            path.trim_start_matches('/')
+        ))
+        .await
+    }
+
     pub async fn get_nuverse_mysekai_image(
         &self,
         user_id: &str,
