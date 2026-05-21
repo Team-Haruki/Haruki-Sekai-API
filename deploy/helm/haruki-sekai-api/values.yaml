@@ -53,6 +53,11 @@ configFile:
 #   HARUKI_SERVERS__JP__ACCOUNT_DIR: "/app/Data/accounts/jp"
 #   HARUKI_SERVERS__JP__MASTER_DIR: "/app/Data/master/jp/master"
 #   HARUKI_SERVERS__JP__VERSION_PATH: "/app/Data/master/jp/version.json"
+# Alternatively, configure OpenDAL storage through env/YAML:
+#   HARUKI_SERVERS__JP__ACCOUNT_STORAGE__SCHEME: "s3"
+#   HARUKI_SERVERS__JP__ACCOUNT_STORAGE__BUCKET: "haruki-sekai"
+#   HARUKI_SERVERS__JP__ACCOUNT_STORAGE__ROOT: "accounts/jp"
+#   HARUKI_SERVERS__JP__ACCOUNT_STORAGE__POLL_INTERVAL_SECS: "30"
 persistence:
   master:
     enabled: false
@@ -117,7 +122,7 @@ updater:
   nodeSelector: {}
   tolerations: []
   affinity: {}
-  # Updater is stateful (git working tree, master_dir). Always 1 replica.
+  # Updater is stateful (master writes, optional git working tree). Always 1 replica.
   # Override only if you understand the implications.
   replicaCount: 1
 

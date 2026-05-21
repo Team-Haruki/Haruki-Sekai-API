@@ -48,7 +48,7 @@ pub async fn init_app_state(config: Config) -> anyhow::Result<AppState> {
     for result in results {
         match result {
             Ok(Ok((region, client))) => {
-                if let Err(e) = client.clone().start_file_watcher() {
+                if let Err(e) = client.clone().start_account_watcher() {
                     warn!(
                         "Failed to start file watcher for {}: {}",
                         region.as_str(),

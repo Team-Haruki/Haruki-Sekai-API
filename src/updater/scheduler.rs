@@ -117,12 +117,22 @@ pub async fn start_scheduler(
                 continue;
             }
             info!("{} AppHash updater scheduled: {}", region_name, cron_expr);
-            let updater = Arc::new(AppHashUpdater::new(
+            let updater = match AppHashUpdater::new(
                 *region,
                 config.apphash_sources.clone(),
                 server_config.version_path.clone(),
+                server_config.version_storage.clone(),
                 proxy.clone(),
-            ));
+            ) {
+                Ok(updater) => Arc::new(updater),
+                Err(e) => {
+                    error!(
+                        "{} Failed to initialize apphash updater: {}",
+                        region_name, e
+                    );
+                    continue;
+                }
+            };
             match Job::new_async(cron_expr.as_str(), move |_uuid, _lock| {
                 let updater = updater.clone();
                 Box::pin(async move {

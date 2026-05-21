@@ -147,6 +147,16 @@ impl From<std::io::Error> for AppError {
     }
 }
 
+impl From<opendal::Error> for AppError {
+    fn from(e: opendal::Error) -> Self {
+        if e.kind() == opendal::ErrorKind::NotFound {
+            AppError::NotFound(e.to_string())
+        } else {
+            AppError::IoError(e.to_string())
+        }
+    }
+}
+
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, num_enum::TryFromPrimitive, num_enum::IntoPrimitive,
 )]

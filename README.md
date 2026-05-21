@@ -58,6 +58,10 @@ are opt-in for container / Kubernetes use.
    `git.password_file`, `git.signing_key_file`,
    `servers.<region>.aes_key_hex_file`,
    `servers.<region>.aes_iv_hex_file`,
+   `servers.<region>.*_storage.secret_access_key_file`,
+   `servers.<region>.*_storage.access_key_secret_file`,
+   `apphash_sources[N].storage.secret_access_key_file`,
+   `apphash_sources[N].storage.access_key_secret_file`,
    `asset_updater_servers[N].authorization_file`.
 
 If `CONFIG_PATH` is unset and the default YAML file is missing, the service
@@ -73,12 +77,55 @@ installations usually need PVCs for paths that are backed by files:
 | ------------ | ------------------ | ----- |
 | `servers.<region>.account_dir` | RWX PVC mounted on API and updater | Required when API replicas share account files; the updater also initializes clients and reads this directory. Use NFS, Longhorn, EFS, Filestore, or another RWX-capable StorageClass. |
 | `servers.<region>.master_dir` | RWO PVC mounted on updater | The API does not read this path. The singleton updater writes master data and may run `git push`, so a normal filesystem is required. |
-| `servers.<region>.version_path` / `nuverse_structure_file_path` | Same updater PVC as `master_dir` | These files are updater-owned and can live under the master-data mount. |
+| `servers.<region>.version_path` | Shared API/updater volume or `version_storage` | API clients read it on startup and version refresh; the updater writes it. |
+| `servers.<region>.nuverse_structure_file_path` | Same updater PVC as `master_dir` or `nuverse_structure_storage` | Used by the Nuverse master updater. |
 
 The Helm chart exposes `persistence.accounts.*` and `persistence.master.*`;
 both are disabled by default. After enabling a PVC, set the matching server
 path fields through YAML or `HARUKI_SERVERS__<REGION>__...` env vars so they
 point under the configured mount path.
+
+### OpenDAL storage
+
+Selected path-backed settings can use OpenDAL instead of local files by adding
+the storage block next to the legacy path. If the storage block is omitted, the
+old path behavior is unchanged.
+
+| Legacy path | Optional storage block | Notes |
+| ----------- | ---------------------- | ----- |
+| `account_dir` | `account_storage` | `scheme: fs` keeps the local `notify` watcher. Other schemes use periodic OpenDAL `list/stat` polling, controlled by `poll_interval_secs`. |
+| `master_dir` | `master_storage` | Updater writes master JSON files through OpenDAL. `git.enabled=true` still requires local fs storage because git needs a real working tree. |
+| `version_path` | `version_storage` | Read by API clients and written by updater, so this is the best shared-state target for object storage. |
+| `nuverse_structure_file_path` | `nuverse_structure_storage` | Read by the Nuverse master updater. |
+| `apphash_sources[N].dir` | `apphash_sources[N].storage` | Used when `type: file`; reads `{region}.json` from the configured storage prefix. |
+
+Supported schemes in the default binary are `fs`, `s3`, `oss`, `cos`, `gcs`,
+`azblob`, and `obs`.
+
+Example:
+
+```yaml
+servers:
+  jp:
+    account_storage:
+      scheme: "s3"
+      bucket: "haruki-sekai"
+      root: "accounts/jp"
+      endpoint: "https://s3.example.com"
+      region: "auto"
+      access_key_id: "..."
+      secret_access_key_file: "/run/secrets/haruki/s3_secret"
+      poll_interval_secs: 30
+    version_storage:
+      scheme: "s3"
+      bucket: "haruki-sekai"
+      root: "versions"
+      path: "jp/version.json"
+      endpoint: "https://s3.example.com"
+      region: "auto"
+      access_key_id: "..."
+      secret_access_key_file: "/run/secrets/haruki/s3_secret"
+```
 
 ### Kubernetes deployment sketch
 

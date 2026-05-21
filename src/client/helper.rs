@@ -1,4 +1,3 @@
-use std::path::Path;
 use std::sync::Arc;
 
 use parking_lot::Mutex;
@@ -6,6 +5,7 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
 use crate::error::AppError;
+use crate::storage::StorageLocation;
 
 pub struct CookieHelper {
     url: String,
@@ -90,21 +90,22 @@ pub struct VersionInfo {
     pub cdn_version: i32,
 }
 pub struct VersionHelper {
-    version_file_path: String,
+    storage: StorageLocation,
     version_info: Arc<Mutex<VersionInfo>>,
 }
 
 impl VersionHelper {
-    pub fn new(version_file_path: &str) -> Self {
+    pub fn new(storage: StorageLocation) -> Self {
         Self {
-            version_file_path: version_file_path.to_string(),
+            storage,
             version_info: Arc::new(Mutex::new(VersionInfo::default())),
         }
     }
 
     pub async fn load(&self) -> Result<VersionInfo, AppError> {
-        let path = Path::new(&self.version_file_path);
-        let data = tokio::fs::read(path)
+        let data = self
+            .storage
+            .read_base()
             .await
             .map_err(|e| AppError::ParseError(format!("Failed to read version file: {}", e)))?;
 
@@ -117,6 +118,10 @@ impl VersionHelper {
 
     pub fn get(&self) -> VersionInfo {
         self.version_info.lock().clone()
+    }
+
+    pub fn storage(&self) -> &StorageLocation {
+        &self.storage
     }
 
     pub fn update(&self, info: VersionInfo) {

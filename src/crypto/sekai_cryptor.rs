@@ -134,7 +134,7 @@ impl SekaiCryptor {
 fn pkcs7_pad(data: &[u8], block_size: usize) -> Vec<u8> {
     let padding_len = block_size - (data.len() % block_size);
     let mut padded = data.to_vec();
-    padded.extend(std::iter::repeat(padding_len as u8).take(padding_len));
+    padded.extend(std::iter::repeat_n(padding_len as u8, padding_len));
     padded
 }
 

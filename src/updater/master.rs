@@ -1,4 +1,3 @@
-use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -190,8 +189,22 @@ impl MasterUpdater {
             }
             self.client.version_helper.update(new_version);
             if let Some(ref git_helper) = self.git_helper {
-                let master_dir = &self.client.config.master_dir;
-                match git_helper.push_changes(master_dir, &login_response.data_version) {
+                let Some(master_dir) = self.client.master_store.local_path() else {
+                    error!(
+                        "{} Git push requires local fs master storage; skipping push for {}",
+                        self.region.as_str().to_uppercase(),
+                        self.client.master_store.display()
+                    );
+                    info!(
+                        "{} Master data check complete",
+                        self.region.as_str().to_uppercase()
+                    );
+                    return;
+                };
+                match git_helper.push_changes(
+                    master_dir.to_string_lossy().as_ref(),
+                    &login_response.data_version,
+                ) {
                     Ok(true) => info!(
                         "{} Git pushed changes successfully",
                         self.region.as_str().to_uppercase()
@@ -337,8 +350,7 @@ impl MasterUpdater {
             "{} Downloading master data...",
             self.region.as_str().to_uppercase()
         );
-        let master_dir = &self.client.config.master_dir;
-        tokio::fs::create_dir_all(master_dir).await?;
+        self.client.master_store.create_dir().await?;
 
         if self.region.is_cp_server() {
             let paths: Vec<String> = login
@@ -354,7 +366,7 @@ impl MasterUpdater {
                 .collect();
             for api_path in paths {
                 let data = self.download_cp_master_split(session, &api_path).await?;
-                self.save_master_files(&data, master_dir).await?;
+                self.save_master_files(&data).await?;
             }
         } else {
             let url = format!(
@@ -367,12 +379,12 @@ impl MasterUpdater {
             let data = self.client.cryptor.unpack_ordered(&body)?;
             let structures = self.load_structures().await?;
             let restored = crate::client::nuverse::nuverse_master_restorer(&data, &structures)?;
-            self.save_master_files(&restored, master_dir).await?;
+            self.save_master_files(&restored).await?;
         }
 
         if let Some(db) = self.db.clone() {
             let region = self.region;
-            let master_dir = master_dir.to_string();
+            let master_store = self.client.master_store.clone();
             tokio::spawn(async move {
                 info!(
                     "{} Starting database ingestion for new master data...",
@@ -381,7 +393,8 @@ impl MasterUpdater {
                 match crate::ingest_engine::IngestionEngine::new(db).await {
                     Ok(engine) => {
                         let region_str = region.as_str().to_lowercase();
-                        if let Err(e) = engine.ingest_master_data(&master_dir, &region_str).await {
+                        if let Err(e) = engine.ingest_master_store(&master_store, &region_str).await
+                        {
                             warn!(
                                 "{} Master Data Ingestion partial failure: {}",
                                 region.as_str().to_uppercase(),
@@ -515,13 +528,12 @@ impl MasterUpdater {
     async fn save_master_files(
         &self,
         data: &IndexMap<String, JsonValue>,
-        master_dir: &str,
     ) -> Result<(), crate::error::AppError> {
         let total_keys = data.len();
         let mut success_count = 0;
         let mut fail_count = 0;
         for (key, value) in data {
-            let file_path = Path::new(master_dir).join(format!("{}.json", key));
+            let file_name = format!("{}.json", key);
             let json = match sonic_rs::to_string_pretty(value) {
                 Ok(j) => j,
                 Err(e) => {
@@ -535,7 +547,7 @@ impl MasterUpdater {
                     continue;
                 }
             };
-            match tokio::fs::write(&file_path, json).await {
+            match self.client.master_store.write_child(&file_name, json).await {
                 Ok(_) => success_count += 1,
                 Err(e) => {
                     warn!(
@@ -565,23 +577,24 @@ impl MasterUpdater {
 
     async fn load_structures(&self) -> Result<IndexMap<String, JsonValue>, crate::error::AppError> {
         let path = &self.client.config.nuverse_structure_file_path;
-        if path.is_empty() {
+        if path.is_empty() && !self.client.nuverse_structure_store.is_available() {
             return Ok(IndexMap::new());
         }
-        let data = tokio::fs::read(path).await?;
+        let data = self.client.nuverse_structure_store.read_base().await?;
         let structures: IndexMap<String, JsonValue> = sonic_rs::from_slice(&data)
             .map_err(|e| crate::error::AppError::ParseError(e.to_string()))?;
         Ok(structures)
     }
 
     async fn save_version(&self, version: &VersionInfo) -> Result<(), crate::error::AppError> {
-        let path = &self.client.config.version_path;
-        let mut existing: serde_json::Map<String, serde_json::Value> = if Path::new(path).exists() {
-            let data = tokio::fs::read(path).await?;
-            sonic_rs::from_slice(&data).unwrap_or_default()
-        } else {
-            serde_json::Map::new()
-        };
+        let version_store = self.client.version_helper.storage();
+        let mut existing: serde_json::Map<String, serde_json::Value> =
+            if version_store.exists_base().await? {
+                let data = version_store.read_base().await?;
+                sonic_rs::from_slice(&data).unwrap_or_default()
+            } else {
+                serde_json::Map::new()
+            };
         existing.insert(
             "appVersion".to_string(),
             serde_json::Value::String(version.app_version.clone()),
@@ -608,10 +621,10 @@ impl MasterUpdater {
         );
         let json = sonic_rs::to_string_pretty(&existing)
             .map_err(|e| crate::error::AppError::ParseError(e.to_string()))?;
-        tokio::fs::write(path, &json).await?;
-        let dir = Path::new(path).parent().unwrap_or(Path::new("."));
-        let versioned_path = dir.join(format!("{}.json", version.data_version));
-        tokio::fs::write(versioned_path, &json).await?;
+        version_store.write_base(json.as_bytes().to_vec()).await?;
+        version_store
+            .write_sibling(&format!("{}.json", version.data_version), json.into_bytes())
+            .await?;
         Ok(())
     }
 }

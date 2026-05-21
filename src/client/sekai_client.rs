@@ -1,6 +1,4 @@
 use std::collections::HashMap;
-use std::fs;
-use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -16,6 +14,7 @@ use uuid::Uuid;
 use crate::config::{ServerConfig, ServerRegion};
 use crate::crypto::SekaiCryptor;
 use crate::error::{AppError, SekaiHttpStatus};
+use crate::storage::StorageLocation;
 
 use super::account::{AccountType, SekaiAccount, SekaiAccountCP, SekaiAccountNuverse};
 use super::helper::{CookieHelper, VersionHelper, VersionInfo};
@@ -25,6 +24,9 @@ use super::token_utils;
 pub struct SekaiClient {
     pub region: ServerRegion,
     pub config: ServerConfig,
+    pub account_store: StorageLocation,
+    pub master_store: StorageLocation,
+    pub nuverse_structure_store: StorageLocation,
     pub cookie_helper: Option<Arc<CookieHelper>>,
     pub version_helper: Arc<VersionHelper>,
     pub proxy: Option<String>,
@@ -66,7 +68,29 @@ impl SekaiClient {
         let http_client = client_builder
             .build()
             .map_err(|e| AppError::NetworkError(e.to_string()))?;
-        let version_helper = Arc::new(VersionHelper::new(&config.version_path));
+        let version_store = StorageLocation::file(
+            &config.version_storage,
+            &config.version_path,
+            "version_path",
+        )?;
+        let account_store = StorageLocation::dir(
+            &config.account_storage,
+            &config.account_dir,
+            false,
+            "account_dir",
+        )?;
+        let master_store = StorageLocation::dir(
+            &config.master_storage,
+            &config.master_dir,
+            true,
+            "master_dir",
+        )?;
+        let nuverse_structure_store = StorageLocation::file(
+            &config.nuverse_structure_storage,
+            &config.nuverse_structure_file_path,
+            "nuverse_structure_file_path",
+        )?;
+        let version_helper = Arc::new(VersionHelper::new(version_store));
         let cookie_helper = if region == ServerRegion::Jp && config.require_cookies {
             jp_cookie_url
                 .filter(|url| !url.is_empty())
@@ -77,6 +101,9 @@ impl SekaiClient {
         let client = Self {
             region,
             config,
+            account_store,
+            master_store,
+            nuverse_structure_store,
             cookie_helper,
             version_helper,
             proxy,
@@ -101,12 +128,12 @@ impl SekaiClient {
         }
         let version = self.version_helper.load().await?;
         self.update_version_headers(&version);
-        let accounts = self.parse_accounts()?;
+        let accounts = self.parse_accounts().await?;
         if accounts.is_empty() {
             warn!(
                 "{} No accounts found in {}",
                 self.region.as_str().to_uppercase(),
-                self.config.account_dir
+                self.account_store.display()
             );
             return Ok(());
         }
@@ -190,7 +217,7 @@ impl SekaiClient {
             sessions.clear();
             self.session_index.store(0, Ordering::SeqCst);
         }
-        let accounts = self.parse_accounts()?;
+        let accounts = self.parse_accounts().await?;
         for account in accounts {
             if self.region.is_cp_server() && account.user_id().is_empty() {
                 warn!(
@@ -222,16 +249,30 @@ impl SekaiClient {
         Ok(())
     }
 
-    pub fn start_file_watcher(self: Arc<Self>) -> Result<(), AppError> {
+    pub fn start_account_watcher(self: Arc<Self>) -> Result<(), AppError> {
+        if self.account_store.is_local_fs() {
+            return self.start_local_account_watcher();
+        }
+        self.start_account_poller();
+        Ok(())
+    }
+
+    fn start_local_account_watcher(self: Arc<Self>) -> Result<(), AppError> {
         use notify::{Config, PollWatcher, RecursiveMode, Watcher};
         use std::sync::mpsc::channel;
 
-        let account_dir = self.config.account_dir.clone();
-        if account_dir.is_empty() || !Path::new(&account_dir).exists() {
+        let Some(account_dir) = self.account_store.local_path().map(|p| p.to_path_buf()) else {
+            warn!(
+                "{} Account storage is not local fs, skipping file watcher",
+                self.region.as_str().to_uppercase()
+            );
+            return Ok(());
+        };
+        if !account_dir.exists() {
             warn!(
                 "{} Account directory not found: {}, skipping file watcher",
                 self.region.as_str().to_uppercase(),
-                account_dir
+                account_dir.display()
             );
             return Ok(());
         }
@@ -240,7 +281,7 @@ impl SekaiClient {
         let mut watcher = PollWatcher::new(tx, config)
             .map_err(|e| AppError::Internal(format!("Failed to create file watcher: {}", e)))?;
         watcher
-            .watch(Path::new(&account_dir), RecursiveMode::NonRecursive)
+            .watch(&account_dir, RecursiveMode::NonRecursive)
             .map_err(|e| AppError::Internal(format!("Failed to watch directory: {}", e)))?;
         let client = self.clone();
         let region_str = self.region.as_str().to_uppercase();
@@ -248,7 +289,8 @@ impl SekaiClient {
             let _watcher = watcher;
             info!(
                 "{} File watcher started for {} (polling mode, 5s interval)",
-                region_str, account_dir
+                region_str,
+                account_dir.display()
             );
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -294,37 +336,73 @@ impl SekaiClient {
         Ok(())
     }
 
-    fn parse_accounts(&self) -> Result<Vec<AccountType>, AppError> {
-        let mut accounts = Vec::new();
-        let account_dir = Path::new(&self.config.account_dir);
-        if !account_dir.exists() {
-            return Ok(accounts);
+    fn start_account_poller(self: Arc<Self>) {
+        if !self.account_store.is_available() {
+            warn!(
+                "{} Account storage not configured, skipping account poller",
+                self.region.as_str().to_uppercase()
+            );
+            return;
         }
-        let entries = fs::read_dir(account_dir)
-            .map_err(|e| AppError::ParseError(format!("Failed to read account dir: {}", e)))?;
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("json") {
-                continue;
+        let client = self.clone();
+        let region_str = self.region.as_str().to_uppercase();
+        let interval = self.account_store.poll_interval();
+        tokio::spawn(async move {
+            info!(
+                "{} Account storage poller started for {} (interval {:?})",
+                region_str,
+                client.account_store.display(),
+                interval
+            );
+            let mut last_snapshot = match client.account_store.json_fingerprint_map().await {
+                Ok(snapshot) => snapshot,
+                Err(e) => {
+                    warn!("{} Failed to snapshot account storage: {}", region_str, e);
+                    Default::default()
+                }
+            };
+            loop {
+                tokio::time::sleep(interval).await;
+                let snapshot = match client.account_store.json_fingerprint_map().await {
+                    Ok(snapshot) => snapshot,
+                    Err(e) => {
+                        warn!("{} Failed to poll account storage: {}", region_str, e);
+                        continue;
+                    }
+                };
+                if snapshot == last_snapshot {
+                    continue;
+                }
+                info!("{} Account storage change detected", region_str);
+                last_snapshot = snapshot;
+                if let Err(e) = client.reload_accounts().await {
+                    error!("{} Failed to reload accounts: {}", region_str, e);
+                }
             }
-            let data = match fs::read(&path) {
+        });
+    }
+
+    async fn parse_accounts(&self) -> Result<Vec<AccountType>, AppError> {
+        let mut accounts = Vec::new();
+        for entry in self.account_store.list_json_files().await? {
+            let data = match self.account_store.read_path(&entry.path).await {
                 Ok(d) => d,
                 Err(e) => {
-                    warn!("Failed to read {}: {}", path.display(), e);
+                    warn!("Failed to read {}: {}", entry.path, e);
                     continue;
                 }
             };
-            match self.parse_account_file(&path, &data) {
+            match self.parse_account_file(&entry.path, &data) {
                 Ok(mut accs) => accounts.append(&mut accs),
                 Err(e) => {
-                    warn!("Failed to parse {}: {}", path.display(), e);
+                    warn!("Failed to parse {}: {}", entry.path, e);
                 }
             }
         }
         Ok(accounts)
     }
 
-    fn parse_account_file(&self, path: &Path, data: &[u8]) -> Result<Vec<AccountType>, AppError> {
+    fn parse_account_file(&self, path: &str, data: &[u8]) -> Result<Vec<AccountType>, AppError> {
         let value: serde_json::Value = sonic_rs::from_slice(data)
             .map_err(|e| AppError::ParseError(format!("JSON parse error: {}", e)))?;
         let mut accounts = Vec::new();
@@ -349,13 +427,13 @@ impl SekaiClient {
     fn parse_account_value(
         &self,
         value: serde_json::Value,
-        path: &Path,
+        path: &str,
         idx: Option<usize>,
     ) -> Option<AccountType> {
         let log_prefix = if let Some(i) = idx {
-            format!("[{}][{}]", path.display(), i)
+            format!("[{}][{}]", path, i)
         } else {
-            format!("[{}]", path.display())
+            format!("[{}]", path)
         };
 
         if self.region.is_cp_server() {
