@@ -49,6 +49,18 @@ async fn proxy_game_api(
     })
 }
 
+fn encode_path_segment(value: &str) -> String {
+    let mut encoded = String::with_capacity(value.len());
+    for &byte in value.as_bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            encoded.push(byte as char);
+        } else {
+            encoded.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    encoded
+}
+
 pub async fn get_user_profile(
     State(state): State<Arc<AppState>>,
     axum::Extension(auth_user): axum::Extension<Option<crate::api::middleware::AuthUser>>,
@@ -86,6 +98,30 @@ pub async fn get_information(
     Path(server): Path<String>,
 ) -> Result<ApiResponse, AppError> {
     proxy_game_api(&state, &server, "/information").await
+}
+
+pub async fn get_custom_music_score_published_search(
+    State(state): State<Arc<AppState>>,
+    Path((server, user_id, score_id)): Path<(String, String, String)>,
+) -> Result<ApiResponse, AppError> {
+    let user_path = match user_id.as_str() {
+        "%user_id" | "%25user_id" | "{userId}" => "{userId}",
+        value if value.chars().all(|c| c.is_ascii_digit()) => value,
+        _ => {
+            return Err(AppError::ParseError(
+                "user_id must be numeric or %user_id".to_string(),
+            ));
+        }
+    };
+    if score_id.trim().is_empty() {
+        return Err(AppError::ParseError("score_id is empty".to_string()));
+    }
+    let path = format!(
+        "/user/{}/custom-music-score/published/search/{}",
+        user_path,
+        encode_path_segment(&score_id)
+    );
+    proxy_game_api(&state, &server, &path).await
 }
 
 pub async fn get_event_ranking_top100(

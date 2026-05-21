@@ -42,12 +42,20 @@ pub fn create_router(state: Arc<MainAppState>) -> Router {
         .route(
             "/image/{server}/custom-profile-card/thumbnail/{param1}/{param2}",
             get(image::get_custom_profile_card_thumbnail),
+        )
+        .route(
+            "/image/{server}/blob/custom-music-score/full/{param1}/{param2}",
+            get(image::get_custom_music_score),
         );
 
     let api_routes = Router::new()
         .route("/{server}/{user_id}/profile", get(apis::get_user_profile))
         .route("/{server}/system", get(apis::get_system))
         .route("/{server}/information", get(apis::get_information))
+        .route(
+            "/{server}/user/{user_id}/custom-music-score/published/search/{score_id}",
+            get(apis::get_custom_music_score_published_search),
+        )
         .route(
             "/{server}/event/{event_id}/ranking-top100",
             get(apis::get_event_ranking_top100),
