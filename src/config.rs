@@ -6,6 +6,8 @@ use std::env;
 use std::path::Path;
 use tracing::warn;
 
+use crate::storage::StorageLocation;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ServerRegion {
@@ -304,6 +306,8 @@ pub struct AssetUpdaterInfo {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     #[serde(default)]
+    pub config_storage: StorageConfig,
+    #[serde(default)]
     pub proxy: String,
     #[serde(default)]
     pub jp_sekai_cookie_url: String,
@@ -383,11 +387,12 @@ impl Config {
     /// Load configuration with the priority chain:
     /// `defaults` < `YAML file` < `HARUKI_*` env vars < `*_file` secret files.
     ///
-    /// `CONFIG_PATH` env var selects the YAML file (default: `haruki-sekai-configs.yaml`
-    /// in the current directory). When `CONFIG_PATH` is **explicitly set**, a missing
-    /// file is a fatal error. When unset and the default file is missing, we log a
-    /// warning and continue with defaults + env — this enables YAML-less deployments
-    /// (e.g. K8s ConfigMap/Secret only) without breaking local usage.
+    /// `CONFIG_PATH` env var selects the legacy YAML file path (default:
+    /// `haruki-sekai-configs.yaml` in the current directory). When
+    /// `HARUKI_CONFIG_STORAGE__*` or `CONFIG_STORAGE_*` env vars are set, that
+    /// OpenDAL storage is used to read the YAML before normal `HARUKI_*`
+    /// overrides are applied. Without config storage, an explicitly missing
+    /// `CONFIG_PATH` is fatal; the default path remains optional.
     pub fn load() -> anyhow::Result<Self> {
         let (config_path, explicit) = match env::var("CONFIG_PATH") {
             Ok(p) => (p, true),
@@ -395,19 +400,28 @@ impl Config {
         };
 
         let mut figment = Figment::new();
-        let path = Path::new(&config_path);
-        if path.exists() {
-            figment = figment.merge(Yaml::file(path));
+        if let Some(config_yaml) = load_config_yaml_from_storage(&config_path)? {
+            figment = figment.merge(Yaml::string(&config_yaml));
         } else if explicit {
-            return Err(anyhow::anyhow!(
-                "Config file '{}' (from CONFIG_PATH) does not exist",
-                config_path
-            ));
+            let path = Path::new(&config_path);
+            if path.exists() {
+                figment = figment.merge(Yaml::file(path));
+            } else {
+                return Err(anyhow::anyhow!(
+                    "Config file '{}' (from CONFIG_PATH) does not exist",
+                    config_path
+                ));
+            }
         } else {
-            warn!(
-                "Config file '{}' not found; loading from defaults and HARUKI_* env vars only",
-                config_path
-            );
+            let path = Path::new(&config_path);
+            if path.exists() {
+                figment = figment.merge(Yaml::file(path));
+            } else {
+                warn!(
+                    "Config file '{}' not found; loading from defaults and HARUKI_* env vars only",
+                    config_path
+                );
+            }
         }
 
         figment = figment.merge(Env::prefixed("HARUKI_").split("__"));
@@ -425,6 +439,7 @@ impl Config {
     /// don't exist or are empty after trimming are treated as fatal — silent
     /// fallthrough would risk shipping with an unset secret.
     fn resolve_secret_files(&mut self) -> anyhow::Result<()> {
+        self.config_storage.resolve_secret_files("config_storage")?;
         load_secret(
             &self.backend.sekai_user_jwt_signing_key_file,
             &mut self.backend.sekai_user_jwt_signing_key,
@@ -501,6 +516,72 @@ impl Config {
 
         Ok(())
     }
+}
+
+fn load_config_yaml_from_storage(config_path: &str) -> anyhow::Result<Option<String>> {
+    let mut storage = bootstrap_config_storage();
+    if !storage.is_configured() {
+        return Ok(None);
+    }
+    storage.resolve_secret_files("config_storage")?;
+
+    let config_path = config_path.to_string();
+    std::thread::spawn(move || -> anyhow::Result<Option<String>> {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        runtime.block_on(async move {
+            let store = StorageLocation::file(&storage, &config_path, "CONFIG_PATH")
+                .map_err(|e| anyhow::anyhow!("Failed to initialize config storage: {}", e))?;
+            let data = store.read_base().await.map_err(|e| {
+                anyhow::anyhow!("Failed to read config file from {}: {}", store.display(), e)
+            })?;
+            String::from_utf8(data).map(Some).map_err(|e| {
+                anyhow::anyhow!("Config file from {} is not UTF-8: {}", store.display(), e)
+            })
+        })
+    })
+    .join()
+    .map_err(|_| anyhow::anyhow!("Config storage reader thread panicked"))?
+}
+
+fn bootstrap_config_storage() -> StorageConfig {
+    let mut storage = StorageConfig {
+        scheme: bootstrap_env("SCHEME"),
+        root: bootstrap_env("ROOT"),
+        path: bootstrap_env("PATH"),
+        endpoint: bootstrap_env("ENDPOINT"),
+        bucket: bootstrap_env("BUCKET"),
+        region: bootstrap_env("REGION"),
+        access_key_id: bootstrap_env("ACCESS_KEY_ID"),
+        secret_access_key: bootstrap_env("SECRET_ACCESS_KEY"),
+        secret_access_key_file: bootstrap_env("SECRET_ACCESS_KEY_FILE"),
+        access_key_secret: bootstrap_env("ACCESS_KEY_SECRET"),
+        access_key_secret_file: bootstrap_env("ACCESS_KEY_SECRET_FILE"),
+        poll_interval_secs: bootstrap_env("POLL_INTERVAL_SECS")
+            .parse()
+            .unwrap_or_else(|_| default_storage_poll_interval_secs()),
+        options: HashMap::new(),
+    };
+    for (key, value) in env::vars() {
+        if let Some(option) = key.strip_prefix("HARUKI_CONFIG_STORAGE__OPTIONS__") {
+            storage.options.insert(option.to_ascii_lowercase(), value);
+        } else if let Some(option) = key.strip_prefix("CONFIG_STORAGE_OPTIONS__") {
+            storage.options.insert(option.to_ascii_lowercase(), value);
+        }
+    }
+    storage
+}
+
+fn bootstrap_env(name: &str) -> String {
+    [
+        format!("HARUKI_CONFIG_STORAGE__{}", name),
+        format!("CONFIG_STORAGE_{}", name),
+        format!("CONFIG_STORAGE__{}", name),
+    ]
+    .into_iter()
+    .find_map(|key| env::var(key).ok())
+    .unwrap_or_default()
 }
 
 impl StorageConfig {
@@ -702,6 +783,63 @@ servers:
         let cfg = Config::load().unwrap();
         let jp = cfg.servers.get(&ServerRegion::Jp).unwrap();
         assert_eq!(jp.version_storage.secret_access_key, "from-storage-file");
+    }
+
+    #[test]
+    fn config_storage_fs_loads_yaml() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let mut guard = EnvGuard::new();
+        let tmp = tempdir();
+        let storage_root = tmp.join("config-store");
+        std::fs::create_dir_all(&storage_root).unwrap();
+        std::fs::write(
+            storage_root.join("cloud.yaml"),
+            r#"
+backend:
+  port: 23456
+redis:
+  enabled: false
+"#,
+        )
+        .unwrap();
+        env::set_current_dir(&tmp).unwrap();
+        guard.set("HARUKI_CONFIG_STORAGE__SCHEME", "fs");
+        guard.set(
+            "HARUKI_CONFIG_STORAGE__ROOT",
+            storage_root.to_str().unwrap(),
+        );
+        guard.set("HARUKI_CONFIG_STORAGE__PATH", "cloud.yaml");
+
+        let cfg = Config::load().unwrap();
+        assert_eq!(cfg.backend.port, 23456);
+        assert_eq!(cfg.config_storage.scheme, "fs");
+        assert_eq!(cfg.config_storage.path, "cloud.yaml");
+    }
+
+    #[test]
+    fn config_storage_fs_uses_config_path_filename_when_path_omitted() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let mut guard = EnvGuard::new();
+        let tmp = tempdir();
+        let storage_root = tmp.join("config-store");
+        std::fs::create_dir_all(&storage_root).unwrap();
+        std::fs::write(
+            storage_root.join("remote.yaml"),
+            r#"
+backend:
+  port: 34567
+redis:
+  enabled: false
+"#,
+        )
+        .unwrap();
+        env::set_current_dir(&tmp).unwrap();
+        guard.set("CONFIG_PATH", "remote.yaml");
+        guard.set("CONFIG_STORAGE_SCHEME", "fs");
+        guard.set("CONFIG_STORAGE_ROOT", storage_root.to_str().unwrap());
+
+        let cfg = Config::load().unwrap();
+        assert_eq!(cfg.backend.port, 34567);
     }
 
     #[test]

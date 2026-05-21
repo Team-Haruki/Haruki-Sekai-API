@@ -40,6 +40,8 @@ secrets:
 # Optional: mount a full YAML config from a Secret at a custom path and set
 # CONFIG_PATH to it. Useful for migrating an existing local YAML into K8s
 # without splitting it field-by-field. When disabled, only env+fileEnv apply.
+# For an OpenDAL-backed config file, leave this disabled and set env values
+# such as HARUKI_CONFIG_STORAGE__SCHEME/ROOT/PATH instead.
 configFile:
   enabled: false
   existingSecret: ""
@@ -54,6 +56,9 @@ configFile:
 #   HARUKI_SERVERS__JP__MASTER_DIR: "/app/Data/master/jp/master"
 #   HARUKI_SERVERS__JP__VERSION_PATH: "/app/Data/master/jp/version.json"
 # Alternatively, configure OpenDAL storage through env/YAML:
+#   HARUKI_CONFIG_STORAGE__SCHEME: "fs"
+#   HARUKI_CONFIG_STORAGE__ROOT: "/etc/haruki"
+#   HARUKI_CONFIG_STORAGE__PATH: "haruki-sekai-configs.yaml"
 #   HARUKI_SERVERS__JP__ACCOUNT_STORAGE__SCHEME: "s3"
 #   HARUKI_SERVERS__JP__ACCOUNT_STORAGE__BUCKET: "haruki-sekai"
 #   HARUKI_SERVERS__JP__ACCOUNT_STORAGE__ROOT: "accounts/jp"
