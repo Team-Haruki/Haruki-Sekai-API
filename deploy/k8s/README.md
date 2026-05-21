@@ -26,3 +26,6 @@ instead.
    example and use an RWX StorageClass (NFS, Longhorn, EFS, Filestore, etc.).
    The `haruki-sekai-master` PVC is only used by the singleton updater, so RWO
    is sufficient unless another workload also needs concurrent access.
+6. As an alternative to mounting config or data paths, set the OpenDAL storage
+   env vars documented in the top-level README. `HARUKI_CONFIG_STORAGE__SCHEME=fs`
+   with `ROOT`/`PATH` can load the YAML itself through OpenDAL during bootstrap.

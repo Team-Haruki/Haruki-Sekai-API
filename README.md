@@ -44,7 +44,9 @@ are opt-in for container / Kubernetes use.
 
 1. Built-in defaults.
 2. The YAML file pointed to by `CONFIG_PATH` (default
-   `./haruki-sekai-configs.yaml`).
+   `./haruki-sekai-configs.yaml`). The YAML itself can also be read through
+   OpenDAL by setting `HARUKI_CONFIG_STORAGE__*` or `CONFIG_STORAGE_*` env vars
+   before startup.
 3. Environment variables prefixed with `HARUKI_`. Nested keys use `__` as the
    separator. Examples:
    - `HARUKI_BACKEND__PORT=9999`
@@ -57,6 +59,8 @@ are opt-in for container / Kubernetes use.
    `redis.password_file`, `redis.url_file`,
    `backend.sekai_user_jwt_signing_key_file`,
    `git.password_file`, `git.signing_key_file`,
+   `config_storage.secret_access_key_file`,
+   `config_storage.access_key_secret_file`,
    `servers.<region>.aes_key_hex_file`,
    `servers.<region>.aes_iv_hex_file`,
    `servers.<region>.*_storage.secret_access_key_file`,
@@ -66,8 +70,9 @@ are opt-in for container / Kubernetes use.
    `asset_updater_servers[N].authorization_file`.
 
 If `CONFIG_PATH` is unset and the default YAML file is missing, the service
-starts from defaults + env vars only (a warning is logged). If `CONFIG_PATH`
-is explicitly set but points at a missing file, startup fails fast.
+starts from defaults + env vars only (a warning is logged). Without
+`config_storage`, an explicit `CONFIG_PATH` that points at a missing local file
+fails fast.
 
 ### Persistent storage
 
@@ -94,6 +99,7 @@ old path behavior is unchanged.
 
 | Legacy path | Optional storage block | Notes |
 | ----------- | ---------------------- | ----- |
+| `CONFIG_PATH` | `config_storage` | Bootstrap-only. Configure with env vars before startup; useful when the YAML file itself lives under an OpenDAL `fs` root or object storage. |
 | `account_dir` | `account_storage` | `scheme: fs` keeps the local `notify` watcher. Other schemes use periodic OpenDAL `list/stat` polling, controlled by `poll_interval_secs`. |
 | `master_dir` | `master_storage` | Updater writes master JSON files through OpenDAL. `git.enabled=true` still requires local fs storage because git needs a real working tree. |
 | `version_path` | `version_storage` | Read by API clients and written by updater, so this is the best shared-state target for object storage. |
@@ -121,6 +127,19 @@ For directory-like settings (`account_storage`, `master_storage`, and
 `apphash_sources[N].storage`) it is usually enough to set `root` to the prefix
 that contains JSON files. For single-file settings (`version_storage` and
 `nuverse_structure_storage`), set `path` to the JSON file key below `root`.
+
+The config file is special because it must be located before YAML is parsed.
+Set it through env vars instead of relying on a value inside the YAML:
+
+```bash
+HARUKI_CONFIG_STORAGE__SCHEME=fs
+HARUKI_CONFIG_STORAGE__ROOT=/etc/haruki
+HARUKI_CONFIG_STORAGE__PATH=haruki-sekai-configs.yaml
+```
+
+`CONFIG_STORAGE_SCHEME`, `CONFIG_STORAGE_ROOT`, and `CONFIG_STORAGE_PATH` are
+also accepted for early bootstrap. If `path` is omitted, `CONFIG_PATH` supplies
+the file name under `root`.
 
 Example YAML:
 
@@ -159,6 +178,9 @@ The same configuration can be supplied through env vars in Kubernetes:
 
 ```yaml
 env:
+  HARUKI_CONFIG_STORAGE__SCHEME: "fs"
+  HARUKI_CONFIG_STORAGE__ROOT: "/etc/haruki"
+  HARUKI_CONFIG_STORAGE__PATH: "haruki-sekai-configs.yaml"
   HARUKI_SERVERS__JP__ACCOUNT_STORAGE__SCHEME: "s3"
   HARUKI_SERVERS__JP__ACCOUNT_STORAGE__BUCKET: "haruki-sekai"
   HARUKI_SERVERS__JP__ACCOUNT_STORAGE__ROOT: "accounts/jp"

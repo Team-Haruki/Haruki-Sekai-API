@@ -10,8 +10,9 @@ Haruki Sekai API is a Rust service that proxies encrypted API calls to regional 
 src/
   main.rs                  – App bootstrap (tracing, config, server, graceful shutdown)
   lib.rs                   – Public modules, AppState struct
-  config.rs                – YAML config structs with serde defaults
+  config.rs                – YAML/env config loading, secret-file resolution, storage config structs
   error.rs                 – AppError enum (thiserror), HTTP status mapping, IntoResponse
+  storage.rs               – OpenDAL-backed file/dir wrapper with local fs fallback
   utils.rs                 – retry_async(), CachedResource<T>
   ingest_engine.rs         – Bulk JSON→DB ingestion using schema_info.json
   api/
@@ -34,7 +35,7 @@ src/
   updater/
     scheduler.rs           – Cron jobs: cookie refresh, master update, app hash
     master.rs              – MasterUpdater: version check, download, git push, DB ingest
-    git.rs                 – GitHelper: stage, commit, push via git2
+    git.rs                 – GitHelper: stage, commit, push via git CLI
     apphash.rs             – AppHashUpdater: poll file/URL sources for new app hashes
   models/                  – ~84 auto-generated game data model files
   bin/
@@ -65,10 +66,25 @@ haruki-sekai-configs.example.yaml – Configuration template
 ### Master Data Pipeline
 1. `MasterUpdater` checks game server for new data version
 2. Downloads and decrypts master data (CP: split API; Nuverse: CDN + structure file)
-3. Saves JSON files to `Data/master/{region}/master/`
-4. Optionally pushes to git repository
+3. Saves JSON files to `master_dir` or `master_storage`
+4. Optionally pushes to git repository (requires local fs master storage)
 5. Optionally ingests into PostgreSQL via `IngestionEngine`
 6. `IngestionEngine` maps JSON filenames → table names using `schema_info.json`
+
+### Configuration & Storage
+- Config loading priority: defaults < YAML < `HARUKI_*` env vars < `*_file` secret files
+- `CONFIG_PATH` remains the legacy local config file path. The config file itself can be read via OpenDAL by setting bootstrap env vars before startup:
+  - `HARUKI_CONFIG_STORAGE__SCHEME` / `CONFIG_STORAGE_SCHEME`
+  - `HARUKI_CONFIG_STORAGE__ROOT` / `CONFIG_STORAGE_ROOT`
+  - `HARUKI_CONFIG_STORAGE__PATH` / `CONFIG_STORAGE_PATH`
+- Path-backed runtime settings use opt-in `StorageConfig` blocks:
+  - `servers.<region>.account_storage`
+  - `servers.<region>.master_storage`
+  - `servers.<region>.version_storage`
+  - `servers.<region>.nuverse_structure_storage`
+  - `apphash_sources[N].storage`
+- `scheme: fs` uses OpenDAL's local filesystem backend. Local account fs storage keeps `notify::PollWatcher`; non-fs account storage uses periodic OpenDAL `list/stat` polling.
+- `root` is the backend root/object prefix. `path` is the file key or sub-prefix under `root`. Provider-specific OpenDAL keys go under `options`.
 
 ### Schema System
 - `schema_info.json` defines table names, column types, and unique keys
@@ -207,3 +223,4 @@ docker build --build-arg VERSION=v1.0.0 -t haruki-sekai-api .
 1. Add field to relevant struct in `src/config.rs` with `#[serde(default = "...")]`
 2. Add default function if needed
 3. Update `haruki-sekai-configs.example.yaml`
+4. If the field is path-backed, prefer an opt-in `StorageConfig` companion and keep the legacy local path behavior unchanged

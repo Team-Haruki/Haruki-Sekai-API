@@ -13,14 +13,15 @@
 | 4 | 容器与 Helm 资产（非 root Dockerfile + Helm chart + 裸 manifests） | ✅ 完成 |
 | 5 | 远程存储抽象（原 Storage trait 设计） | ❌ 已评估，不实施 — 见下文 |
 | 5' | 共享卷部署支持（PVC values + 文档） | ✅ 完成（推荐替代方案） |
-| 6 | OpenDAL 存储层（显式 opt-in，保留本地默认） | ✅ 完成 |
+| 6 | OpenDAL 存储层（显式 opt-in，保留本地默认，含配置文件 bootstrap） | ✅ 完成 |
 
-最新一次回归：`cargo test --lib` 30 passed（1 ignored）、`cargo clippy --all-targets -- -D warnings` clean。
+最新一次回归：`cargo test --lib` 33 passed（1 ignored）、`cargo clippy --all-targets -- -D warnings` clean。
 
 ## 兼容性硬约束
 
 - `haruki-sekai-configs.yaml` 现有字段全部保留，含义不变。
 - `CONFIG_PATH` 环境变量行为不变；未设置时仍回退到当前目录的 `haruki-sekai-configs.yaml`。
+  若设置 `HARUKI_CONFIG_STORAGE__*` / `CONFIG_STORAGE_*`，则启动期通过 OpenDAL 读取配置文件。
 - 默认日志、默认端口、默认 cron 表达式、默认 trusted_proxies 等行为不得回归差异。
 - 新增字段一律 `#[serde(default)]`，老配置缺省即旧行为。
 - 凡引入新源（env / secret 文件），优先级必须是：`默认值 < YAML < 环境变量 < *_FILE`，
@@ -155,7 +156,8 @@ K8s 方案，但对象存储现在是可选部署路径。
 - [x] **P6-4** `master_dir` 写入和 DB ingest 走 storage wrapper；`git.enabled=true` 仍要求 local fs。
 - [x] **P6-5** `account_dir` 支持 local fs watcher；非 fs storage 使用 OpenDAL polling。
 - [x] **P6-6** `apphash_sources[type=file]` 支持 OpenDAL storage。
-- [x] **P6-7** 跑完整回归并补充必要测试。
+- [x] **P6-7** `CONFIG_PATH` 支持通过启动期 `config_storage` / `CONFIG_STORAGE_*` 指向 OpenDAL `fs`。
+- [x] **P6-8** 跑完整回归并补充必要测试。
 
 ---
 
@@ -171,6 +173,6 @@ K8s 方案，但对象存储现在是可选部署路径。
 ## 验收清单（每个 Phase 合并前自检）
 
 - [x] `haruki-sekai-configs.example.yaml` 原样加载（`config::tests::loads_example_yaml_unchanged` 锁定基线）。
-- [x] `cargo test --lib` 全绿（30 passed，1 ignored），新增字段均有缺省回退测试。
+- [x] `cargo test --lib` 全绿（33 passed，1 ignored），新增字段均有缺省回退测试。
 - [x] `cargo clippy --all-targets -- -D warnings` 无新增告警。
 - [x] README "How to Use" 段落（本地部署）保持原状未改动。

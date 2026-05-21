@@ -535,6 +535,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn configured_fs_dir_uses_root_and_path() -> anyhow::Result<()> {
+        let tmp = tempdir();
+        let cfg = StorageConfig {
+            scheme: "fs".to_string(),
+            root: tmp.to_string_lossy().into_owned(),
+            path: "master/jp".to_string(),
+            ..StorageConfig::default()
+        };
+        let store = StorageLocation::dir(&cfg, "", true, "master_dir")?;
+
+        store.write_child("music.json", b"[]".to_vec()).await?;
+        assert_eq!(std::fs::read(tmp.join("master/jp/music.json"))?, b"[]");
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn configured_file_storage_falls_back_to_legacy_file_name() -> anyhow::Result<()> {
         let tmp = tempdir();
         let cfg = StorageConfig {

@@ -9,6 +9,9 @@
 #          HARUKI_BACKEND__PORT=9999
 #          HARUKI_REDIS__URL=redis://:pass@redis.svc:6379/0
 #          HARUKI_SERVERS__JP__AES_KEY_HEX=deadbeef...
+#          HARUKI_CONFIG_STORAGE__SCHEME=fs
+#          HARUKI_CONFIG_STORAGE__ROOT=/etc/haruki
+#          HARUKI_CONFIG_STORAGE__PATH=haruki-sekai-configs.yaml
 #   4. Secret-file fields (`*_file`): for any sensitive setting, set its
 #      `_file` companion to a path; the trimmed file contents replace the
 #      plain field. This pairs with K8s Secret/Docker secret mounts.
@@ -26,6 +29,8 @@
 # Optional OpenDAL storage blocks can replace selected local paths. Supported
 # schemes compiled into this binary: fs, s3, oss, cos, gcs, azblob, obs.
 # If a storage block is omitted, the legacy path field next to it is used.
+# `config_storage` is bootstrap-only: set it through env vars before startup
+# when the YAML file itself should be read from an OpenDAL backend.
 # In a storage block, `root` is the backend root/object prefix, while `path`
 # is the file key or sub-prefix below that root. Provider-specific OpenDAL
 # keys can be added under `options`.
