@@ -58,6 +58,11 @@ configFile:
 #   HARUKI_SERVERS__JP__ACCOUNT_STORAGE__BUCKET: "haruki-sekai"
 #   HARUKI_SERVERS__JP__ACCOUNT_STORAGE__ROOT: "accounts/jp"
 #   HARUKI_SERVERS__JP__ACCOUNT_STORAGE__POLL_INTERVAL_SECS: "30"
+#   HARUKI_SERVERS__JP__VERSION_STORAGE__SCHEME: "s3"
+#   HARUKI_SERVERS__JP__VERSION_STORAGE__BUCKET: "haruki-sekai"
+#   HARUKI_SERVERS__JP__VERSION_STORAGE__ROOT: "versions"
+#   HARUKI_SERVERS__JP__VERSION_STORAGE__PATH: "jp/version.json"
+# See README.md for root/path semantics and provider-specific `options`.
 persistence:
   master:
     enabled: false

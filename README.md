@@ -11,6 +11,7 @@
 ## Requirements
 + `MySQL`, `SQLite`, `PostgreSQL` (Optional, depending on your database choice)
 + `Redis` (Optional, for caching sekai users)
++ Rust 1.85+ (only needed when building from source)
 
 ## How to Use
 1. Go to release page to download `haruki-sekai-api`
@@ -102,7 +103,26 @@ old path behavior is unchanged.
 Supported schemes in the default binary are `fs`, `s3`, `oss`, `cos`, `gcs`,
 `azblob`, and `obs`.
 
-Example:
+Storage blocks use the same shape everywhere:
+
+| Field | Meaning |
+| ----- | ------- |
+| `scheme` | OpenDAL service name. Use `fs` for local filesystem or an object-store scheme such as `s3`. |
+| `root` | Backend root or object prefix. All reads/writes happen below this prefix. |
+| `path` | File key or sub-prefix under `root`. Required for single-file settings when the legacy path does not provide a filename. |
+| `endpoint`, `bucket`, `region` | Common object-store connection fields. `bucket` is also passed as `container` for Azure Blob style services. |
+| `access_key_id` | Access key / account id. |
+| `secret_access_key`, `access_key_secret` | Secret key. Both names are accepted because different providers use different wording. |
+| `secret_access_key_file`, `access_key_secret_file` | Read the secret key from a mounted file, with the file value taking precedence. |
+| `poll_interval_secs` | Poll interval for non-local `account_storage`; defaults to 30 seconds. |
+| `options` | Extra OpenDAL service options for provider-specific keys. |
+
+For directory-like settings (`account_storage`, `master_storage`, and
+`apphash_sources[N].storage`) it is usually enough to set `root` to the prefix
+that contains JSON files. For single-file settings (`version_storage` and
+`nuverse_structure_storage`), set `path` to the JSON file key below `root`.
+
+Example YAML:
 
 ```yaml
 servers:
@@ -116,6 +136,14 @@ servers:
       access_key_id: "..."
       secret_access_key_file: "/run/secrets/haruki/s3_secret"
       poll_interval_secs: 30
+    master_storage:
+      scheme: "s3"
+      bucket: "haruki-sekai"
+      root: "master/jp"
+      endpoint: "https://s3.example.com"
+      region: "auto"
+      access_key_id: "..."
+      secret_access_key_file: "/run/secrets/haruki/s3_secret"
     version_storage:
       scheme: "s3"
       bucket: "haruki-sekai"
@@ -126,6 +154,34 @@ servers:
       access_key_id: "..."
       secret_access_key_file: "/run/secrets/haruki/s3_secret"
 ```
+
+The same configuration can be supplied through env vars in Kubernetes:
+
+```yaml
+env:
+  HARUKI_SERVERS__JP__ACCOUNT_STORAGE__SCHEME: "s3"
+  HARUKI_SERVERS__JP__ACCOUNT_STORAGE__BUCKET: "haruki-sekai"
+  HARUKI_SERVERS__JP__ACCOUNT_STORAGE__ROOT: "accounts/jp"
+  HARUKI_SERVERS__JP__ACCOUNT_STORAGE__ENDPOINT: "https://s3.example.com"
+  HARUKI_SERVERS__JP__ACCOUNT_STORAGE__ACCESS_KEY_ID: "..."
+  HARUKI_SERVERS__JP__ACCOUNT_STORAGE__SECRET_ACCESS_KEY_FILE: "/run/secrets/haruki/s3_secret"
+  HARUKI_SERVERS__JP__VERSION_STORAGE__SCHEME: "s3"
+  HARUKI_SERVERS__JP__VERSION_STORAGE__BUCKET: "haruki-sekai"
+  HARUKI_SERVERS__JP__VERSION_STORAGE__ROOT: "versions"
+  HARUKI_SERVERS__JP__VERSION_STORAGE__PATH: "jp/version.json"
+```
+
+Notes:
+
+- `scheme: fs` still uses local filesystem semantics. For `account_storage`
+  that means the existing local watcher is used instead of object-store
+  polling.
+- `git.enabled=true` requires `master_storage` to be local `fs`, because git
+  operations need a real working tree.
+- The updater owns `master_storage` writes. API replicas only need shared
+  access to account and version storage.
+- If an object-store provider requires a setting that is not a top-level field,
+  put it under `options` and it will be passed through to OpenDAL.
 
 ### Kubernetes deployment sketch
 

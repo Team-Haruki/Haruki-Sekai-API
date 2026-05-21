@@ -26,6 +26,9 @@
 # Optional OpenDAL storage blocks can replace selected local paths. Supported
 # schemes compiled into this binary: fs, s3, oss, cos, gcs, azblob, obs.
 # If a storage block is omitted, the legacy path field next to it is used.
+# In a storage block, `root` is the backend root/object prefix, while `path`
+# is the file key or sub-prefix below that root. Provider-specific OpenDAL
+# keys can be added under `options`.
 # Local account storage uses notify-based file watching; non-fs account
 # storage uses periodic OpenDAL list/stat polling (`poll_interval_secs`).
 #
