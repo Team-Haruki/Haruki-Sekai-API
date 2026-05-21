@@ -958,7 +958,7 @@ impl SekaiClient {
 
     pub async fn get_cp_custom_music_score(&self, path: &str) -> Result<Vec<u8>, AppError> {
         self.get_cp_image(&format!(
-            "image/blob/custom-music-score/full/{}",
+            "blob/custom-music-score/full/{}",
             path.trim_start_matches('/')
         ))
         .await
