@@ -914,6 +914,112 @@ impl SekaiClient {
         ))
     }
 
+    #[tracing::instrument(skip(self, body, params), fields(region = ?self.region))]
+    pub async fn post_game_api_body<T: serde::Serialize>(
+        &self,
+        path: &str,
+        body: &T,
+        params: Option<&HashMap<String, String>>,
+    ) -> Result<(JsonValue, u16), AppError> {
+        while self.reload_in_progress.load(Ordering::SeqCst) {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let session = self.get_session().ok_or(AppError::NoClientAvailable)?;
+        let max_retries = 4;
+        let mut retry_count = 0;
+        while retry_count < max_retries {
+            let resp = self.post(&session, path, Some(body), params).await?;
+            match self.handle_response_ordered(resp).await {
+                Ok((result, upstream_status)) => {
+                    let json_value: JsonValue = serde_json::to_value(&result)
+                        .map_err(|e| AppError::ParseError(e.to_string()))?;
+                    return Ok((json_value, upstream_status));
+                }
+                Err(AppError::SessionError) => {
+                    warn!(
+                        "{} Session expired, re-logging in...",
+                        self.region.as_str().to_uppercase()
+                    );
+                    if let Err(e) = self.login(&session).await {
+                        error!(
+                            "{} Re-login failed: {}",
+                            self.region.as_str().to_uppercase(),
+                            e
+                        );
+                        return Err(AppError::SessionError);
+                    }
+                    retry_count += 1;
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+                Err(AppError::CookieExpired) => {
+                    if self.config.require_cookies {
+                        warn!(
+                            "{} Cookies expired, refreshing...",
+                            self.region.as_str().to_uppercase()
+                        );
+                        self.refresh_cookies().await?;
+                        retry_count += 1;
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                    } else {
+                        return Err(AppError::CookieExpired);
+                    }
+                }
+                Err(AppError::UpgradeRequired) => {
+                    warn!(
+                        "{} Server upgrade required, refreshing version and re-logging in...",
+                        self.region.as_str().to_uppercase()
+                    );
+                    self.refresh_version().await?;
+                    match self.login(&session).await {
+                        Ok(login_resp) => {
+                            self.update_version_headers_from_login(&login_resp);
+                        }
+                        Err(AppError::UpgradeRequired) => {
+                            warn!(
+                                "{} Login returned 426, waiting for app version update...",
+                                self.region.as_str().to_uppercase()
+                            );
+                            tokio::time::sleep(Duration::from_secs(10)).await;
+                            self.refresh_version().await?;
+                            match self.login(&session).await {
+                                Ok(login_resp) => {
+                                    self.update_version_headers_from_login(&login_resp);
+                                }
+                                Err(e) => {
+                                    error!(
+                                        "{} Re-login after waiting for app update failed: {}",
+                                        self.region.as_str().to_uppercase(),
+                                        e
+                                    );
+                                    return Err(AppError::UpgradeRequired);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            error!(
+                                "{} Re-login after version refresh failed: {}",
+                                self.region.as_str().to_uppercase(),
+                                e
+                            );
+                            return Err(AppError::UpgradeRequired);
+                        }
+                    }
+                    retry_count += 1;
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+                Err(AppError::UnderMaintenance) => {
+                    return Err(AppError::UnderMaintenance);
+                }
+                Err(e) => {
+                    return Err(e);
+                }
+            }
+        }
+        Err(AppError::NetworkError(
+            "Max retry attempts reached".to_string(),
+        ))
+    }
+
     async fn get_cp_image(&self, relative_path: &str) -> Result<Vec<u8>, AppError> {
         let session = self.get_session().ok_or(AppError::NoClientAvailable)?;
         let path_clean = relative_path.trim_start_matches('/');
@@ -959,6 +1065,17 @@ impl SekaiClient {
     pub async fn get_cp_custom_music_score(&self, path: &str) -> Result<Vec<u8>, AppError> {
         self.get_cp_image(&format!(
             "blob/custom-music-score/full/{}",
+            path.trim_start_matches('/')
+        ))
+        .await
+    }
+
+    pub async fn get_cp_mysekai_housing_competition_thumbnail(
+        &self,
+        path: &str,
+    ) -> Result<Vec<u8>, AppError> {
+        self.get_cp_image(&format!(
+            "image/mysekai-housing-competition/thumbnail/{}",
             path.trim_start_matches('/')
         ))
         .await
