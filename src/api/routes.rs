@@ -1,7 +1,11 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use axum::{middleware, routing::get, Json, Router};
+use axum::{
+    middleware,
+    routing::{get, post},
+    Json, Router,
+};
 use serde::Serialize;
 use tower_http::trace::TraceLayer;
 
@@ -40,6 +44,10 @@ pub fn create_router(state: Arc<MainAppState>) -> Router {
             get(image::get_mysekai_image),
         )
         .route(
+            "/image/{server}/mysekai-housing/{param1}/{param2}",
+            get(image::get_mysekai_housing_thumbnail),
+        )
+        .route(
             "/image/{server}/custom-profile-card/thumbnail/{param1}/{param2}",
             get(image::get_custom_profile_card_thumbnail),
         )
@@ -52,6 +60,22 @@ pub fn create_router(state: Arc<MainAppState>) -> Router {
         .route("/{server}/{user_id}/profile", get(apis::get_user_profile))
         .route("/{server}/system", get(apis::get_system))
         .route("/{server}/information", get(apis::get_information))
+        .route(
+            "/{server}/user/mysekai/housing-competition/{housing_id}/list",
+            get(apis::get_mysekai_housing_competition_list),
+        )
+        .route(
+            "/{server}/user/mysekai/housing-competition/{housing_id}/mysekai-owner/{owner_user_id}/entry",
+            post(apis::post_mysekai_housing_competition_entry),
+        )
+        .route(
+            "/{server}/mysekai/housing-competition/back-number-top-list",
+            get(apis::get_mysekai_housing_competition_back_number_top_list),
+        )
+        .route(
+            "/{server}/mysekai/housing-competition/{competition_id}/back-number-list",
+            get(apis::get_mysekai_housing_competition_back_number_list),
+        )
         .route(
             "/{server}/user/{user_id}/custom-music-score/published/search/{score_id}",
             get(apis::get_custom_music_score_published_search),
