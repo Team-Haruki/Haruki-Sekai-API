@@ -1,11 +1,13 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::{IntoResponse, Response},
 };
-use serde_json::Value as JsonValue;
+use serde::Deserialize;
+use serde_json::{json, Value as JsonValue};
 
 use crate::config::ServerRegion;
 use crate::error::AppError;
@@ -14,6 +16,20 @@ use crate::AppState;
 pub struct ApiResponse {
     status: StatusCode,
     body: JsonValue,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MySekaiHousingCompetitionListQuery {
+    #[serde(rename = "isLottery", default)]
+    pub is_lottery: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MySekaiHousingCompetitionEntryQuery {
+    #[serde(rename = "isBackNumber", default)]
+    pub is_back_number: Option<String>,
+    #[serde(rename = "mysekaiOwnerUserSubmittedAt")]
+    pub mysekai_owner_user_submitted_at: i64,
 }
 
 impl IntoResponse for ApiResponse {
@@ -47,6 +63,50 @@ async fn proxy_game_api(
         status: StatusCode::from_u16(status).unwrap_or(StatusCode::OK),
         body: data,
     })
+}
+
+async fn proxy_game_api_with_params(
+    state: &AppState,
+    server: &str,
+    path: &str,
+    params: &HashMap<String, String>,
+) -> Result<ApiResponse, AppError> {
+    let client = get_client(state, server)?;
+    let (data, status) = client.get_game_api(path, Some(params)).await?;
+
+    Ok(ApiResponse {
+        status: StatusCode::from_u16(status).unwrap_or(StatusCode::OK),
+        body: data,
+    })
+}
+
+async fn proxy_post_game_api_body<T: serde::Serialize>(
+    state: &AppState,
+    server: &str,
+    path: &str,
+    body: &T,
+) -> Result<ApiResponse, AppError> {
+    let client = get_client(state, server)?;
+    let (data, status) = client.post_game_api_body(path, body, None).await?;
+
+    Ok(ApiResponse {
+        status: StatusCode::from_u16(status).unwrap_or(StatusCode::OK),
+        body: data,
+    })
+}
+
+fn parse_optional_bool(value: Option<&str>, name: &str, default: bool) -> Result<bool, AppError> {
+    match value {
+        None | Some("") => Ok(default),
+        Some(value) => match value.to_ascii_lowercase().as_str() {
+            "true" => Ok(true),
+            "false" => Ok(false),
+            _ => Err(AppError::ParseError(format!(
+                "{} must be true or false",
+                name
+            ))),
+        },
+    }
 }
 
 fn encode_path_segment(value: &str) -> String {
@@ -98,6 +158,89 @@ pub async fn get_information(
     Path(server): Path<String>,
 ) -> Result<ApiResponse, AppError> {
     proxy_game_api(&state, &server, "/information").await
+}
+
+pub async fn get_mysekai_housing_competition_list(
+    State(state): State<Arc<AppState>>,
+    Path((server, housing_id)): Path<(String, String)>,
+    Query(query): Query<MySekaiHousingCompetitionListQuery>,
+) -> Result<ApiResponse, AppError> {
+    if !housing_id.chars().all(|c| c.is_ascii_digit()) {
+        return Err(AppError::ParseError(
+            "housing_id must be numeric".to_string(),
+        ));
+    }
+
+    let is_lottery = parse_optional_bool(query.is_lottery.as_deref(), "isLottery", true)?;
+    let path = format!(
+        "/user/{{userId}}/mysekai/housing-competition/{}/list",
+        housing_id
+    );
+    let mut params = HashMap::new();
+    params.insert(
+        "isLottery".to_string(),
+        if is_lottery { "True" } else { "False" }.to_string(),
+    );
+
+    proxy_game_api_with_params(&state, &server, &path, &params).await
+}
+
+pub async fn post_mysekai_housing_competition_entry(
+    State(state): State<Arc<AppState>>,
+    Path((server, housing_id, owner_user_id)): Path<(String, String, String)>,
+    Query(query): Query<MySekaiHousingCompetitionEntryQuery>,
+) -> Result<ApiResponse, AppError> {
+    if !housing_id.chars().all(|c| c.is_ascii_digit()) {
+        return Err(AppError::ParseError(
+            "housing_id must be numeric".to_string(),
+        ));
+    }
+    if !owner_user_id.chars().all(|c| c.is_ascii_digit()) {
+        return Err(AppError::ParseError(
+            "owner_user_id must be numeric".to_string(),
+        ));
+    }
+
+    let is_back_number =
+        parse_optional_bool(query.is_back_number.as_deref(), "isBackNumber", false)?;
+    let body = json!({
+        "isBackNumber": is_back_number,
+        "mysekaiOwnerUserSubmittedAt": query.mysekai_owner_user_submitted_at,
+    });
+    let path = format!(
+        "/user/{{userId}}/mysekai/housing-competition/{}/mysekai-owner/{}/entry",
+        housing_id, owner_user_id
+    );
+
+    proxy_post_game_api_body(&state, &server, &path, &body).await
+}
+
+pub async fn get_mysekai_housing_competition_back_number_top_list(
+    State(state): State<Arc<AppState>>,
+    Path(server): Path<String>,
+) -> Result<ApiResponse, AppError> {
+    proxy_game_api(
+        &state,
+        &server,
+        "/user/{userId}/mysekai/housing-competition/back-number-top-list",
+    )
+    .await
+}
+
+pub async fn get_mysekai_housing_competition_back_number_list(
+    State(state): State<Arc<AppState>>,
+    Path((server, competition_id)): Path<(String, String)>,
+) -> Result<ApiResponse, AppError> {
+    if !competition_id.chars().all(|c| c.is_ascii_digit()) {
+        return Err(AppError::ParseError(
+            "competition_id must be numeric".to_string(),
+        ));
+    }
+    let path = format!(
+        "/user/{{userId}}/mysekai/housing-competition/{}/back-number-list",
+        competition_id
+    );
+    proxy_game_api(&state, &server, &path).await
 }
 
 pub async fn get_custom_music_score_published_search(
