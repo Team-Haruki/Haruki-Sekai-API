@@ -74,9 +74,21 @@ Request body -> MessagePack -> AES-128-CBC encrypt -> HTTP -> AES decrypt -> Mes
 - Inline in `#[cfg(test)] mod tests` blocks, async tests use `#[tokio::test]`
 - Tests requiring external services (DB, Redis, game servers) are `#[ignore]`
 
-### Git Commits
+## Configuration
 
-All commits **must** follow: `[Type] Short description starting with capital letter`
+- Config file: `haruki-sekai-configs.yaml` (loaded via `CONFIG_PATH` env var, defaults to current dir)
+- Config structs in `src/config.rs` with `#[serde(default = "...")]` for defaults
+- Per-region server config: AES keys (hex), account directories, master data paths, cron schedules
+
+## Git commits
+
+All commit subjects must follow:
+
+```text
+[Type] Short description starting with capital letter
+```
+
+Allowed types:
 
 | Type      | Usage                                                 |
 |-----------|-------------------------------------------------------|
@@ -85,12 +97,39 @@ All commits **must** follow: `[Type] Short description starting with capital let
 | `[Chore]` | Maintenance, refactoring, dependency or build changes |
 | `[Docs]`  | Documentation-only changes                            |
 
-Rules: capital letter start, imperative mood, no trailing period, subject <= ~70 chars.
+Rules:
 
-AI agent commits **must** include a `Co-Authored-By` trailer for traceability.
+- Description starts with a capital letter.
+- Use imperative mood: `Add ...`, not `Added ...`.
+- No trailing period.
+- Keep the subject at or below roughly 70 characters.
+- **Agent attribution uses the standard Git `Co-authored-by:` trailer in the commit body, not a free-form `Agent:` line.** This makes GitHub render the co-author avatar on the commit page. The trailer must be on its own line, separated from the subject by a blank line, in the form `Co-authored-by: <Display Name> <email>`. Suggested values per agent:
+  - Claude (any 4.x): `Co-authored-by: Claude Opus 4.7 <noreply@anthropic.com>` (substitute the actual model, e.g. `Claude Sonnet 4.6`, `Claude Haiku 4.5`)
+  - Codex: `Co-authored-by: Codex <noreply@openai.com>`
+  - Copilot: `Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>`
 
-## Configuration
+Examples from this repo's history:
 
-- Config file: `haruki-sekai-configs.yaml` (loaded via `CONFIG_PATH` env var, defaults to current dir)
-- Config structs in `src/config.rs` with `#[serde(default = "...")]` for defaults
-- Per-region server config: AES keys (hex), account directories, master data paths, cron schedules
+```text
+[Feat] Add custom music score proxy routes
+[Fix] Replace manual padding repeat
+[Chore] Update dependencies
+[Chore] Bump actions/download-artifact from 4 to 8
+```
+
+## GitHub Actions workflows
+
+Use the standardized workflow layout in `.github/workflows`:
+
+- `ci.yml` runs on `main` pushes, pull requests targeting `main`, and manual dispatch.
+- Rust CI order: `cargo fmt --all -- --check`, `cargo check --locked --all-targets`, `cargo clippy --locked --all-targets -- -D warnings`, then `cargo test --locked`.
+- `release.yml` is the standard release build entrypoint. It runs on `v*` tags and manual dispatch, builds release artifacts, uploads them with `actions/upload-artifact`, and publishes GitHub Release assets on tag pushes.
+- `docker.yml` is the standard Docker entrypoint. It runs on `main` pushes, `v*` tags, PRs that touch Docker/build inputs, and manual dispatch. PRs build only; non-PR runs push GHCR images with lowercase image names and Docker metadata tags.
+
+Workflow maintenance rules:
+
+- Keep workflow filenames and top-level names aligned: `CI`, `Release`, `Docker`, and optional package-specific names.
+- Use `actions/checkout@v6`, `actions/setup-go@v6`, `actions/upload-artifact@v7`, `actions/download-artifact@v8`, `softprops/action-gh-release@v3`, and current Docker actions (`setup-buildx@v4`, `login@v4`, `metadata@v6`, `build-push@v7`).
+- Keep `permissions` minimal: `contents: read` for CI/Docker build-only work, `contents: write` for release publishing, and `packages: write` only when pushing container images.
+- Use workflow `concurrency` keyed by workflow name and ref, with release jobs using `release-${{ github.ref_name }}` and `cancel-in-progress: false`.
+- Do not reintroduce legacy workflow names such as `rust-ci.yml`, `build.yml`, `release-build.yml`, `docker-build.yml`, or `docker-release.yml` unless a package-specific workflow already exists and is intentionally preserved.
