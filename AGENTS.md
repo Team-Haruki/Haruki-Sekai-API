@@ -110,43 +110,6 @@ haruki-sekai-configs.example.yaml – Configuration template
 - Region-specific messages: prefix with `"{} message", region.as_str().to_uppercase()`
 - Log levels: `error` for unrecoverable failures, `warn` for handled failures, `info` for state changes, `debug` for diagnostics
 
-### Git Commits
-
-All commits **must** follow:
-
-```
-[Type] Short description starting with capital letter
-```
-
-| Type      | Usage                                                 |
-|-----------|-------------------------------------------------------|
-| `[Feat]`  | New feature or capability                             |
-| `[Fix]`   | Bug fix                                               |
-| `[Chore]` | Maintenance, refactoring, dependency or build changes |
-| `[Docs]`  | Documentation-only changes                            |
-
-Rules:
-- Description starts with a **capital letter**
-- Imperative mood (`Add ...`, not `Added ...`)
-- No trailing period
-- Keep subject <= ~70 chars
-
-Examples:
-```
-[Feat] Add toolbox live snapshot provider
-[Fix] Move user_snapshot config under pjsk_render
-[Chore] Rename config file to haruki-cloud.yaml
-[Docs] Update known-bugs.md with snapshot fix
-```
-
-### Agent Signature
-
-When an AI agent creates a commit, it **must** include a `Co-Authored-By` trailer identifying the agent. This ensures traceability of AI-generated changes.
-
-```
-Co-Authored-By: <Agent Name> <noreply@example.com>
-```
-
 ## Testing
 
 - Tests live in `#[cfg(test)] mod tests` blocks within source files
@@ -207,3 +170,57 @@ docker build --build-arg VERSION=v1.0.0 -t haruki-sekai-api .
 1. Add field to relevant struct in `src/config.rs` with `#[serde(default = "...")]`
 2. Add default function if needed
 3. Update `haruki-sekai-configs.example.yaml`
+
+## Git commits
+
+All commit subjects must follow:
+
+```text
+[Type] Short description starting with capital letter
+```
+
+Allowed types:
+
+| Type      | Usage                                                 |
+|-----------|-------------------------------------------------------|
+| `[Feat]`  | New feature or capability                             |
+| `[Fix]`   | Bug fix                                               |
+| `[Chore]` | Maintenance, refactoring, dependency or build changes |
+| `[Docs]`  | Documentation-only changes                            |
+
+Rules:
+
+- Description starts with a capital letter.
+- Use imperative mood: `Add ...`, not `Added ...`.
+- No trailing period.
+- Keep the subject at or below roughly 70 characters.
+- **Agent attribution uses the standard Git `Co-authored-by:` trailer in the commit body, not a free-form `Agent:` line.** This makes GitHub render the co-author avatar on the commit page. The trailer must be on its own line, separated from the subject by a blank line, in the form `Co-authored-by: <Display Name> <email>`. Suggested values per agent:
+  - Claude (any 4.x): `Co-authored-by: Claude Opus 4.7 <noreply@anthropic.com>` (substitute the actual model, e.g. `Claude Sonnet 4.6`, `Claude Haiku 4.5`)
+  - Codex: `Co-authored-by: Codex <noreply@openai.com>`
+  - Copilot: `Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>`
+
+Examples from this repo's history:
+
+```text
+[Feat] Add custom music score proxy routes
+[Fix] Replace manual padding repeat
+[Chore] Update dependencies
+[Chore] Bump actions/download-artifact from 4 to 8
+```
+
+## GitHub Actions workflows
+
+Use the standardized workflow layout in `.github/workflows`:
+
+- `ci.yml` runs on `main` pushes, pull requests targeting `main`, and manual dispatch.
+- Rust CI order: `cargo fmt --all -- --check`, `cargo check --locked --all-targets`, `cargo clippy --locked --all-targets -- -D warnings`, then `cargo test --locked`.
+- `release.yml` is the standard release build entrypoint. It runs on `v*` tags and manual dispatch, builds release artifacts, uploads them with `actions/upload-artifact`, and publishes GitHub Release assets on tag pushes.
+- `docker.yml` is the standard Docker entrypoint. It runs on `main` pushes, `v*` tags, PRs that touch Docker/build inputs, and manual dispatch. PRs build only; non-PR runs push GHCR images with lowercase image names and Docker metadata tags.
+
+Workflow maintenance rules:
+
+- Keep workflow filenames and top-level names aligned: `CI`, `Release`, `Docker`, and optional package-specific names.
+- Use `actions/checkout@v6`, `actions/setup-go@v6`, `actions/upload-artifact@v7`, `actions/download-artifact@v8`, `softprops/action-gh-release@v3`, and current Docker actions (`setup-buildx@v4`, `login@v4`, `metadata@v6`, `build-push@v7`).
+- Keep `permissions` minimal: `contents: read` for CI/Docker build-only work, `contents: write` for release publishing, and `packages: write` only when pushing container images.
+- Use workflow `concurrency` keyed by workflow name and ref, with release jobs using `release-${{ github.ref_name }}` and `cancel-in-progress: false`.
+- Do not reintroduce legacy workflow names such as `rust-ci.yml`, `build.yml`, `release-build.yml`, `docker-build.yml`, or `docker-release.yml` unless a package-specific workflow already exists and is intentionally preserved.
