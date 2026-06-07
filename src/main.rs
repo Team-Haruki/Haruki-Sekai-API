@@ -20,10 +20,10 @@ async fn main() -> anyhow::Result<()> {
     logging::init();
 
     info!(
-        "========================= Haruki Sekai API v{} =========================",
+        "===== Haruki Sekai API v{} =====",
         env!("CARGO_PKG_VERSION")
     );
-    info!("Powered By Haruki Dev Team");
+    info!("Powered by Haruki Dev Team");
     let config = match Config::load() {
         Ok(cfg) => cfg,
         Err(e) => {
