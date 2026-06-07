@@ -20,7 +20,7 @@ async fn main() -> anyhow::Result<()> {
     logging::init();
 
     info!(
-        "===== Haruki Sekai API v{} =====",
+        "========================= Haruki Sekai API v{} =========================",
         env!("CARGO_PKG_VERSION")
     );
     info!("Powered by Haruki Dev Team");
