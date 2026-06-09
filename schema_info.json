@@ -1175,6 +1175,27 @@
   {
     "columns": [
       "game_id:int64",
+      "name:string",
+      "description:string",
+      "submit_start_at:int64",
+      "review_start_at:int64",
+      "submit_end_at:int64",
+      "aggregate_at:int64",
+      "background_image_assetbundle_file_name:string",
+      "back_number_accent_color_code:string",
+      "server_region:string"
+    ],
+    "name": "mysekaihousingcompetitions",
+    "unique_keys": [
+      [
+        "id",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "game_id:int64",
       "seq:int64",
       "mysekai_item_type:string",
       "name:string",

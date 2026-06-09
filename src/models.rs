@@ -60,6 +60,7 @@ pub mod mysekaigatecharacterlotteries;
 pub mod mysekaigatelevels;
 pub mod mysekaigatematerialgroups;
 pub mod mysekaigates;
+pub mod mysekaihousingcompetitions;
 pub mod mysekaiitems;
 pub mod mysekaimaterialgamecharacterrelations;
 pub mod mysekaimaterials;
