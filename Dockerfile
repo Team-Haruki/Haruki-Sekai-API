@@ -10,7 +10,7 @@ RUN if [ "$VERSION" != "dev" ]; then \
     fi
 RUN cargo build --release
 
-FROM alpine:3.23
+FROM alpine:3.24
 RUN apk --no-cache add ca-certificates tzdata git gnupg openssh-keygen
 WORKDIR /app
 COPY --from=builder /app/target/release/haruki-sekai-api .
