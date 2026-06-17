@@ -364,9 +364,7 @@ impl MasterUpdater {
             let http_client = &self.client.http_client;
             let resp = http_client.get(&url).send().await?;
             let body = resp.bytes().await?;
-            let data = self.client.cryptor.unpack_ordered(&body)?;
-            let structures = self.load_structures().await?;
-            let restored = crate::client::nuverse::nuverse_master_restorer(&data, &structures)?;
+            let restored = self.client.restore_nuverse_master(&body)?;
             self.save_master_files(&restored, master_dir).await?;
         }
 
@@ -561,17 +559,6 @@ impl MasterUpdater {
             ));
         }
         Ok(())
-    }
-
-    async fn load_structures(&self) -> Result<IndexMap<String, JsonValue>, crate::error::AppError> {
-        let path = &self.client.config.nuverse_structure_file_path;
-        if path.is_empty() {
-            return Ok(IndexMap::new());
-        }
-        let data = tokio::fs::read(path).await?;
-        let structures: IndexMap<String, JsonValue> = sonic_rs::from_slice(&data)
-            .map_err(|e| crate::error::AppError::ParseError(e.to_string()))?;
-        Ok(structures)
     }
 
     async fn save_version(&self, version: &VersionInfo) -> Result<(), crate::error::AppError> {

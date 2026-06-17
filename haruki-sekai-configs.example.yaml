@@ -74,6 +74,7 @@ servers:
     master_dir: ""
     version_path: ""
     nuverse_master_data_url: ""
+    nuverse_schema_bundle_path: ""
     nuverse_structure_file_path: ""
     enable_master_updater: true # check for master data updates periodically
     master_updater_cron: "7 * * * * *" # cron expression, this mean "execute it at every minute at second 7"
@@ -93,6 +94,7 @@ servers:
     master_dir: ""
     version_path: ""
     nuverse_master_data_url: ""
+    nuverse_schema_bundle_path: ""
     nuverse_structure_file_path: ""
     enable_master_updater: true # check for master data updates periodically
     master_updater_cron: "7 * * * * *" # cron expression, this mean "execute it at every minute at second 7"
@@ -112,6 +114,7 @@ servers:
     master_dir: ""
     version_path: ""
     nuverse_master_data_url: ""
+    nuverse_schema_bundle_path: "Data/structures/nuverse_schema_bundle.json"
     nuverse_structure_file_path: ""
     enable_master_updater: true # check for master data updates periodically
     master_updater_cron: "7 * * * * *" # cron expression, this mean "execute it at every minute at second 7"
@@ -131,6 +134,7 @@ servers:
     master_dir: ""
     version_path: ""
     nuverse_master_data_url: ""
+    nuverse_schema_bundle_path: "Data/structures/nuverse_schema_bundle.json"
     nuverse_structure_file_path: ""
     enable_master_updater: true # check for master data updates periodically
     master_updater_cron: "7 * * * * *" # cron expression, this mean "execute it at every minute at second 7"
@@ -150,6 +154,7 @@ servers:
     master_dir: ""
     version_path: ""
     nuverse_master_data_url: ""
+    nuverse_schema_bundle_path: "Data/structures/nuverse_schema_bundle.json"
     nuverse_structure_file_path: ""
     enable_master_updater: true # check for master data updates periodically
     master_updater_cron: "7 * * * * *" # cron expression, this mean "execute it at every minute at second 7"

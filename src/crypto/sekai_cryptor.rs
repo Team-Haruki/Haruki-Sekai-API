@@ -85,6 +85,20 @@ impl SekaiCryptor {
         &self,
         data: &[u8],
     ) -> Result<IndexMap<String, serde_json::Value>, AppError> {
+        let unpadded = self.decrypt_msgpack(data)?;
+        let result = msgpack_to_ordered_value(&unpadded)?;
+        match result {
+            serde_json::Value::Object(map) => {
+                let ordered: IndexMap<String, serde_json::Value> = map.into_iter().collect();
+                Ok(ordered)
+            }
+            _ => Err(AppError::CryptoError(
+                "Expected object at top level".to_string(),
+            )),
+        }
+    }
+
+    pub fn decrypt_msgpack(&self, data: &[u8]) -> Result<Vec<u8>, AppError> {
         if data.is_empty() {
             return Err(AppError::CryptoError("Content cannot be empty".to_string()));
         }
@@ -98,17 +112,7 @@ impl SekaiCryptor {
         let decrypted = decryptor
             .decrypt_padded::<NoPadding>(&mut buf)
             .map_err(|e| AppError::CryptoError(format!("Decryption failed: {}", e)))?;
-        let unpadded = pkcs7_unpad(decrypted)?;
-        let result = msgpack_to_ordered_value(unpadded)?;
-        match result {
-            serde_json::Value::Object(map) => {
-                let ordered: IndexMap<String, serde_json::Value> = map.into_iter().collect();
-                Ok(ordered)
-            }
-            _ => Err(AppError::CryptoError(
-                "Expected object at top level".to_string(),
-            )),
-        }
+        Ok(pkcs7_unpad(decrypted)?.to_vec())
     }
 
     pub fn unpack_value(&self, data: &[u8]) -> Result<serde_json::Value, AppError> {

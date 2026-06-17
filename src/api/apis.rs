@@ -133,17 +133,7 @@ pub async fn get_user_profile(
         tracing::debug!("User {} requesting profile for {}", user.id, user_id);
     }
     let path = format!("/user/{{userId}}/{}/profile", user_id);
-    let mut resp = proxy_game_api(&state, &server, &path).await?;
-
-    // Nuverse servers (TW/KR/CN) may return userHonors elements as flat arrays; restore to dicts
-    let region: ServerRegion = server
-        .parse()
-        .map_err(|_| AppError::InvalidServerRegion(server.to_string()))?;
-    if !region.is_cp_server() {
-        crate::client::nuverse::restore_profile_user_honors(&mut resp.body);
-    }
-
-    Ok(resp)
+    proxy_game_api(&state, &server, &path).await
 }
 
 pub async fn get_system(
@@ -278,17 +268,7 @@ pub async fn get_event_ranking_top100(
         "/user/{{userId}}/event/{}/ranking?rankingViewType=top100",
         event_id
     );
-    let mut resp = proxy_game_api(&state, &server, &path).await?;
-
-    // Nuverse servers (TW/KR/CN) return userCard as a flat array; restore to keyed dict
-    let region: ServerRegion = server
-        .parse()
-        .map_err(|_| AppError::InvalidServerRegion(server.to_string()))?;
-    if !region.is_cp_server() {
-        crate::client::nuverse::restore_ranking_user_cards(&mut resp.body);
-    }
-
-    Ok(resp)
+    proxy_game_api(&state, &server, &path).await
 }
 
 pub async fn get_event_ranking_border(
@@ -299,15 +279,5 @@ pub async fn get_event_ranking_border(
         return Err(AppError::ParseError("event_id must be numeric".to_string()));
     }
     let path = format!("/event/{}/ranking-border", event_id);
-    let mut resp = proxy_game_api(&state, &server, &path).await?;
-
-    // Nuverse servers (TW/KR/CN) return userCard as a flat array; restore to keyed dict
-    let region: ServerRegion = server
-        .parse()
-        .map_err(|_| AppError::InvalidServerRegion(server.to_string()))?;
-    if !region.is_cp_server() {
-        crate::client::nuverse::restore_ranking_user_cards(&mut resp.body);
-    }
-
-    Ok(resp)
+    proxy_game_api(&state, &server, &path).await
 }

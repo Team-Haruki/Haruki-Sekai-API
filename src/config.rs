@@ -98,6 +98,10 @@ fn default_log_level() -> String {
     "info".to_string()
 }
 
+fn default_nuverse_schema_bundle_path() -> String {
+    "Data/structures/nuverse_schema_bundle.json".to_string()
+}
+
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct DatabaseConfig {
     #[serde(default)]
@@ -153,6 +157,8 @@ pub struct ServerConfig {
     pub api_url: String,
     #[serde(default)]
     pub nuverse_master_data_url: String,
+    #[serde(default = "default_nuverse_schema_bundle_path")]
+    pub nuverse_schema_bundle_path: String,
     #[serde(default)]
     pub nuverse_structure_file_path: String,
     #[serde(default)]

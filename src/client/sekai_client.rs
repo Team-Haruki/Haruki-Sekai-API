@@ -19,6 +19,7 @@ use crate::error::{AppError, SekaiHttpStatus};
 
 use super::account::{AccountType, SekaiAccount, SekaiAccountCP, SekaiAccountNuverse};
 use super::helper::{CookieHelper, VersionHelper, VersionInfo};
+use super::nuverse_schema::NuverseSchemaStore;
 use super::session::AccountSession;
 use super::token_utils;
 
@@ -27,6 +28,7 @@ pub struct SekaiClient {
     pub config: ServerConfig,
     pub cookie_helper: Option<Arc<CookieHelper>>,
     pub version_helper: Arc<VersionHelper>,
+    pub nuverse_schema_store: Option<Arc<NuverseSchemaStore>>,
     pub proxy: Option<String>,
     pub cryptor: SekaiCryptor,
     pub headers: Arc<Mutex<HashMap<String, String>>>,
@@ -67,6 +69,18 @@ impl SekaiClient {
             .build()
             .map_err(|e| AppError::NetworkError(e.to_string()))?;
         let version_helper = Arc::new(VersionHelper::new(&config.version_path));
+        let nuverse_schema_store =
+            if region.is_cp_server() || config.nuverse_schema_bundle_path.is_empty() {
+                None
+            } else {
+                let data = fs::read(&config.nuverse_schema_bundle_path).map_err(|e| {
+                    AppError::IoError(format!(
+                        "Failed to read nuverse schema bundle {}: {}",
+                        config.nuverse_schema_bundle_path, e
+                    ))
+                })?;
+                Some(Arc::new(NuverseSchemaStore::from_slice(&data)?))
+            };
         let cookie_helper = if region == ServerRegion::Jp && config.require_cookies {
             jp_cookie_url
                 .filter(|url| !url.is_empty())
@@ -79,6 +93,7 @@ impl SekaiClient {
             config,
             cookie_helper,
             version_helper,
+            nuverse_schema_store,
             proxy,
             cryptor,
             headers: Arc::new(Mutex::new(headers)),
@@ -88,6 +103,47 @@ impl SekaiClient {
             reload_in_progress: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
         Ok(client)
+    }
+
+    pub fn restore_nuverse_master(
+        &self,
+        body: &[u8],
+    ) -> Result<IndexMap<String, serde_json::Value>, AppError> {
+        if let Some(store) = &self.nuverse_schema_store {
+            let msgpack = self.cryptor.decrypt_msgpack(body)?;
+            store.restore_master_msgpack(&msgpack)
+        } else {
+            let data = self.cryptor.unpack_ordered(body)?;
+            let structures = self.load_legacy_nuverse_structures()?;
+            if structures.is_empty() {
+                Ok(data)
+            } else {
+                super::nuverse::nuverse_master_restorer(&data, &structures)
+            }
+        }
+    }
+
+    pub fn restore_nuverse_api_response(
+        &self,
+        path: &str,
+        body: serde_json::Value,
+    ) -> Result<serde_json::Value, AppError> {
+        if let Some(store) = &self.nuverse_schema_store {
+            store.restore_api_json(path, body)
+        } else {
+            Ok(body)
+        }
+    }
+
+    fn load_legacy_nuverse_structures(
+        &self,
+    ) -> Result<IndexMap<String, serde_json::Value>, AppError> {
+        let path = &self.config.nuverse_structure_file_path;
+        if path.is_empty() {
+            return Ok(IndexMap::new());
+        }
+        let data = fs::read(path)?;
+        sonic_rs::from_slice(&data).map_err(AppError::from)
     }
 
     pub async fn init(&self) -> Result<(), AppError> {
@@ -746,8 +802,11 @@ impl SekaiClient {
             let resp = self.get(&session, path, params).await?;
             match self.handle_response_ordered(resp).await {
                 Ok((result, upstream_status)) => {
-                    let json_value: JsonValue = serde_json::to_value(&result)
+                    let mut json_value: JsonValue = serde_json::to_value(&result)
                         .map_err(|e| AppError::ParseError(e.to_string()))?;
+                    if !self.region.is_cp_server() {
+                        json_value = self.restore_nuverse_api_response(path, json_value)?;
+                    }
                     return Ok((json_value, upstream_status));
                 }
                 Err(AppError::SessionError) => {

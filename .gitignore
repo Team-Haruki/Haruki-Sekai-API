@@ -25,3 +25,11 @@ test.rs
 test.py
 haruki-sekai-configs.yaml
 Data/
+!Data/
+Data/*
+!Data/structures/
+Data/structures/*
+!Data/structures/nuverse_schema_bundle.example.json
+!Data/structures/master.avsc
+!Data/structures/nuverse_schema_bundle.json
+!Data/structures/suite.avsc

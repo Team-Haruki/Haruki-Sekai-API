@@ -21,6 +21,10 @@
 6. Open Terminal, and `cd` to the directory
 7. Run `haruki-sekai-api`
 
+## Nuverse Schema
+
+See [docs/nuverse-schema-guide.md](/Users/seiun/RustroverProjects/Haruki-Sekai-API/docs/nuverse-schema-guide.md).
+
 ## License
 
 This project is licensed under the MIT License.
