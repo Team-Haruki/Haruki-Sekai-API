@@ -255,11 +255,11 @@ fn build_insert_data(
 
     let mut target_columns: Vec<MappedCol> = Vec::new();
     for json_key in &all_json_keys {
-        let mut norm = json_key.to_lowercase().replace("_", "");
+        let mut norm = normalize_json_key(json_key);
         if norm == "id" {
             norm = "gameid".to_string();
         }
-        if let Some(db_col) = db_cols.keys().find(|k| k.replace("_", "") == norm) {
+        if let Some(db_col) = db_cols.keys().find(|k| normalize_db_col(k) == norm) {
             target_columns.push(MappedCol {
                 json_key: json_key.clone(),
                 col_type: db_cols[db_col].clone(),
@@ -294,41 +294,59 @@ fn build_insert_data(
     Ok((column_names, rows))
 }
 
+fn normalize_json_key(key: &str) -> String {
+    key.trim_start_matches('_').to_lowercase().replace("_", "")
+}
+
+fn normalize_db_col(col: &str) -> String {
+    col.to_lowercase().replace("_", "")
+}
+
 fn json_to_sea_value(val: &Value, col_type: &str) -> sea_orm::sea_query::Value {
     if col_type == "json.RawMessage" {
         return sea_orm::sea_query::Value::Json(Some(Box::new(val.clone())));
     }
-    match val {
-        Value::Null => match col_type {
-            "int64" | "int32" | "int" => sea_orm::sea_query::Value::BigInt(None),
-            "float64" | "float32" | "float" => sea_orm::sea_query::Value::Double(None),
-            "bool" => sea_orm::sea_query::Value::Bool(None),
-            "string" => sea_orm::sea_query::Value::String(None),
-            _ => sea_orm::sea_query::Value::Json(None),
+    match col_type {
+        "int64" | "int32" | "int" => match val {
+            Value::Number(n) => n
+                .as_i64()
+                .map_or(sea_orm::sea_query::Value::BigInt(None), Into::into),
+            Value::String(s) => s
+                .trim()
+                .parse::<i64>()
+                .map_or(sea_orm::sea_query::Value::BigInt(None), Into::into),
+            _ => sea_orm::sea_query::Value::BigInt(None),
         },
-        Value::Bool(b) => (*b).into(),
-        Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                i.into()
-            } else if let Some(f) = n.as_f64() {
-                f.into()
-            } else {
-                n.to_string().into()
-            }
-        }
-        Value::String(s) => s.as_str().into(),
-        Value::Array(arr) => {
-            let json_str = serde_json::to_string(arr).unwrap_or_default();
-            sea_orm::sea_query::Value::Json(Some(Box::new(
-                serde_json::from_str(&json_str).unwrap(),
-            )))
-        }
-        Value::Object(obj) => {
-            let json_str = serde_json::to_string(obj).unwrap_or_default();
-            sea_orm::sea_query::Value::Json(Some(Box::new(
-                serde_json::from_str(&json_str).unwrap(),
-            )))
-        }
+        "float64" | "float32" | "float" => match val {
+            Value::Number(n) => n
+                .as_f64()
+                .map_or(sea_orm::sea_query::Value::Double(None), Into::into),
+            Value::String(s) => s
+                .trim()
+                .parse::<f64>()
+                .map_or(sea_orm::sea_query::Value::Double(None), Into::into),
+            _ => sea_orm::sea_query::Value::Double(None),
+        },
+        "bool" => match val {
+            Value::Bool(b) => (*b).into(),
+            Value::String(s) => s
+                .trim()
+                .parse::<bool>()
+                .map_or(sea_orm::sea_query::Value::Bool(None), Into::into),
+            _ => sea_orm::sea_query::Value::Bool(None),
+        },
+        "string" => match val {
+            Value::Null => sea_orm::sea_query::Value::String(None),
+            Value::String(s) => s.as_str().into(),
+            Value::Bool(b) => b.to_string().into(),
+            Value::Number(n) => n.to_string().into(),
+            Value::Array(_) | Value::Object(_) => serde_json::to_string(val)
+                .map_or(sea_orm::sea_query::Value::String(None), Into::into),
+        },
+        _ => match val {
+            Value::Null => sea_orm::sea_query::Value::Json(None),
+            _ => sea_orm::sea_query::Value::Json(Some(Box::new(val.clone()))),
+        },
     }
 }
 
@@ -354,5 +372,12 @@ mod tests {
         println!("Ingesting jp region data...");
         engine.ingest_master_data("master_data/jp", "jp").await?;
         Ok(())
+    }
+
+    #[test]
+    fn test_normalize_json_key_trims_leading_underscore() {
+        assert_eq!(normalize_json_key("_assetbundleName"), "assetbundlename");
+        assert_eq!(normalize_json_key("assetbundleName"), "assetbundlename");
+        assert_eq!(normalize_db_col("assetbundle_name"), "assetbundlename");
     }
 }

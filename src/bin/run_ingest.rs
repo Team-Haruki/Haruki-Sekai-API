@@ -1,3 +1,4 @@
+use haruki_sekai_api::config::Config;
 use haruki_sekai_api::ingest_engine::IngestionEngine;
 use sea_orm::{ConnectOptions, Database};
 use std::time::Duration;
@@ -5,12 +6,18 @@ use std::time::Duration;
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt().init();
-    println!("Connecting to PostgreSQL...");
-    let mut opt = ConnectOptions::new(
-        "postgres://haruki_sekai:sekai_pw_2026@localhost:5432/haruki_sekai?sslmode=disable"
-            .to_owned(),
-    );
-    opt.max_connections(5)
+    let config = Config::load()?;
+    let master_db_config = &config.master_database;
+    if !master_db_config.enabled {
+        anyhow::bail!("master_database.enabled is false in the selected config");
+    }
+    if master_db_config.dsn.is_empty() {
+        anyhow::bail!("master_database.dsn is empty in the selected config");
+    }
+
+    println!("Connecting to configured master PostgreSQL database...");
+    let mut opt = ConnectOptions::new(master_db_config.dsn.clone());
+    opt.max_connections(master_db_config.max_connections.max(1))
         .min_connections(1)
         .connect_timeout(Duration::from_secs(5))
         .idle_timeout(Duration::from_secs(8))
@@ -23,17 +30,22 @@ async fn main() -> anyhow::Result<()> {
     let engine = IngestionEngine::new(db).await?;
 
     // Traverse and ingest all regions
-    let regions = vec![
-        ("Data/master/haruki-sekai-master/master", "jp"),
-        ("Data/master/haruki-sekai-en-master/master", "en"),
-        ("Data/master/haruki-sekai-tc-master/master", "tw"),
-        ("Data/master/haruki-sekai-kr-master/master", "kr"),
-        ("Data/master/haruki-sekai-sc-master/master", "cn"),
-    ];
-
-    for (path, region) in regions {
-        println!("Ingesting {} region data from {}...", region, path);
-        engine.ingest_master_data(path, region).await?;
+    for region in [
+        haruki_sekai_api::config::ServerRegion::Jp,
+        haruki_sekai_api::config::ServerRegion::En,
+        haruki_sekai_api::config::ServerRegion::Tw,
+        haruki_sekai_api::config::ServerRegion::Kr,
+        haruki_sekai_api::config::ServerRegion::Cn,
+    ] {
+        let Some(server) = config.servers.get(&region) else {
+            continue;
+        };
+        if !server.enabled || server.master_dir.is_empty() {
+            continue;
+        }
+        let path = format!("{}/master", server.master_dir.trim_end_matches('/'));
+        println!("Ingesting {} region data from {}...", region.as_str(), path);
+        engine.ingest_master_data(&path, region.as_str()).await?;
     }
     Ok(())
 }

@@ -11,7 +11,7 @@ pub async fn init_db(config: &DatabaseConfig) -> Result<DatabaseConnection, AppE
         return Err(AppError::DatabaseError("Database DSN is empty".to_string()));
     }
     let mut opts = ConnectOptions::new(&config.dsn);
-    opts.max_connections(config.max_connections)
+    opts.max_connections(config.max_connections.max(1))
         .min_connections(1)
         .connect_timeout(std::time::Duration::from_secs(30))
         .acquire_timeout(std::time::Duration::from_secs(30))
@@ -53,7 +53,7 @@ pub async fn init_master_db(config: &DatabaseConfig) -> Result<DatabaseConnectio
         ));
     }
     let mut opts = ConnectOptions::new(&config.dsn);
-    opts.max_connections(config.max_connections)
+    opts.max_connections(config.max_connections.max(1))
         .min_connections(1)
         .connect_timeout(std::time::Duration::from_secs(30))
         .acquire_timeout(std::time::Duration::from_secs(30))
