@@ -281,7 +281,7 @@ sealed class SchemaGenerator
     private static string JsonFieldName(string name)
     {
         var trimmed = name.TrimStart('_');
-        return string.IsNullOrEmpty(trimmed) ? name : trimmed;
+        return string.IsNullOrEmpty(trimmed) ? name : JsonNamingPolicy.CamelCase.ConvertName(trimmed);
     }
 
     private JsonNode TypeSchema(TypeReference type, bool nullable)

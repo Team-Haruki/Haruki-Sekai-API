@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Cursor;
 use std::sync::Arc;
 
@@ -456,16 +456,24 @@ fn restore_record(
         return Ok(JsonValue::Object(out));
     }
     if let Some(obj) = value.as_object() {
-        let mut out = obj.clone();
+        let mut out = JsonMap::new();
+        let mut consumed = HashSet::new();
         for field in &schema.fields {
-            let item = match &field.key {
-                MsgpackKey::String(key) => obj.get(key),
-                MsgpackKey::Int(idx) => obj.get(&idx.to_string()),
+            let key = match &field.key {
+                MsgpackKey::String(key) => key.clone(),
+                MsgpackKey::Int(idx) => idx.to_string(),
             };
+            let item = obj.get(&key);
             if let Some(item) = item {
+                consumed.insert(key);
                 if !item.is_null() {
                     out.insert(field.name.clone(), restore_json(&field.ty, item, registry)?);
                 }
+            }
+        }
+        for (key, item) in obj {
+            if !consumed.contains(key) {
+                out.insert(key.clone(), item.clone());
             }
         }
         return Ok(JsonValue::Object(out));
@@ -813,6 +821,27 @@ mod tests {
     }
 
     #[test]
+    fn restores_object_record_without_duplicate_source_keys() {
+        let schema = json!({
+            "type": "record",
+            "name": "Summary",
+            "fields": [
+                {"name": "id", "type": "int", "msgpack_key": "Id"},
+                {"name": "exchangeCategory", "type": "string", "msgpack_key": "ExchangeCategory"}
+            ]
+        });
+        let store = bundle(vec![schema], HashMap::new());
+        let value = json!({"Id": 1, "ExchangeCategory": "normal", "unknownPascal": true});
+        let restored =
+            restore_json(store.schema("Summary").unwrap(), &value, &store.registry).unwrap();
+        assert_eq!(restored["id"], json!(1));
+        assert_eq!(restored["exchangeCategory"], json!("normal"));
+        assert!(restored.get("Id").is_none());
+        assert!(restored.get("ExchangeCategory").is_none());
+        assert_eq!(restored["unknownPascal"], json!(true));
+    }
+
+    #[test]
     fn loads_generated_dummy_dll_bundle() {
         let data = std::fs::read("Data/structures/nuverse_schema_bundle.json").unwrap();
         let store = NuverseSchemaStore::from_slice(&data).unwrap();
@@ -838,6 +867,19 @@ mod tests {
         ] {
             assert_eq!(store.master.get(key).map(String::as_str), Some(schema));
         }
+
+        let material_summary = store.schema("Sekai.MasterMaterialExchangeSummary").unwrap();
+        let field_names: Vec<_> = material_summary
+            .fields
+            .iter()
+            .map(|field| field.name.as_str())
+            .collect();
+        assert!(field_names.contains(&"id"));
+        assert!(field_names.contains(&"exchangeCategory"));
+        assert!(field_names.contains(&"materialExchanges"));
+        assert!(!field_names.contains(&"Id"));
+        assert!(!field_names.contains(&"ExchangeCategory"));
+        assert!(!field_names.contains(&"MaterialExchanges"));
 
         let api_value = json!({"rankings":[{"userCard":[100,30,1,2,3,4,5,0,"done","normal",0,1711000000_i64,[[1,"read",["ok"],true]]]}]});
         let api_restored = store
