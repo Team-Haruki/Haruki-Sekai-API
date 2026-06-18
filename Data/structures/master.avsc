@@ -3087,7 +3087,7 @@
         "msgpack_key": 10
       },
       {
-        "name": "_assetbundleName",
+        "name": "assetbundleName",
         "type": [
           "null",
           "string"
@@ -3164,7 +3164,7 @@
         "msgpack_key": "part"
       },
       {
-        "name": "_thumbnailAssetbundleName",
+        "name": "thumbnailAssetbundleName",
         "type": "string",
         "msgpack_key": "thumbnailAssetbundleName"
       },

@@ -184,7 +184,7 @@ sealed class SchemaGenerator
         var type = TypeSchema(field.FieldType, IsNullable(field));
         var obj = new JsonObject
         {
-            ["name"] = field.Name,
+            ["name"] = JsonFieldName(field.Name),
             ["type"] = type
         };
         if (key.IntKey is { } intKey)
@@ -196,6 +196,12 @@ sealed class SchemaGenerator
             obj["msgpack_key"] = key.StringKey ?? field.Name;
         }
         return obj;
+    }
+
+    private static string JsonFieldName(string name)
+    {
+        var trimmed = name.TrimStart('_');
+        return string.IsNullOrEmpty(trimmed) ? name : trimmed;
     }
 
     private JsonNode TypeSchema(TypeReference type, bool nullable)

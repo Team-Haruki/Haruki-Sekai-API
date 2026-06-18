@@ -73,10 +73,7 @@ mod tests {
     fn test_extract_user_id_from_nuverse_token() {
         let jwt_payload = r#"{"sdk_open_id":"67890","device_id":123}"#;
         let jwt_payload_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(jwt_payload);
-        let jwt = format!(
-            "JWT_HEADER.{}.signature",
-            jwt_payload_b64
-        );
+        let jwt = format!("header.{}.signature", jwt_payload_b64);
         let encoded = base64::engine::general_purpose::STANDARD.encode(&jwt);
         let result = extract_user_id_from_nuverse_token(&encoded);
         assert_eq!(result.unwrap(), "67890");

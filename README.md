@@ -23,7 +23,7 @@
 
 ## Nuverse Schema
 
-See [docs/nuverse-schema-guide.md](/Users/seiun/RustroverProjects/Haruki-Sekai-API/docs/nuverse-schema-guide.md).
+See [docs/nuverse-schema-guide.md](docs/nuverse-schema-guide.md).
 
 ## License
 
