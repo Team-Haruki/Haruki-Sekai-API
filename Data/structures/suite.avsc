@@ -1361,7 +1361,7 @@
         "msgpack_key": "userSpringEvent"
       },
       {
-        "name": "UserStampFavoriteTabs",
+        "name": "userStampFavoriteTabs",
         "type": {
           "type": "array",
           "items": "Sekai.UserStampFavoriteTabs"
@@ -6939,17 +6939,17 @@
     "namespace": "Sekai",
     "fields": [
       {
-        "name": "LiveResultCharacterArchiveVoiceGroupId",
+        "name": "liveResultCharacterArchiveVoiceGroupId",
         "type": "int",
         "msgpack_key": "liveResultCharacterArchiveVoiceGroupId"
       },
       {
-        "name": "LiveType",
+        "name": "liveType",
         "type": "string",
         "msgpack_key": "liveType"
       },
       {
-        "name": "UserLiveId",
+        "name": "userLiveId",
         "type": "string",
         "msgpack_key": "userLiveId"
       }
@@ -7075,12 +7075,12 @@
     "namespace": "Sekai",
     "fields": [
       {
-        "name": "EventMissionSelectableRewardId",
+        "name": "eventMissionSelectableRewardId",
         "type": "int",
         "msgpack_key": "eventMissionSelectableRewardId"
       },
       {
-        "name": "IsClosedEventMissionSelectableReward",
+        "name": "isClosedEventMissionSelectableReward",
         "type": "boolean",
         "msgpack_key": "isClosedEventMissionSelectableReward"
       },
@@ -7100,7 +7100,7 @@
     "namespace": "Sekai",
     "fields": [
       {
-        "name": "ObtainedRewards",
+        "name": "obtainedRewards",
         "type": {
           "type": "array",
           "items": "Sekai.UserResource"
@@ -7108,7 +7108,7 @@
         "msgpack_key": "obtainedRewards"
       },
       {
-        "name": "UpdatedResources",
+        "name": "updatedResources",
         "type": "Sekai.SuiteUser",
         "msgpack_key": "updatedResources"
       }
@@ -7945,12 +7945,12 @@
     "namespace": "Sekai",
     "fields": [
       {
-        "name": "DeckId",
+        "name": "deckId",
         "type": "int",
         "msgpack_key": "DeckId"
       },
       {
-        "name": "Member6",
+        "name": "member6",
         "type": "int",
         "msgpack_key": "Member6"
       }
@@ -8950,7 +8950,7 @@
     "namespace": "Sekai",
     "fields": [
       {
-        "name": "UserPresentHistories",
+        "name": "userPresentHistories",
         "type": {
           "type": "array",
           "items": "Sekai.UserPresentHistoryData"
@@ -10041,7 +10041,7 @@
         "msgpack_key": "stampId"
       },
       {
-        "name": "TabNum",
+        "name": "tabNum",
         "type": "int",
         "msgpack_key": "tabNum"
       },
@@ -10058,7 +10058,7 @@
     "namespace": "Sekai",
     "fields": [
       {
-        "name": "UserStampFavoriteResource",
+        "name": "userStampFavoriteResource",
         "type": "Sekai.UserStampFavoriteResource",
         "msgpack_key": "userStampFavoriteResource"
       }
@@ -10070,7 +10070,7 @@
     "namespace": "Sekai",
     "fields": [
       {
-        "name": "UserStampFavoriteTabs",
+        "name": "userStampFavoriteTabs",
         "type": {
           "type": "array",
           "items": "Sekai.UserStampFavoriteTabs"
@@ -10093,12 +10093,12 @@
     "namespace": "Sekai",
     "fields": [
       {
-        "name": "TabName",
+        "name": "tabName",
         "type": "string",
         "msgpack_key": "tabName"
       },
       {
-        "name": "TabNum",
+        "name": "tabNum",
         "type": "int",
         "msgpack_key": "tabNum"
       },
@@ -10412,7 +10412,7 @@
     "namespace": "Sekai",
     "fields": [
       {
-        "name": "CardEpisodeReleaseCostType",
+        "name": "cardEpisodeReleaseCostType",
         "type": "string",
         "msgpack_key": "cardEpisodeReleaseCostType"
       }

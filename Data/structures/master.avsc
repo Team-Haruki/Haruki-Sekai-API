@@ -3846,17 +3846,17 @@
     "namespace": "Sekai",
     "fields": [
       {
-        "name": "GroupId",
+        "name": "groupId",
         "type": "int",
         "msgpack_key": "groupId"
       },
       {
-        "name": "Id",
+        "name": "id",
         "type": "int",
         "msgpack_key": "id"
       },
       {
-        "name": "ResourceBoxId",
+        "name": "resourceBoxId",
         "type": "int",
         "msgpack_key": "resourceBoxId"
       }
@@ -6352,7 +6352,7 @@
     "namespace": "Sekai",
     "fields": [
       {
-        "name": "Id",
+        "name": "id",
         "type": "int",
         "msgpack_key": 0
       },
@@ -6365,7 +6365,7 @@
         "msgpack_key": 1
       },
       {
-        "name": "ExchangeCategory",
+        "name": "exchangeCategory",
         "type": "string",
         "msgpack_key": 2
       },
@@ -6386,7 +6386,7 @@
         "msgpack_key": 4
       },
       {
-        "name": "Name",
+        "name": "name",
         "type": [
           "null",
           "string"
@@ -6399,7 +6399,7 @@
         "msgpack_key": 6
       },
       {
-        "name": "StartAt",
+        "name": "startAt",
         "type": [
           "null",
           "long"
@@ -6407,7 +6407,7 @@
         "msgpack_key": 7
       },
       {
-        "name": "EndAt",
+        "name": "endAt",
         "type": [
           "null",
           "long"
@@ -6423,7 +6423,7 @@
         "msgpack_key": 9
       },
       {
-        "name": "MaterialExchanges",
+        "name": "materialExchanges",
         "type": {
           "type": "array",
           "items": "Sekai.ApiData.MasterMaterialExchange"
