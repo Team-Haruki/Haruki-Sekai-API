@@ -160,8 +160,6 @@ pub struct ServerConfig {
     #[serde(default = "default_nuverse_schema_bundle_path")]
     pub nuverse_schema_bundle_path: String,
     #[serde(default)]
-    pub nuverse_structure_file_path: String,
-    #[serde(default)]
     pub require_cookies: bool,
     #[serde(default)]
     pub headers: HashMap<String, String>,

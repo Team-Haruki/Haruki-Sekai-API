@@ -113,13 +113,7 @@ impl SekaiClient {
             let msgpack = self.cryptor.decrypt_msgpack(body)?;
             store.restore_master_msgpack(&msgpack)
         } else {
-            let data = self.cryptor.unpack_ordered(body)?;
-            let structures = self.load_legacy_nuverse_structures()?;
-            if structures.is_empty() {
-                Ok(data)
-            } else {
-                super::nuverse::nuverse_master_restorer(&data, &structures)
-            }
+            self.cryptor.unpack_ordered(body)
         }
     }
 
@@ -133,17 +127,6 @@ impl SekaiClient {
         } else {
             Ok(body)
         }
-    }
-
-    fn load_legacy_nuverse_structures(
-        &self,
-    ) -> Result<IndexMap<String, serde_json::Value>, AppError> {
-        let path = &self.config.nuverse_structure_file_path;
-        if path.is_empty() {
-            return Ok(IndexMap::new());
-        }
-        let data = fs::read(path)?;
-        sonic_rs::from_slice(&data).map_err(AppError::from)
     }
 
     pub async fn init(&self) -> Result<(), AppError> {
