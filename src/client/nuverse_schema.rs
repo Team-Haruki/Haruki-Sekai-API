@@ -817,6 +817,28 @@ mod tests {
         let data = std::fs::read("Data/structures/nuverse_schema_bundle.json").unwrap();
         let store = NuverseSchemaStore::from_slice(&data).unwrap();
 
+        for (key, schema) in [
+            ("cardCostume3ds", "Sekai.MasterCardCostume3D"),
+            ("character3ds", "Sekai.MasterCharacter3D"),
+            (
+                "characterArchiveVoices",
+                "Sekai.ApiData.MasterCharacterArchiveVoice",
+            ),
+            ("eventDeckBonuses", "Sekai.MasterEventDeckBonus"),
+            ("eventStories", "Sekai.MasterEventStory"),
+            ("musicDifficulties", "Sekai.MasterMusicDifficulty"),
+            (
+                "customProfileCollectionResources",
+                "Sekai.CustomProfile.MasterResource",
+            ),
+            (
+                "mysekaiBlueprintMysekaiMaterialCosts",
+                "Sekai.ApiData.MasterMysekaiBlueprintMysekaiMaterialCost",
+            ),
+        ] {
+            assert_eq!(store.master.get(key).map(String::as_str), Some(schema));
+        }
+
         let api_value = json!({"rankings":[{"userCard":[100,30,1,2,3,4,5,0,"done","normal",0,1711000000_i64,[[1,"read",["ok"],true]]]}]});
         let api_restored = store
             .restore_api_json(

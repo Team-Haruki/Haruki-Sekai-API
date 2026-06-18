@@ -26,7 +26,7 @@ var allTypes = assembly.MainModule.Types
     .ToDictionary(t => t.FullName, t => t);
 
 var roots = allTypes.Values
-    .Where(t => t.FullName.StartsWith("Sekai.Master", StringComparison.Ordinal)
+    .Where(t => IsMasterType(t)
         || t.FullName.StartsWith("Sekai.User", StringComparison.Ordinal))
     .OrderBy(t => t.FullName, StringComparer.Ordinal)
     .ToList();
@@ -42,8 +42,8 @@ var schemas = generator.Schemas
     .ToArray();
 
 var master = roots
-    .Where(t => t.FullName.StartsWith("Sekai.Master", StringComparison.Ordinal))
-    .Select(t => new KeyValuePair<string, string>(MasterKey(t.Name), t.FullName))
+    .Where(IsMasterType)
+    .SelectMany(t => MasterKeys(t.Name).Select(key => new KeyValuePair<string, string>(key, t.FullName)))
     .Where(kv => !string.IsNullOrWhiteSpace(kv.Key))
     .GroupBy(kv => kv.Key, StringComparer.Ordinal)
     .ToDictionary(g => g.Key, g => g.First().Value, StringComparer.Ordinal);
@@ -96,14 +96,94 @@ static bool HasMessagePackObject(TypeDefinition type)
     return type.CustomAttributes.Any(a => a.AttributeType.FullName == "MessagePack.MessagePackObjectAttribute");
 }
 
-static string MasterKey(string name)
+static bool IsMasterType(TypeDefinition type)
+{
+    return type.FullName.StartsWith("Sekai.", StringComparison.Ordinal)
+        && type.Name.StartsWith("Master", StringComparison.Ordinal);
+}
+
+static IEnumerable<string> MasterKeys(string name)
 {
     var bare = name.StartsWith("Master", StringComparison.Ordinal) ? name["Master".Length..] : name;
+    if (bare.EndsWith("Model", StringComparison.Ordinal) && bare.Length > "Model".Length)
+    {
+        bare = bare[..^"Model".Length];
+    }
     if (string.IsNullOrEmpty(bare))
     {
-        return "";
+        yield break;
     }
-    return char.ToLowerInvariant(bare[0]) + bare[1..] + "s";
+
+    var key = JsonNamingPolicy.CamelCase.ConvertName(bare)
+        .Replace("2D", "2d", StringComparison.Ordinal)
+        .Replace("3D", "3d", StringComparison.Ordinal);
+    foreach (var candidate in MasterKeyCandidates(key))
+    {
+        yield return candidate;
+    }
+    foreach (var alias in SpecialMasterKeys(bare))
+    {
+        yield return alias;
+    }
+}
+
+static IEnumerable<string> MasterKeyCandidates(string key)
+{
+    yield return key;
+
+    if (key.EndsWith("y", StringComparison.Ordinal))
+    {
+        yield return key[..^1] + "ies";
+    }
+    else if (key.EndsWith("s", StringComparison.Ordinal))
+    {
+        yield return key;
+        yield return key + "es";
+    }
+    else if (key.EndsWith("ch", StringComparison.Ordinal)
+        || key.EndsWith("sh", StringComparison.Ordinal)
+        || key.EndsWith("x", StringComparison.Ordinal))
+    {
+        yield return key + "es";
+    }
+    else
+    {
+        yield return key + "s";
+    }
+}
+
+static IEnumerable<string> SpecialMasterKeys(string bareName)
+{
+    switch (bareName)
+    {
+        case "CustomProfileCollectionGacha":
+            yield return "customProfileGachas";
+            break;
+        case "CustomProfileCollectionGachaBehavior":
+            yield return "customProfileGachaBehaviors";
+            break;
+        case "CustomProfileCollectionGachaDetail":
+            yield return "customProfileGachaDetails";
+            break;
+        case "Font":
+            yield return "customProfileTextFonts";
+            break;
+        case "Resource":
+            yield return "customProfileCollectionResources";
+            yield return "customProfileEtcResources";
+            yield return "customProfileGeneralBackgroundResources";
+            yield return "customProfileMemberStandingPictureResources";
+            yield return "customProfilePlayerInfoResources";
+            yield return "customProfileShapeResources";
+            yield return "customProfileStoryBackgroundResources";
+            break;
+        case "ResourceExcludeCard":
+            yield return "customProfileMemberResourceExcludeCards";
+            break;
+        case "TextColor":
+            yield return "customProfileTextColors";
+            break;
+    }
 }
 
 static JsonObject ApiMapping(string path, IEnumerable<JsonObject> fields)
