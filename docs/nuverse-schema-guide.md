@@ -27,6 +27,18 @@ Schema generation, AVSC format details, and Go/Python/Rust consumption examples 
 
 Use StructTool `main` for the current generator and parser examples. This repository only keeps the generated runtime assets and the Rust restore integration.
 
+## Field Naming
+
+Haruki's committed schemas use JSON output field names, not raw C# member names. During generation, field names are normalized to camelCase and leading backing underscores are removed while `msgpack_key` preserves the original compact-msgpack key.
+
+Examples:
+
+- `Id` with `msgpack_key: 0` becomes field name `id`
+- `ExchangeCategory` with `msgpack_key: 2` becomes field name `exchangeCategory`
+- `_assetbundleName` with `msgpack_key: 11` becomes field name `assetbundleName`
+
+Do not replace these assets with raw exporter output unless the same normalization has been applied, or restored JSON can contain PascalCase keys or duplicate PascalCase/camelCase fields.
+
 ## Updating Assets
 
 Regenerate the schemas from the CN DummyDll source, then copy the generated assets back into this repository:
