@@ -42,7 +42,7 @@ fn unique_key_override(table_name: &str) -> Option<serde_json::Value> {
 /// Reads a Rust model file and extracts the root struct name from `pub type XXX = Vec<YYY>;`.
 /// Returns (table_name_lowercase, root_struct_name) or None if no root type alias is found.
 fn extract_root_type(file_content: &str) -> Option<(String, String)> {
-    let re = Regex::new(r"pub type (\w+) = Vec<(\w+)>;").unwrap();
+    let re = Regex::new(r"pub\s+type\s+(\w+)\s*=\s*Vec\s*<\s*(\w+)\s*>\s*;").unwrap();
     if let Some(caps) = re.captures(file_content) {
         let type_alias = caps.get(1).unwrap().as_str(); // e.g. "Shopitem"
         let root_struct = caps.get(2).unwrap().as_str(); // e.g. "ShopitemElement"

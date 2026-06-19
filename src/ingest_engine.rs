@@ -157,9 +157,11 @@ impl IngestionEngine {
         // so they don't starve other async tasks running concurrently.
         let db_cols_owned = db_cols.clone();
         let region_str = region.to_string();
+        let table_name_for_build = table_name.clone();
         let (column_names, rows) = tokio::task::spawn_blocking(move || {
             build_insert_data(
                 &json_content,
+                &table_name_for_build,
                 &db_cols_owned,
                 &region_str,
                 has_server_region,
@@ -224,6 +226,7 @@ impl IngestionEngine {
 /// and build typed row values. Returns (ordered column names, rows of SimpleExpr).
 fn build_insert_data(
     json_content: &str,
+    table_name: &str,
     db_cols: &HashMap<String, String>,
     region: &str,
     has_server_region: bool,
@@ -281,7 +284,16 @@ fn build_insert_data(
                 Vec::with_capacity(column_names.len());
             for mcol in &target_columns {
                 let val = obj.get(&mcol.json_key).unwrap_or(&Value::Null);
-                row.push(json_to_sea_value(val, &mcol.col_type).into());
+                row.push(
+                    json_to_sea_value_for_column(
+                        table_name,
+                        obj,
+                        &mcol.db_col,
+                        val,
+                        &mcol.col_type,
+                    )
+                    .into(),
+                );
             }
             if has_server_region {
                 let region_val: sea_orm::sea_query::Value = region.into();
@@ -302,29 +314,91 @@ fn normalize_db_col(col: &str) -> String {
     col.to_lowercase().replace("_", "")
 }
 
+fn json_to_sea_value_for_column(
+    table_name: &str,
+    obj: &serde_json::Map<String, Value>,
+    db_col: &str,
+    val: &Value,
+    col_type: &str,
+) -> sea_orm::sea_query::Value {
+    if table_name == "cards" && db_col == "assetbundle_name" {
+        if let Some(assetbundle_name) = preferred_card_assetbundle_name(obj, val) {
+            return assetbundle_name.into();
+        }
+    }
+
+    json_to_sea_value(val, col_type)
+}
+
+fn preferred_card_assetbundle_name(
+    obj: &serde_json::Map<String, Value>,
+    fallback: &Value,
+) -> Option<String> {
+    if let Some(archive_display_type) = obj.get("archiveDisplayType").and_then(Value::as_str) {
+        if is_card_resource_name(archive_display_type) {
+            return Some(archive_display_type.to_string());
+        }
+    }
+
+    fallback
+        .as_str()
+        .filter(|s| !s.trim().is_empty())
+        .map(ToString::to_string)
+}
+
+fn is_card_resource_name(value: &str) -> bool {
+    let value = value.trim();
+    let Some(rest) = value.strip_prefix("res") else {
+        return false;
+    };
+    let Some((character_part, card_part)) = rest.split_once("_no") else {
+        return false;
+    };
+
+    !character_part.is_empty()
+        && !card_part.is_empty()
+        && character_part.bytes().all(|b| b.is_ascii_digit())
+        && card_part.bytes().all(|b| b.is_ascii_digit())
+}
+
 fn json_to_sea_value(val: &Value, col_type: &str) -> sea_orm::sea_query::Value {
     if col_type == "json.RawMessage" {
-        return sea_orm::sea_query::Value::Json(Some(Box::new(val.clone())));
+        return if val.is_null() {
+            sea_orm::sea_query::Value::Json(None)
+        } else {
+            sea_orm::sea_query::Value::Json(Some(Box::new(val.clone())))
+        };
     }
+    if val.is_null() {
+        return null_value_for_col_type(col_type);
+    }
+
     match col_type {
         "int64" | "int32" | "int" => match val {
             Value::Number(n) => n
                 .as_i64()
-                .map_or(sea_orm::sea_query::Value::BigInt(None), Into::into),
+                .or_else(|| n.as_u64().and_then(|u| i64::try_from(u).ok()))
+                .map(Into::into)
+                .unwrap_or_else(|| sea_orm::sea_query::Value::BigInt(None)),
             Value::String(s) => s
                 .trim()
                 .parse::<i64>()
-                .map_or(sea_orm::sea_query::Value::BigInt(None), Into::into),
+                .ok()
+                .map(Into::into)
+                .unwrap_or_else(|| sea_orm::sea_query::Value::BigInt(None)),
             _ => sea_orm::sea_query::Value::BigInt(None),
         },
         "float64" | "float32" | "float" => match val {
             Value::Number(n) => n
                 .as_f64()
-                .map_or(sea_orm::sea_query::Value::Double(None), Into::into),
+                .map(Into::into)
+                .unwrap_or_else(|| sea_orm::sea_query::Value::Double(None)),
             Value::String(s) => s
                 .trim()
                 .parse::<f64>()
-                .map_or(sea_orm::sea_query::Value::Double(None), Into::into),
+                .ok()
+                .map(Into::into)
+                .unwrap_or_else(|| sea_orm::sea_query::Value::Double(None)),
             _ => sea_orm::sea_query::Value::Double(None),
         },
         "bool" => match val {
@@ -332,21 +406,45 @@ fn json_to_sea_value(val: &Value, col_type: &str) -> sea_orm::sea_query::Value {
             Value::String(s) => s
                 .trim()
                 .parse::<bool>()
-                .map_or(sea_orm::sea_query::Value::Bool(None), Into::into),
+                .ok()
+                .map(Into::into)
+                .unwrap_or_else(|| sea_orm::sea_query::Value::Bool(None)),
             _ => sea_orm::sea_query::Value::Bool(None),
         },
         "string" => match val {
-            Value::Null => sea_orm::sea_query::Value::String(None),
             Value::String(s) => s.as_str().into(),
-            Value::Bool(b) => b.to_string().into(),
-            Value::Number(n) => n.to_string().into(),
-            Value::Array(_) | Value::Object(_) => serde_json::to_string(val)
-                .map_or(sea_orm::sea_query::Value::String(None), Into::into),
+            Value::Bool(_) | Value::Number(_) | Value::Array(_) | Value::Object(_) => {
+                serde_json::to_string(val).unwrap_or_default().into()
+            }
+            Value::Null => sea_orm::sea_query::Value::String(None),
         },
         _ => match val {
+            Value::Bool(b) => (*b).into(),
+            Value::Number(n) => {
+                if let Some(i) = n.as_i64() {
+                    i.into()
+                } else if let Some(f) = n.as_f64() {
+                    f.into()
+                } else {
+                    n.to_string().into()
+                }
+            }
+            Value::String(s) => s.as_str().into(),
+            Value::Array(_) | Value::Object(_) => {
+                sea_orm::sea_query::Value::Json(Some(Box::new(val.clone())))
+            }
             Value::Null => sea_orm::sea_query::Value::Json(None),
-            _ => sea_orm::sea_query::Value::Json(Some(Box::new(val.clone()))),
         },
+    }
+}
+
+fn null_value_for_col_type(col_type: &str) -> sea_orm::sea_query::Value {
+    match col_type {
+        "int64" | "int32" | "int" => sea_orm::sea_query::Value::BigInt(None),
+        "float64" | "float32" | "float" => sea_orm::sea_query::Value::Double(None),
+        "bool" => sea_orm::sea_query::Value::Bool(None),
+        "string" => sea_orm::sea_query::Value::String(None),
+        _ => sea_orm::sea_query::Value::Json(None),
     }
 }
 
@@ -354,7 +452,47 @@ fn json_to_sea_value(val: &Value, col_type: &str) -> sea_orm::sea_query::Value {
 mod tests {
     use super::*;
     use sea_orm::{ConnectOptions, Database};
+    use serde_json::json;
     use std::time::Duration;
+
+    #[test]
+    fn prefers_archive_display_type_for_card_assetbundle_name() {
+        let obj = json!({
+            "assetbundleName": "localized title",
+            "archiveDisplayType": "res017_no037"
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+
+        let value = json_to_sea_value_for_column(
+            "cards",
+            &obj,
+            "assetbundle_name",
+            obj.get("assetbundleName").unwrap(),
+            "string",
+        );
+
+        match value {
+            sea_orm::sea_query::Value::String(Some(s)) => assert_eq!(&*s, "res017_no037"),
+            other => panic!("unexpected value: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn invalid_scalar_values_become_null_for_typed_columns() {
+        let int_from_text = json_to_sea_value(&json!("not an integer"), "int64");
+        let int_from_object = json_to_sea_value(&json!({"param1": [1, 2, 3]}), "int64");
+
+        assert!(matches!(
+            int_from_text,
+            sea_orm::sea_query::Value::BigInt(None)
+        ));
+        assert!(matches!(
+            int_from_object,
+            sea_orm::sea_query::Value::BigInt(None)
+        ));
+    }
 
     #[tokio::test]
     #[ignore] // Requires a running local Postgres; run with: cargo test -- --ignored

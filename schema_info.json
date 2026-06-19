@@ -293,6 +293,21 @@
     "columns": [
       "game_id:int64",
       "seq:int64",
+      "archive_display_type:string",
+      "server_region:string"
+    ],
+    "name": "characterarchivemysekaicharactertalkgroups",
+    "unique_keys": [
+      [
+        "id",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "game_id:int64",
+      "seq:int64",
       "requirement:int64",
       "exp:int64",
       "quantity:int64",
@@ -365,6 +380,22 @@
       "server_region:string"
     ],
     "name": "costume3ds",
+    "unique_keys": [
+      [
+        "id",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "game_id:int64",
+      "seq:int64",
+      "name:string",
+      "is_official_creator_only:bool",
+      "server_region:string"
+    ],
+    "name": "custommusicscoretags",
     "unique_keys": [
       [
         "id",
@@ -933,6 +964,21 @@
   {
     "columns": [
       "game_id:int64",
+      "group_id:int64",
+      "mysekai_fixture_id:int64",
+      "server_region:string"
+    ],
+    "name": "mysekaicharactertalkfixturecommonmysekaifixturegroups",
+    "unique_keys": [
+      [
+        "id",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "game_id:int64",
       "game_character_unit_id:int64",
       "mysekai_character_talk_fixture_common_type:string",
       "mysekai_character_talk_fixture_common_mysekai_fixture_group_id:int64",
@@ -961,6 +1007,43 @@
       "server_region:string"
     ],
     "name": "mysekaicharactertalks",
+    "unique_keys": [
+      [
+        "id",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "game_id:int64",
+      "mysekai_fixture_id:int64",
+      "mysekai_custom_fixture_type:string",
+      "mysekai_custom_fixture_ornament_type:string",
+      "custom_profile_resource_collection_type:string",
+      "width:int64",
+      "height:int64",
+      "depth:int64",
+      "base_asset_bundle_name:string",
+      "ornament_asset_bundle_name:string",
+      "server_region:string"
+    ],
+    "name": "mysekaicustomfixtures",
+    "unique_keys": [
+      [
+        "id",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "game_id:int64",
+      "mysekai_fixture_game_character_group_id:int64",
+      "bonus_rate:int64",
+      "server_region:string"
+    ],
+    "name": "mysekaifixturegamecharactergroupperformancebonuses",
     "unique_keys": [
       [
         "id",
@@ -1125,6 +1208,21 @@
   {
     "columns": [
       "game_id:int64",
+      "name:string",
+      "assetbundle_name:string",
+      "server_region:string"
+    ],
+    "name": "mysekaigatecommonskins",
+    "unique_keys": [
+      [
+        "id",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "game_id:int64",
       "mysekai_gate_id:int64",
       "level:int64",
       "mysekai_gate_material_group_id:int64",
@@ -1165,6 +1263,59 @@
       "server_region:string"
     ],
     "name": "mysekaigates",
+    "unique_keys": [
+      [
+        "id",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "game_id:int64",
+      "mysekai_gate_skin_type:string",
+      "mysekai_gate_skin_type_id:int64",
+      "mysekai_gate_material_group_id:int64",
+      "server_region:string"
+    ],
+    "name": "mysekaigateskins",
+    "unique_keys": [
+      [
+        "id",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "game_id:int64",
+      "unit:string",
+      "name:string",
+      "assetbundle_name:string",
+      "server_region:string"
+    ],
+    "name": "mysekaigateunitskins",
+    "unique_keys": [
+      [
+        "id",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "game_id:int64",
+      "name:string",
+      "description:string",
+      "submit_start_at:int64",
+      "review_start_at:int64",
+      "submit_end_at:int64",
+      "aggregate_at:int64",
+      "background_image_assetbundle_file_name:string",
+      "back_number_accent_color_code:string",
+      "server_region:string"
+    ],
+    "name": "mysekaihousingcompetitions",
     "unique_keys": [
       [
         "id",
@@ -1305,6 +1456,22 @@
   {
     "columns": [
       "game_id:int64",
+      "mysekai_rank:int64",
+      "mysekai_rank_relase_type:string",
+      "external_id:int64",
+      "server_region:string"
+    ],
+    "name": "mysekairankreleases",
+    "unique_keys": [
+      [
+        "id",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "game_id:int64",
       "mysekai_site_harvest_fixture_type:string",
       "hp:int64",
       "last_attack_stamina:int64",
@@ -1313,6 +1480,40 @@
       "server_region:string"
     ],
     "name": "mysekaisiteharvestfixtures",
+    "unique_keys": [
+      [
+        "id",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "game_id:int64",
+      "mysekai_site_level_id:int64",
+      "mysekai_layout_type:string",
+      "width:int64",
+      "height:int64",
+      "depth:int64",
+      "server_region:string"
+    ],
+    "name": "mysekaisitelayouts",
+    "unique_keys": [
+      [
+        "id",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "game_id:int64",
+      "mysekai_site_id:int64",
+      "level:int64",
+      "character_entry_max_num:int64",
+      "server_region:string"
+    ],
+    "name": "mysekaisitelevels",
     "unique_keys": [
       [
         "id",
@@ -1539,6 +1740,23 @@
     "unique_keys": [
       [
         "card_rarity_type",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "game_id:int64",
+      "event_id:int64",
+      "game_character_id:int64",
+      "card_id:int64",
+      "bonus_rate:float64",
+      "server_region:string"
+    ],
+    "name": "worldbloomsupportdeckuniteventlimitedbonuses",
+    "unique_keys": [
+      [
+        "id",
         "server_region"
       ]
     ]

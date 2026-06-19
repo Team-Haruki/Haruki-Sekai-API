@@ -14,6 +14,7 @@ FROM alpine:3.24
 RUN apk --no-cache add ca-certificates tzdata git gnupg openssh-keygen
 WORKDIR /app
 COPY --from=builder /app/target/release/haruki-sekai-api .
+COPY --from=builder /app/target/release/run_ingest .
 COPY Data ./Data
 RUN mkdir -p logs
 EXPOSE 9999
