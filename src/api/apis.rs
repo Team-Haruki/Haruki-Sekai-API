@@ -80,6 +80,48 @@ async fn proxy_game_api_with_params(
     })
 }
 
+/// Cache TTLs (seconds) for the global, non-user-specific read endpoints.
+const RANKING_CACHE_TTL_SECS: u64 = 30;
+const STATIC_CACHE_TTL_SECS: u64 = 300;
+
+fn json_string_response(status: StatusCode, json: String) -> Response {
+    (status, [("content-type", "application/json")], json).into_response()
+}
+
+/// `proxy_game_api` with a short-lived Redis response cache for global read-only
+/// endpoints (ranking / system / information). On a hit it returns the cached
+/// JSON directly, skipping the upstream call, AES decrypt, Nuverse restore,
+/// re-serialization, and the per-account request lock. The cache key omits any
+/// account (the path keeps the literal `{userId}` placeholder), so all callers
+/// share one entry. Only successful (200) responses are cached.
+async fn proxy_game_api_cached(
+    state: &AppState,
+    server: &str,
+    path: &str,
+    ttl_secs: u64,
+) -> Result<Response, AppError> {
+    let cache_key = format!("haruki_sekai_resp:{server}:{path}");
+    if let Some(ref redis) = state.redis {
+        let mut conn = redis.clone();
+        if let Ok(Some(cached)) =
+            redis::AsyncCommands::get::<_, Option<String>>(&mut conn, &cache_key).await
+        {
+            return Ok(json_string_response(StatusCode::OK, cached));
+        }
+    }
+    let resp = proxy_game_api(state, server, path).await?;
+    let status = resp.status;
+    let json = sonic_rs::to_string(&resp.body).unwrap_or_else(|_| "{}".to_string());
+    if status == StatusCode::OK {
+        if let Some(ref redis) = state.redis {
+            let mut conn = redis.clone();
+            let _: Result<(), redis::RedisError> =
+                redis::AsyncCommands::set_ex(&mut conn, &cache_key, &json, ttl_secs).await;
+        }
+    }
+    Ok(json_string_response(status, json))
+}
+
 async fn proxy_post_game_api_body<T: serde::Serialize>(
     state: &AppState,
     server: &str,
@@ -133,31 +175,24 @@ pub async fn get_user_profile(
         tracing::debug!("User {} requesting profile for {}", user.id, user_id);
     }
     let path = format!("/user/{{userId}}/{}/profile", user_id);
-    let mut resp = proxy_game_api(&state, &server, &path).await?;
-
-    // Nuverse servers (TW/KR/CN) may return userHonors elements as flat arrays; restore to dicts
-    let region: ServerRegion = server
-        .parse()
-        .map_err(|_| AppError::InvalidServerRegion(server.to_string()))?;
-    if !region.is_cp_server() {
-        crate::client::nuverse::restore_profile_user_honors(&mut resp.body);
-    }
-
-    Ok(resp)
+    // Nuverse userHonors/userProfileHonors array->dict restoration is handled by
+    // the schema bundle inside get_game_api (restore_nuverse_api_response), so no
+    // endpoint-specific fixup is needed here.
+    proxy_game_api(&state, &server, &path).await
 }
 
 pub async fn get_system(
     State(state): State<Arc<AppState>>,
     Path(server): Path<String>,
-) -> Result<ApiResponse, AppError> {
-    proxy_game_api(&state, &server, "/system").await
+) -> Result<Response, AppError> {
+    proxy_game_api_cached(&state, &server, "/system", STATIC_CACHE_TTL_SECS).await
 }
 
 pub async fn get_information(
     State(state): State<Arc<AppState>>,
     Path(server): Path<String>,
-) -> Result<ApiResponse, AppError> {
-    proxy_game_api(&state, &server, "/information").await
+) -> Result<Response, AppError> {
+    proxy_game_api_cached(&state, &server, "/information", STATIC_CACHE_TTL_SECS).await
 }
 
 pub async fn get_mysekai_housing_competition_list(
@@ -256,8 +291,17 @@ pub async fn get_custom_music_score_published_search(
             ));
         }
     };
-    if score_id.trim().is_empty() {
+    let trimmed_score_id = score_id.trim();
+    if trimmed_score_id.is_empty() {
         return Err(AppError::ParseError("score_id is empty".to_string()));
+    }
+    // Reject dot segments: '.' is unreserved in encode_path_segment, so "." / ".."
+    // would survive into the upstream URL where reqwest's WHATWG URL parser
+    // collapses them, steering the authenticated request to a different endpoint.
+    if matches!(trimmed_score_id, "." | "..") {
+        return Err(AppError::ParseError(
+            "score_id must not be a dot segment".to_string(),
+        ));
     }
     let path = format!(
         "/user/{}/custom-music-score/published/search/{}",
@@ -270,7 +314,7 @@ pub async fn get_custom_music_score_published_search(
 pub async fn get_event_ranking_top100(
     State(state): State<Arc<AppState>>,
     Path((server, event_id)): Path<(String, String)>,
-) -> Result<ApiResponse, AppError> {
+) -> Result<Response, AppError> {
     if !event_id.chars().all(|c| c.is_ascii_digit()) {
         return Err(AppError::ParseError("event_id must be numeric".to_string()));
     }
@@ -278,16 +322,16 @@ pub async fn get_event_ranking_top100(
         "/user/{{userId}}/event/{}/ranking?rankingViewType=top100",
         event_id
     );
-    proxy_game_api(&state, &server, &path).await
+    proxy_game_api_cached(&state, &server, &path, RANKING_CACHE_TTL_SECS).await
 }
 
 pub async fn get_event_ranking_border(
     State(state): State<Arc<AppState>>,
     Path((server, event_id)): Path<(String, String)>,
-) -> Result<ApiResponse, AppError> {
+) -> Result<Response, AppError> {
     if !event_id.chars().all(|c| c.is_ascii_digit()) {
         return Err(AppError::ParseError("event_id must be numeric".to_string()));
     }
     let path = format!("/event/{}/ranking-border", event_id);
-    proxy_game_api(&state, &server, &path).await
+    proxy_game_api_cached(&state, &server, &path, RANKING_CACHE_TTL_SECS).await
 }
