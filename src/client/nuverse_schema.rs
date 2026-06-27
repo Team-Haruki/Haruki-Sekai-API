@@ -1,10 +1,9 @@
 use std::collections::{HashMap, HashSet};
-use std::io::Cursor;
 use std::sync::Arc;
 
 use indexmap::IndexMap;
 use serde::Deserialize;
-use serde_json::{Map as JsonMap, Number, Value as JsonValue};
+use serde_json::{Map as JsonMap, Value as JsonValue};
 
 use crate::error::AppError;
 
@@ -114,7 +113,7 @@ impl NuverseSchemaStore {
         &self,
         msgpack: &[u8],
     ) -> Result<IndexMap<String, JsonValue>, AppError> {
-        let raw = read_msgpack_json(msgpack)?;
+        let raw = crate::crypto::decode_msgpack_value(msgpack)?;
         let raw_obj = raw.as_object().ok_or_else(|| {
             AppError::ParseError("Nuverse master payload must be an object".to_string())
         })?;
@@ -627,65 +626,6 @@ fn resolve_schema(schema: &Arc<Schema>, registry: &Registry) -> Arc<Schema> {
         }
     }
     schema.clone()
-}
-
-fn read_msgpack_json(data: &[u8]) -> Result<JsonValue, AppError> {
-    let mut cursor = Cursor::new(data);
-    let value = rmpv::decode::read_value(&mut cursor)
-        .map_err(|e| AppError::CryptoError(format!("MsgPack decode error: {}", e)))?;
-    rmpv_to_json(value)
-}
-
-fn rmpv_to_json(value: rmpv::Value) -> Result<JsonValue, AppError> {
-    match value {
-        rmpv::Value::Nil => Ok(JsonValue::Null),
-        rmpv::Value::Boolean(b) => Ok(JsonValue::Bool(b)),
-        rmpv::Value::Integer(i) => {
-            if let Some(n) = i.as_i64() {
-                Ok(JsonValue::Number(n.into()))
-            } else if let Some(n) = i.as_u64() {
-                Ok(JsonValue::Number(n.into()))
-            } else {
-                Ok(JsonValue::Null)
-            }
-        }
-        rmpv::Value::F32(f) => Number::from_f64(f as f64)
-            .map(JsonValue::Number)
-            .ok_or_else(|| AppError::CryptoError("Invalid float".to_string())),
-        rmpv::Value::F64(f) => Number::from_f64(f)
-            .map(JsonValue::Number)
-            .ok_or_else(|| AppError::CryptoError("Invalid float".to_string())),
-        rmpv::Value::String(s) => Ok(JsonValue::String(s.into_str().unwrap_or_default())),
-        rmpv::Value::Binary(b) => {
-            use base64::Engine as _;
-            Ok(JsonValue::String(
-                base64::engine::general_purpose::STANDARD.encode(&b),
-            ))
-        }
-        rmpv::Value::Array(arr) => arr
-            .into_iter()
-            .map(rmpv_to_json)
-            .collect::<Result<Vec<_>, _>>()
-            .map(JsonValue::Array),
-        rmpv::Value::Map(map) => {
-            let mut out = JsonMap::new();
-            for (k, v) in map {
-                let key = match k {
-                    rmpv::Value::String(s) => s.into_str().unwrap_or_default(),
-                    rmpv::Value::Integer(i) => i.to_string(),
-                    _ => continue,
-                };
-                out.insert(key, rmpv_to_json(v)?);
-            }
-            Ok(JsonValue::Object(out))
-        }
-        rmpv::Value::Ext(_, data) => {
-            use base64::Engine as _;
-            Ok(JsonValue::String(
-                base64::engine::general_purpose::STANDARD.encode(&data),
-            ))
-        }
-    }
 }
 
 fn any_schema() -> Schema {

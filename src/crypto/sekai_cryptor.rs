@@ -92,7 +92,7 @@ impl SekaiCryptor {
                 let ordered: IndexMap<String, serde_json::Value> = map.into_iter().collect();
                 Ok(ordered)
             }
-            _ => Err(AppError::CryptoError(
+            _ => Err(AppError::UpstreamData(
                 "Expected object at top level".to_string(),
             )),
         }
@@ -112,7 +112,10 @@ impl SekaiCryptor {
         let decrypted = decryptor
             .decrypt_padded::<NoPadding>(&mut buf)
             .map_err(|e| AppError::CryptoError(format!("Decryption failed: {}", e)))?;
-        Ok(pkcs7_unpad(decrypted)?.to_vec())
+        // Drop the padding in place instead of allocating a second full buffer.
+        let plain_len = decrypted.len() - pkcs7_padding_len(decrypted)?;
+        buf.truncate(plain_len);
+        Ok(buf)
     }
 
     pub fn unpack_value(&self, data: &[u8]) -> Result<serde_json::Value, AppError> {
@@ -142,7 +145,7 @@ fn pkcs7_pad(data: &[u8], block_size: usize) -> Vec<u8> {
     padded
 }
 
-fn pkcs7_unpad(data: &[u8]) -> Result<&[u8], AppError> {
+fn pkcs7_padding_len(data: &[u8]) -> Result<usize, AppError> {
     if data.is_empty() {
         return Err(AppError::CryptoError(
             "Empty data for unpadding".to_string(),
@@ -159,25 +162,41 @@ fn pkcs7_unpad(data: &[u8]) -> Result<&[u8], AppError> {
             ));
         }
     }
+    Ok(padding_len)
+}
+
+fn pkcs7_unpad(data: &[u8]) -> Result<&[u8], AppError> {
+    let padding_len = pkcs7_padding_len(data)?;
     Ok(&data[..data.len() - padding_len])
 }
 
 fn msgpack_to_ordered_value(data: &[u8]) -> Result<serde_json::Value, AppError> {
-    use std::io::Cursor;
-    let mut cursor = Cursor::new(data);
-    let value = rmpv::decode::read_value(&mut cursor)
-        .map_err(|e| AppError::CryptoError(format!("MsgPack decode error: {}", e)))?;
-    rmpv_to_json(value)
+    decode_msgpack_value(data)
 }
 
-fn rmpv_to_json(value: rmpv::Value) -> Result<serde_json::Value, AppError> {
-    use rmpv::Value;
+/// Decode a MessagePack byte buffer into an ordered `serde_json::Value`.
+///
+/// Uses rmpv's borrowing reader (`read_value_ref`) so the intermediate rmpv
+/// tree borrows strings/binaries from `data` instead of allocating owned copies
+/// for them, halving the decode-time allocations versus `read_value`. Semantics
+/// are identical to the owned path: integer map keys are stringified and
+/// binary/ext payloads are base64-encoded. Shared by the crypto and Nuverse
+/// master restore paths.
+pub fn decode_msgpack_value(data: &[u8]) -> Result<serde_json::Value, AppError> {
+    let mut reader: &[u8] = data;
+    let value = rmpv::decode::read_value_ref(&mut reader)
+        .map_err(|e| AppError::UpstreamData(format!("MsgPack decode error: {}", e)))?;
+    rmpv_ref_to_json(value)
+}
+
+fn rmpv_ref_to_json(value: rmpv::ValueRef) -> Result<serde_json::Value, AppError> {
+    use rmpv::ValueRef;
     use serde_json::Map;
     use serde_json::Value as JsonValue;
     match value {
-        Value::Nil => Ok(JsonValue::Null),
-        Value::Boolean(b) => Ok(JsonValue::Bool(b)),
-        Value::Integer(i) => {
+        ValueRef::Nil => Ok(JsonValue::Null),
+        ValueRef::Boolean(b) => Ok(JsonValue::Bool(b)),
+        ValueRef::Integer(i) => {
             if let Some(n) = i.as_i64() {
                 Ok(JsonValue::Number(n.into()))
             } else if let Some(n) = i.as_u64() {
@@ -186,34 +205,34 @@ fn rmpv_to_json(value: rmpv::Value) -> Result<serde_json::Value, AppError> {
                 Ok(JsonValue::Null)
             }
         }
-        Value::F32(f) => serde_json::Number::from_f64(f as f64)
+        ValueRef::F32(f) => serde_json::Number::from_f64(f as f64)
             .map(JsonValue::Number)
-            .ok_or_else(|| AppError::CryptoError("Invalid float".to_string())),
-        Value::F64(f) => serde_json::Number::from_f64(f)
+            .ok_or_else(|| AppError::UpstreamData("Invalid float".to_string())),
+        ValueRef::F64(f) => serde_json::Number::from_f64(f)
             .map(JsonValue::Number)
-            .ok_or_else(|| AppError::CryptoError("Invalid float".to_string())),
-        Value::String(s) => {
-            let s = s.into_str().unwrap_or_default();
-            Ok(JsonValue::String(s.to_string()))
-        }
-        Value::Binary(b) => Ok(JsonValue::String(base64_encode(&b))),
-        Value::Array(arr) => {
-            let json_arr: Result<Vec<JsonValue>, _> = arr.into_iter().map(rmpv_to_json).collect();
+            .ok_or_else(|| AppError::UpstreamData("Invalid float".to_string())),
+        ValueRef::String(s) => Ok(JsonValue::String(
+            s.as_str().unwrap_or_default().to_string(),
+        )),
+        ValueRef::Binary(b) => Ok(JsonValue::String(base64_encode(b))),
+        ValueRef::Array(arr) => {
+            let json_arr: Result<Vec<JsonValue>, _> =
+                arr.into_iter().map(rmpv_ref_to_json).collect();
             Ok(JsonValue::Array(json_arr?))
         }
-        Value::Map(map) => {
+        ValueRef::Map(map) => {
             let mut json_map = Map::new();
             for (k, v) in map {
                 let key = match k {
-                    Value::String(s) => s.into_str().unwrap_or_default().to_string(),
-                    Value::Integer(i) => i.to_string(),
+                    ValueRef::String(s) => s.as_str().unwrap_or_default().to_string(),
+                    ValueRef::Integer(i) => i.to_string(),
                     _ => continue,
                 };
-                json_map.insert(key, rmpv_to_json(v)?);
+                json_map.insert(key, rmpv_ref_to_json(v)?);
             }
             Ok(JsonValue::Object(json_map))
         }
-        Value::Ext(_, data) => Ok(JsonValue::String(base64_encode(&data))),
+        ValueRef::Ext(_, data) => Ok(JsonValue::String(base64_encode(data))),
     }
 }
 
