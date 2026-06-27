@@ -9,6 +9,7 @@ pub struct AccountSession {
     pub account: Arc<Mutex<AccountType>>,
     pub session_token: Arc<Mutex<Option<String>>>,
     api_lock: Arc<tokio::sync::Mutex<()>>,
+    login_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl AccountSession {
@@ -17,6 +18,7 @@ impl AccountSession {
             account: Arc::new(Mutex::new(account)),
             session_token: Arc::new(Mutex::new(None)),
             api_lock: Arc::new(tokio::sync::Mutex::new(())),
+            login_lock: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
@@ -30,6 +32,14 @@ impl AccountSession {
 
     pub async fn lock_api(&self) -> tokio::sync::MutexGuard<'_, ()> {
         self.api_lock.lock().await
+    }
+
+    /// Serializes re-login for a single account so concurrent in-flight requests
+    /// that all observe an expired token do not each issue their own login. This
+    /// is a dedicated lock (not `api_lock`) because `tokio::sync::Mutex` is not
+    /// reentrant and `call_api_with_timeout` re-acquires `api_lock`.
+    pub async fn lock_login(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.login_lock.lock().await
     }
 
     pub fn get_session_token(&self) -> Option<String> {
