@@ -7,6 +7,18 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::AppError;
 
+/// Write `contents` to `path` atomically: write a uniquely-named temp file in the
+/// same directory and rename it over the target. A concurrent reader therefore
+/// never observes a truncated/partial file (e.g. version_helper.load on the
+/// request path while an updater rewrites the version file).
+pub async fn write_file_atomic(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let tmp = dir.join(format!(".{}.tmp", uuid::Uuid::new_v4()));
+    tokio::fs::write(&tmp, contents).await?;
+    tokio::fs::rename(&tmp, path).await?;
+    Ok(())
+}
+
 pub struct CookieHelper {
     url: String,
     cookies: Arc<Mutex<String>>,

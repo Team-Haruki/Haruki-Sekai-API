@@ -33,10 +33,14 @@ pub struct MasterUpdater {
     pub asset_updater_servers: Vec<AssetUpdaterInfo>,
     http_client: reqwest::Client,
     update_lock: tokio::sync::Mutex<()>,
+    /// Serializes version-file writes with the AppHashUpdater for the same region
+    /// so their read-modify-writes do not clobber each other's fields.
+    version_lock: Arc<tokio::sync::Mutex<()>>,
     db: Option<sea_orm::DatabaseConnection>,
 }
 
 impl MasterUpdater {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         region: ServerRegion,
         client: Arc<SekaiClient>,
@@ -44,6 +48,7 @@ impl MasterUpdater {
         proxy: Option<String>,
         asset_updater_servers: Vec<AssetUpdaterInfo>,
         db: Option<sea_orm::DatabaseConnection>,
+        version_lock: Arc<tokio::sync::Mutex<()>>,
     ) -> Self {
         let git_helper = git_config
             .filter(|c| c.enabled)
@@ -61,6 +66,7 @@ impl MasterUpdater {
             asset_updater_servers,
             http_client,
             update_lock: tokio::sync::Mutex::new(()),
+            version_lock,
             db,
         }
     }
@@ -190,18 +196,21 @@ impl MasterUpdater {
             }
             self.client.version_helper.update(new_version);
             if let Some(ref git_helper) = self.git_helper {
-                let master_dir = &self.client.config.master_dir;
-                match git_helper.push_changes(master_dir, &login_response.data_version) {
-                    Ok(true) => info!(
-                        "{} Git pushed changes successfully",
-                        self.region.as_str().to_uppercase()
-                    ),
-                    Ok(false) => {}
-                    Err(e) => error!(
-                        "{} Git push failed: {}",
-                        self.region.as_str().to_uppercase(),
-                        e
-                    ),
+                // git shells out via std::process and the push is a network call;
+                // run it on a blocking thread so it never stalls a tokio worker.
+                let git_helper = git_helper.clone();
+                let master_dir = self.client.config.master_dir.clone();
+                let data_version = login_response.data_version.clone();
+                let region_upper = self.region.as_str().to_uppercase();
+                let push = tokio::task::spawn_blocking(move || {
+                    git_helper.push_changes(&master_dir, &data_version)
+                })
+                .await;
+                match push {
+                    Ok(Ok(true)) => info!("{} Git pushed changes successfully", region_upper),
+                    Ok(Ok(false)) => {}
+                    Ok(Err(e)) => error!("{} Git push failed: {}", region_upper, e),
+                    Err(e) => error!("{} Git push task failed: {}", region_upper, e),
                 }
             }
         }
@@ -361,46 +370,44 @@ impl MasterUpdater {
                 "{}/master-data-{}.info",
                 self.client.config.nuverse_master_data_url, login.cdn_version
             );
-            let http_client = &self.client.http_client;
-            let resp = http_client.get(&url).send().await?;
-            let body = resp.bytes().await?;
-            let restored = self.client.restore_nuverse_master(&body)?;
+            let restored = self.download_nuverse_master(&url).await?;
             self.save_master_files(&restored, master_dir).await?;
         }
 
+        // Ingest into the DB synchronously (awaited so failures are visible and
+        // engine-init errors are caught; CPU parsing is offloaded via
+        // spawn_blocking inside the engine, so this does not starve the runtime).
+        // It is BEST-EFFORT: a DB/ingest failure is logged loudly but must NOT
+        // block the caller, because the version file and the git master-data
+        // mirror track the downloaded files (already valid on disk) rather than DB
+        // health. Coupling the mirror to ingest health would let one malformed
+        // table freeze the mirror and the version forever (perpetual re-download).
         if let Some(db) = self.db.clone() {
-            let region = self.region;
-            let master_dir = master_dir.to_string();
-            tokio::spawn(async move {
-                info!(
-                    "{} Starting database ingestion for new master data...",
-                    region.as_str().to_uppercase()
-                );
-                match crate::ingest_engine::IngestionEngine::new(db).await {
-                    Ok(engine) => {
-                        let region_str = region.as_str().to_lowercase();
-                        if let Err(e) = engine.ingest_master_data(&master_dir, &region_str).await {
-                            warn!(
-                                "{} Master Data Ingestion partial failure: {}",
-                                region.as_str().to_uppercase(),
-                                e
-                            );
-                        } else {
-                            info!(
-                                "{} Master Data successfully ingested into database",
-                                region.as_str().to_uppercase()
-                            );
-                        }
-                    }
-                    Err(e) => {
-                        warn!(
-                            "{} Failed to initialize IngestionEngine: {}",
-                            region.as_str().to_uppercase(),
-                            e
-                        );
+            let region_upper = self.region.as_str().to_uppercase();
+            info!(
+                "{} Starting database ingestion for new master data...",
+                region_upper
+            );
+            match crate::ingest_engine::IngestionEngine::new(db).await {
+                Ok(engine) => {
+                    let region_str = self.region.as_str().to_lowercase();
+                    match engine.ingest_master_data(master_dir, &region_str).await {
+                        Ok(()) => info!(
+                            "{} Master Data successfully ingested into database",
+                            region_upper
+                        ),
+                        Err(e) => error!(
+                            "{} Master Data DB ingestion failed (files saved; git mirror and \
+version unaffected): {e:#}",
+                            region_upper
+                        ),
                     }
                 }
-            });
+                Err(e) => error!(
+                    "{} Failed to initialize ingestion engine (skipping DB ingest): {e:#}",
+                    region_upper
+                ),
+            }
         }
 
         info!(
@@ -408,6 +415,46 @@ impl MasterUpdater {
             self.region.as_str().to_uppercase()
         );
         Ok(())
+    }
+
+    /// Download and restore the Nuverse master blob with a bounded retry, mirroring
+    /// the CP split download. Checks the HTTP status before reading the body so a
+    /// CDN 404/5xx surfaces as a clear error instead of an opaque decrypt failure.
+    async fn download_nuverse_master(
+        &self,
+        url: &str,
+    ) -> Result<IndexMap<String, serde_json::Value>, crate::error::AppError> {
+        use crate::error::AppError;
+        let region = self.region.as_str().to_uppercase();
+        let http_client = &self.client.http_client;
+        let mut last_err = AppError::NetworkError("Nuverse master download failed".to_string());
+        for attempt in 1..=CP_MASTER_SPLIT_MAX_RETRIES {
+            match http_client.get(url).send().await {
+                Ok(resp) if resp.status().is_success() => match resp.bytes().await {
+                    Ok(body) => match self.client.restore_nuverse_master(&body) {
+                        Ok(restored) => return Ok(restored),
+                        Err(e) => last_err = e,
+                    },
+                    Err(e) => last_err = AppError::NetworkError(e.to_string()),
+                },
+                Ok(resp) => {
+                    last_err = AppError::NetworkError(format!(
+                        "Nuverse master download returned HTTP {} for {}",
+                        resp.status(),
+                        url
+                    ));
+                }
+                Err(e) => last_err = AppError::NetworkError(e.to_string()),
+            }
+            if attempt < CP_MASTER_SPLIT_MAX_RETRIES {
+                warn!(
+                    "{} Nuverse master download attempt {}/{} failed: {}; retrying...",
+                    region, attempt, CP_MASTER_SPLIT_MAX_RETRIES, last_err
+                );
+                tokio::time::sleep(Duration::from_secs(CP_MASTER_SPLIT_RETRY_DELAY_SECS)).await;
+            }
+        }
+        Err(last_err)
     }
 
     async fn download_cp_master_split(
@@ -563,6 +610,8 @@ impl MasterUpdater {
 
     async fn save_version(&self, version: &VersionInfo) -> Result<(), crate::error::AppError> {
         let path = &self.client.config.version_path;
+        // Serialize with the AppHashUpdater so neither clobbers the other's fields.
+        let _guard = self.version_lock.lock().await;
         let mut existing: serde_json::Map<String, serde_json::Value> = if Path::new(path).exists() {
             let data = tokio::fs::read(path).await?;
             sonic_rs::from_slice(&data).unwrap_or_default()
@@ -595,10 +644,10 @@ impl MasterUpdater {
         );
         let json = sonic_rs::to_string_pretty(&existing)
             .map_err(|e| crate::error::AppError::ParseError(e.to_string()))?;
-        tokio::fs::write(path, &json).await?;
+        crate::client::helper::write_file_atomic(Path::new(path), json.as_bytes()).await?;
         let dir = Path::new(path).parent().unwrap_or(Path::new("."));
         let versioned_path = dir.join(format!("{}.json", version.data_version));
-        tokio::fs::write(versioned_path, &json).await?;
+        crate::client::helper::write_file_atomic(&versioned_path, json.as_bytes()).await?;
         Ok(())
     }
 }
