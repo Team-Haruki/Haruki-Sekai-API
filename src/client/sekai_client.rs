@@ -39,47 +39,56 @@ pub struct SekaiClient {
 }
 
 impl SekaiClient {
+    /// Build the shared reqwest client. Every region uses identical settings (only
+    /// the global proxy varies), so one client is built once in init_app_state and
+    /// cloned into each SekaiClient (reqwest::Client is Arc-internal; clones share
+    /// the connection pool / TLS config).
+    pub fn build_http_client(proxy: Option<&str>) -> Result<Client, AppError> {
+        let mut builder = Client::builder()
+            .timeout(Duration::from_secs(45))
+            .pool_max_idle_per_host(20)
+            .pool_idle_timeout(Duration::from_secs(90))
+            .tcp_keepalive(Duration::from_secs(60));
+        if let Some(proxy_url) = proxy {
+            if !proxy_url.is_empty() {
+                builder =
+                    builder
+                        .proxy(reqwest::Proxy::all(proxy_url).map_err(|e| {
+                            AppError::NetworkError(format!("Invalid proxy: {}", e))
+                        })?);
+            }
+        }
+        builder
+            .build()
+            .map_err(|e| AppError::NetworkError(e.to_string()))
+    }
+
+    /// Load a Nuverse schema bundle from disk. Call once per distinct bundle path
+    /// in init_app_state and share the resulting Arc across regions on that path.
+    pub fn load_nuverse_schema_store(path: &str) -> Result<NuverseSchemaStore, AppError> {
+        let data = fs::read(path).map_err(|e| {
+            AppError::IoError(format!(
+                "Failed to read nuverse schema bundle {}: {}",
+                path, e
+            ))
+        })?;
+        NuverseSchemaStore::from_slice(&data)
+    }
+
     pub async fn new(
         region: ServerRegion,
         config: ServerConfig,
         proxy: Option<String>,
         jp_cookie_url: Option<String>,
+        http_client: Client,
+        nuverse_schema_store: Option<Arc<NuverseSchemaStore>>,
     ) -> Result<Self, AppError> {
         let cryptor = SekaiCryptor::from_hex(&config.aes_key_hex, &config.aes_iv_hex)?;
         let mut headers = HashMap::new();
         for (k, v) in &config.headers {
             headers.insert(k.clone(), v.clone());
         }
-        let mut client_builder = Client::builder()
-            .timeout(Duration::from_secs(45))
-            .pool_max_idle_per_host(20)
-            .pool_idle_timeout(Duration::from_secs(90))
-            .tcp_keepalive(Duration::from_secs(60));
-        if let Some(ref proxy_url) = proxy {
-            if !proxy_url.is_empty() {
-                client_builder =
-                    client_builder
-                        .proxy(reqwest::Proxy::all(proxy_url).map_err(|e| {
-                            AppError::NetworkError(format!("Invalid proxy: {}", e))
-                        })?);
-            }
-        }
-        let http_client = client_builder
-            .build()
-            .map_err(|e| AppError::NetworkError(e.to_string()))?;
         let version_helper = Arc::new(VersionHelper::new(&config.version_path));
-        let nuverse_schema_store =
-            if region.is_cp_server() || config.nuverse_schema_bundle_path.is_empty() {
-                None
-            } else {
-                let data = fs::read(&config.nuverse_schema_bundle_path).map_err(|e| {
-                    AppError::IoError(format!(
-                        "Failed to read nuverse schema bundle {}: {}",
-                        config.nuverse_schema_bundle_path, e
-                    ))
-                })?;
-                Some(Arc::new(NuverseSchemaStore::from_slice(&data)?))
-            };
         let cookie_helper = if region == ServerRegion::Jp && config.require_cookies {
             jp_cookie_url
                 .filter(|url| !url.is_empty())

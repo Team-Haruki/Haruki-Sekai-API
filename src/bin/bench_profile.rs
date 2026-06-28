@@ -215,9 +215,27 @@ async fn main() -> anyhow::Result<()> {
         server_config.api_url
     );
 
-    let client = SekaiClient::new(region, server_config, proxy, jp_cookie_url)
-        .await
-        .context("SekaiClient::new failed")?;
+    let http_client =
+        SekaiClient::build_http_client(proxy.as_deref()).context("build http client")?;
+    let nuverse_store =
+        if region.is_cp_server() || server_config.nuverse_schema_bundle_path.is_empty() {
+            None
+        } else {
+            Some(std::sync::Arc::new(
+                SekaiClient::load_nuverse_schema_store(&server_config.nuverse_schema_bundle_path)
+                    .context("load nuverse schema bundle")?,
+            ))
+        };
+    let client = SekaiClient::new(
+        region,
+        server_config,
+        proxy,
+        jp_cookie_url,
+        http_client,
+        nuverse_store,
+    )
+    .await
+    .context("SekaiClient::new failed")?;
     println!("logging in (init)...");
     client.init().await.context("client.init() failed")?;
     if client.get_session().is_none() {
