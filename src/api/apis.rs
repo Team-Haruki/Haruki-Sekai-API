@@ -126,40 +126,26 @@ async fn proxy_game_api_cached(
         return Ok(json_string_response(StatusCode::OK, cached));
     }
 
-    // Coalesce concurrent misses for the same key onto a single upstream call.
-    // The first task creates the shared cell (leader); others await its result.
-    let (cell, is_leader) = {
-        let mut inflight = state.coalescer.inflight.lock();
-        match inflight.get(&cache_key) {
-            Some(cell) => (cell.clone(), false),
-            None => {
-                let cell = Arc::new(tokio::sync::OnceCell::new());
-                inflight.insert(cache_key.clone(), cell.clone());
-                (cell, true)
-            }
-        }
-    };
-
-    let outcome: Result<(u16, Arc<str>), AppError> = cell
-        .get_or_try_init(|| async {
+    // Coalesce concurrent misses for the same key onto a single upstream call;
+    // followers await and share the leader's result.
+    let (outcome, is_leader) = state
+        .coalescer
+        .coalesce(&cache_key, || async {
             let resp = proxy_game_api(state, server, path).await?;
             let status = resp.status.as_u16();
             let json: Arc<str> =
                 Arc::from(sonic_rs::to_string(&resp.body).unwrap_or_else(|_| "{}".to_string()));
             Ok((status, json))
         })
-        .await
-        .cloned();
+        .await;
 
-    // Leader populates the cache (200 only) and clears the in-flight slot so the
-    // next freshness window starts fresh; followers just reuse the shared result.
+    // The leader populates the cache (200 only); followers just reuse the result.
     if is_leader {
         if let Ok((status, json)) = &outcome {
             if *status == 200 {
                 cache_set(state, &cache_key, json, ttl_secs).await;
             }
         }
-        state.coalescer.inflight.lock().remove(&cache_key);
     }
 
     let (status, json) = outcome?;

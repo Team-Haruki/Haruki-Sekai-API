@@ -266,4 +266,44 @@ mod tests {
         let unpacked: serde_json::Value = cryptor.unpack(&packed).unwrap();
         assert_eq!(original, unpacked);
     }
+
+    #[test]
+    fn decode_msgpack_value_stringifies_int_keys_and_base64s_binary() {
+        use rmpv::Value as RV;
+        // A map with integer keys, a nested array, a string key, and a binary value.
+        let value = RV::Map(vec![
+            (RV::from(0i64), RV::from("alpha")),
+            (
+                RV::from(1i64),
+                RV::Array(vec![RV::from(10i64), RV::from(20i64)]),
+            ),
+            (RV::from("name"), RV::from("bob")),
+            (RV::from("bin"), RV::Binary(vec![0xDE, 0xAD])),
+        ]);
+        let mut buf = Vec::new();
+        rmpv::encode::write_value(&mut buf, &value).unwrap();
+
+        let decoded = decode_msgpack_value(&buf).unwrap();
+        // Integer keys are stringified (matches the rmpv path semantics).
+        assert_eq!(decoded["0"], serde_json::json!("alpha"));
+        assert_eq!(decoded["1"], serde_json::json!([10, 20]));
+        assert_eq!(decoded["name"], serde_json::json!("bob"));
+        // Binary is base64-encoded.
+        assert_eq!(decoded["bin"], serde_json::json!("3q0="));
+    }
+
+    #[test]
+    fn decrypt_msgpack_truncates_padding_and_roundtrips() {
+        let cryptor = SekaiCryptor::from_hex(
+            "00112233445566778899aabbccddeeff",
+            "ffeeddccbbaa99887766554433221100",
+        )
+        .unwrap();
+        let original = serde_json::json!({"a": 1, "b": [2, 3], "c": "hello"});
+        let packed = cryptor.pack(&original).unwrap();
+        // decrypt_msgpack must yield the exact unpadded msgpack plaintext.
+        let msgpack = cryptor.decrypt_msgpack(&packed).unwrap();
+        assert!(msgpack.len() < packed.len(), "padding must be stripped");
+        assert_eq!(decode_msgpack_value(&msgpack).unwrap(), original);
+    }
 }

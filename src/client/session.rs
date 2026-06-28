@@ -63,3 +63,29 @@ impl AccountSession {
         self.account.lock().dump()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::account::{AccountType, SekaiAccountNuverse};
+    use super::AccountSession;
+
+    fn dummy_session() -> AccountSession {
+        AccountSession::new(AccountType::Nuverse(SekaiAccountNuverse {
+            user_id: "1".to_string(),
+            device_id: String::new(),
+            access_token: String::new(),
+        }))
+    }
+
+    // try_reserve (used by lock-aware session routing) must reflect whether the
+    // per-account api_lock is currently free, without holding it.
+    #[tokio::test]
+    async fn try_reserve_reflects_lock_state() {
+        let session = dummy_session();
+        assert!(session.try_reserve(), "free lock is reservable");
+        let guard = session.lock_api().await;
+        assert!(!session.try_reserve(), "held lock is not reservable");
+        drop(guard);
+        assert!(session.try_reserve(), "released lock is reservable again");
+    }
+}
