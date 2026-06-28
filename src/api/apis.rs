@@ -97,6 +97,22 @@ fn json_string_response(status: StatusCode, json: String) -> Response {
 /// re-serialization, and the per-account request lock. The cache key omits any
 /// account (the path keeps the literal `{userId}` placeholder), so all callers
 /// share one entry. Only successful (200) responses are cached.
+async fn cache_get(state: &AppState, key: &str) -> Option<String> {
+    let mut conn = state.redis.as_ref()?.clone();
+    redis::AsyncCommands::get::<_, Option<String>>(&mut conn, key)
+        .await
+        .ok()
+        .flatten()
+}
+
+async fn cache_set(state: &AppState, key: &str, json: &str, ttl_secs: u64) {
+    if let Some(ref redis) = state.redis {
+        let mut conn = redis.clone();
+        let _: Result<(), redis::RedisError> =
+            redis::AsyncCommands::set_ex(&mut conn, key, json, ttl_secs).await;
+    }
+}
+
 async fn proxy_game_api_cached(
     state: &AppState,
     server: &str,
@@ -104,25 +120,53 @@ async fn proxy_game_api_cached(
     ttl_secs: u64,
 ) -> Result<Response, AppError> {
     let cache_key = format!("haruki_sekai_resp:{server}:{path}");
-    if let Some(ref redis) = state.redis {
-        let mut conn = redis.clone();
-        if let Ok(Some(cached)) =
-            redis::AsyncCommands::get::<_, Option<String>>(&mut conn, &cache_key).await
-        {
-            return Ok(json_string_response(StatusCode::OK, cached));
-        }
+
+    // Fast path: serve from cache while the entry is within its freshness window.
+    if let Some(cached) = cache_get(state, &cache_key).await {
+        return Ok(json_string_response(StatusCode::OK, cached));
     }
-    let resp = proxy_game_api(state, server, path).await?;
-    let status = resp.status;
-    let json = sonic_rs::to_string(&resp.body).unwrap_or_else(|_| "{}".to_string());
-    if status == StatusCode::OK {
-        if let Some(ref redis) = state.redis {
-            let mut conn = redis.clone();
-            let _: Result<(), redis::RedisError> =
-                redis::AsyncCommands::set_ex(&mut conn, &cache_key, &json, ttl_secs).await;
+
+    // Coalesce concurrent misses for the same key onto a single upstream call.
+    // The first task creates the shared cell (leader); others await its result.
+    let (cell, is_leader) = {
+        let mut inflight = state.coalescer.inflight.lock();
+        match inflight.get(&cache_key) {
+            Some(cell) => (cell.clone(), false),
+            None => {
+                let cell = Arc::new(tokio::sync::OnceCell::new());
+                inflight.insert(cache_key.clone(), cell.clone());
+                (cell, true)
+            }
         }
+    };
+
+    let outcome: Result<(u16, Arc<str>), AppError> = cell
+        .get_or_try_init(|| async {
+            let resp = proxy_game_api(state, server, path).await?;
+            let status = resp.status.as_u16();
+            let json: Arc<str> =
+                Arc::from(sonic_rs::to_string(&resp.body).unwrap_or_else(|_| "{}".to_string()));
+            Ok((status, json))
+        })
+        .await
+        .cloned();
+
+    // Leader populates the cache (200 only) and clears the in-flight slot so the
+    // next freshness window starts fresh; followers just reuse the shared result.
+    if is_leader {
+        if let Ok((status, json)) = &outcome {
+            if *status == 200 {
+                cache_set(state, &cache_key, json, ttl_secs).await;
+            }
+        }
+        state.coalescer.inflight.lock().remove(&cache_key);
     }
-    Ok(json_string_response(status, json))
+
+    let (status, json) = outcome?;
+    Ok(json_string_response(
+        StatusCode::from_u16(status).unwrap_or(StatusCode::OK),
+        json.to_string(),
+    ))
 }
 
 async fn proxy_post_game_api_body<T: serde::Serialize>(

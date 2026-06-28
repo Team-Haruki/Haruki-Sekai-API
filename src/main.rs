@@ -143,6 +143,7 @@ async fn init_app_state(config: Config) -> anyhow::Result<AppState> {
         master_db,
         redis,
         jwt_secret,
+        coalescer: Arc::new(haruki_sekai_api::RequestCoalescer::default()),
     })
 }
 
