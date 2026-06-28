@@ -34,6 +34,15 @@ impl AccountSession {
         self.api_lock.lock().await
     }
 
+    /// Non-blocking hint for session selection: true if this account's api_lock is
+    /// currently free (no in-flight call). The guard is dropped immediately, so this
+    /// only biases routing toward idle accounts; the real lock is taken in
+    /// call_api_with_timeout.
+    #[must_use]
+    pub fn try_reserve(&self) -> bool {
+        self.api_lock.try_lock().is_ok()
+    }
+
     /// Serializes re-login for a single account so concurrent in-flight requests
     /// that all observe an expired token do not each issue their own login. This
     /// is a dedicated lock (not `api_lock`) because `tokio::sync::Mutex` is not

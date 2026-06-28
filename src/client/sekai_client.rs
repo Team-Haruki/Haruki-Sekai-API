@@ -453,11 +453,26 @@ impl SekaiClient {
     #[must_use]
     pub fn get_session(&self) -> Option<Arc<AccountSession>> {
         let sessions = self.sessions.read();
-        if sessions.is_empty() {
+        let len = sessions.len();
+        if len == 0 {
             return None;
         }
-        let idx = self.session_index.fetch_add(1, Ordering::SeqCst) % sessions.len();
-        Some(sessions[idx].clone())
+        let start = self.session_index.fetch_add(1, Ordering::Relaxed) % len;
+        // Prefer an idle account: because the rolling one-time token forces each
+        // account's calls to serialize (api_lock held across the request), blind
+        // round-robin can queue a request behind an account that is mid-call or
+        // retrying while others sit idle. Scan from the round-robin cursor and pick
+        // the first account whose lock is free; fall back to the cursor slot if all
+        // are busy. This is only a hint (the guard is dropped immediately and the
+        // real lock is taken later), so there is no deadlock and the TOCTOU window
+        // is negligible — there is no .await between here and lock acquisition.
+        for i in 0..len {
+            let idx = (start + i) % len;
+            if sessions[idx].try_reserve() {
+                return Some(sessions[idx].clone());
+            }
+        }
+        Some(sessions[start].clone())
     }
 
     fn prepare_request(
