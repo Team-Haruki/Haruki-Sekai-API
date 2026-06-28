@@ -72,7 +72,13 @@ pub async fn auth_middleware(
     let server = extract_server_from_path(path);
     tracing::debug!("Extracted server: {}", server);
     if let Some(ref redis) = state.redis {
-        let cache_key = format!("haruki_sekai_api:{}:{}", claims.uid, server);
+        // The credential is part of the key so a rotated/revoked credential misses
+        // the cache and falls through to the DB check instead of being honored for
+        // up to the TTL.
+        let cache_key = format!(
+            "haruki_sekai_api:{}:{}:{}",
+            claims.uid, server, claims.credential
+        );
         let mut conn: redis::aio::ConnectionManager = redis.clone();
         if let Ok(val) = redis::AsyncCommands::get::<_, Option<String>>(&mut conn, &cache_key).await
         {
@@ -107,7 +113,10 @@ pub async fn auth_middleware(
                     Ok(Some(_)) => {
                         tracing::debug!("User {} authorized for server {}", user.id, server);
                         if let Some(ref redis) = state.redis {
-                            let cache_key = format!("haruki_sekai_api:{}:{}", user.id, server);
+                            let cache_key = format!(
+                                "haruki_sekai_api:{}:{}:{}",
+                                user.id, server, claims.credential
+                            );
                             let mut conn: redis::aio::ConnectionManager = redis.clone();
                             let _: Result<(), _> =
                                 redis::AsyncCommands::set_ex(&mut conn, &cache_key, "1", 43200u64)

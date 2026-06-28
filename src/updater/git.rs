@@ -7,6 +7,7 @@ use tracing::info;
 use crate::config::{GitConfig, GitSigningFormat};
 use crate::error::AppError;
 
+#[derive(Clone)]
 pub struct GitHelper {
     pub username: String,
     pub email: String,

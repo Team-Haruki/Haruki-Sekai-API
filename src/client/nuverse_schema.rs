@@ -1,10 +1,9 @@
 use std::collections::{HashMap, HashSet};
-use std::io::Cursor;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use indexmap::IndexMap;
 use serde::Deserialize;
-use serde_json::{Map as JsonMap, Number, Value as JsonValue};
+use serde_json::{Map as JsonMap, Value as JsonValue};
 
 use crate::error::AppError;
 
@@ -51,6 +50,10 @@ struct Schema {
     values: Option<Arc<Schema>>,
     union_of: Vec<Arc<Schema>>,
     union_dispatch: Vec<UnionVariant>,
+    /// For records: array position -> index into `fields` for int-`msgpack_key`
+    /// fields, sized to `max int key + 1`. Precomputed at parse time so the
+    /// array-restore hot path needs no per-record map allocation. Empty otherwise.
+    int_field_index: Vec<Option<usize>>,
 }
 
 #[derive(Debug, Clone)]
@@ -114,7 +117,7 @@ impl NuverseSchemaStore {
         &self,
         msgpack: &[u8],
     ) -> Result<IndexMap<String, JsonValue>, AppError> {
-        let raw = read_msgpack_json(msgpack)?;
+        let raw = crate::crypto::decode_msgpack_value(msgpack)?;
         let raw_obj = raw.as_object().ok_or_else(|| {
             AppError::ParseError("Nuverse master payload must be an object".to_string())
         })?;
@@ -235,16 +238,17 @@ impl SchemaBuilder {
                     values: None,
                     union_of,
                     union_dispatch: Vec::new(),
+                    int_field_index: Vec::new(),
                 }))
             }
             JsonValue::Object(obj) => self.parse_object(obj),
-            _ => Ok(Arc::new(any_schema())),
+            _ => Ok(ANY_NODE.clone()),
         }
     }
 
     fn parse_object(&mut self, obj: &JsonMap<String, JsonValue>) -> Result<Arc<Schema>, AppError> {
         let Some(ty) = obj.get("type") else {
-            return Ok(Arc::new(null_schema()));
+            return Ok(NULL_NODE.clone());
         };
         if ty.is_array() {
             return self.parse_schema(ty);
@@ -257,7 +261,7 @@ impl SchemaBuilder {
                     .get("items")
                     .map(|v| self.parse_schema(v))
                     .transpose()?
-                    .unwrap_or_else(|| Arc::new(any_schema()));
+                    .unwrap_or_else(|| ANY_NODE.clone());
                 Ok(Arc::new(Schema {
                     kind: SchemaKind::Array,
                     name: None,
@@ -266,6 +270,7 @@ impl SchemaBuilder {
                     values: None,
                     union_of: Vec::new(),
                     union_dispatch: Vec::new(),
+                    int_field_index: Vec::new(),
                 }))
             }
             "map" => {
@@ -273,7 +278,7 @@ impl SchemaBuilder {
                     .get("values")
                     .map(|v| self.parse_schema(v))
                     .transpose()?
-                    .unwrap_or_else(|| Arc::new(any_schema()));
+                    .unwrap_or_else(|| ANY_NODE.clone());
                 Ok(Arc::new(Schema {
                     kind: SchemaKind::Map,
                     name: None,
@@ -282,6 +287,7 @@ impl SchemaBuilder {
                     values: Some(values),
                     union_of: Vec::new(),
                     union_dispatch: Vec::new(),
+                    int_field_index: Vec::new(),
                 }))
             }
             primitive => Ok(self.primitive_or_ref(primitive)),
@@ -331,6 +337,32 @@ impl SchemaBuilder {
             })
             .unwrap_or_default();
 
+        // Precompute array-position -> field-index for int-keyed fields, so the
+        // array-restore hot path is a direct Vec lookup instead of a per-record
+        // HashMap rebuild. Keys are sparse-safe (sized to max key) and last-write
+        // -wins matches the previous HashMap behavior.
+        let max_int_key = fields
+            .iter()
+            .filter_map(|f| match f.key {
+                MsgpackKey::Int(i) if i >= 0 => Some(i),
+                _ => None,
+            })
+            .max();
+        let int_field_index = match max_int_key {
+            Some(max) => {
+                let mut index = vec![None; (max as usize) + 1];
+                for (field_idx, field) in fields.iter().enumerate() {
+                    if let MsgpackKey::Int(i) = field.key {
+                        if i >= 0 {
+                            index[i as usize] = Some(field_idx);
+                        }
+                    }
+                }
+                index
+            }
+            None => Vec::new(),
+        };
+
         let schema = Arc::new(Schema {
             kind: SchemaKind::Record,
             name: Some(full_name.clone()),
@@ -339,6 +371,7 @@ impl SchemaBuilder {
             values: None,
             union_of: Vec::new(),
             union_dispatch,
+            int_field_index,
         });
         if !full_name.is_empty() {
             self.registry.insert(full_name, schema.clone());
@@ -362,7 +395,7 @@ impl SchemaBuilder {
             .get("type")
             .map(|v| self.parse_schema(v))
             .transpose()?
-            .unwrap_or_else(|| Arc::new(any_schema()));
+            .unwrap_or_else(|| ANY_NODE.clone());
         let key = match obj.get("msgpack_key") {
             Some(JsonValue::Number(n)) => MsgpackKey::Int(n.as_i64().unwrap_or_default()),
             Some(JsonValue::String(s)) => MsgpackKey::String(s.clone()),
@@ -372,32 +405,33 @@ impl SchemaBuilder {
     }
 
     fn primitive_or_ref(&self, name: &str) -> Arc<Schema> {
-        let kind = match name {
-            "null" => SchemaKind::Null,
-            "boolean" => SchemaKind::Boolean,
-            "int" => SchemaKind::Int,
-            "long" => SchemaKind::Long,
-            "float" => SchemaKind::Float,
-            "double" => SchemaKind::Double,
-            "bytes" => SchemaKind::Bytes,
-            "string" => SchemaKind::String,
+        match name {
+            "null" => NULL_NODE.clone(),
+            "boolean" => BOOLEAN_NODE.clone(),
+            "int" => INT_NODE.clone(),
+            "long" => LONG_NODE.clone(),
+            "float" => FLOAT_NODE.clone(),
+            "double" => DOUBLE_NODE.clone(),
+            "bytes" => BYTES_NODE.clone(),
+            "string" => STRING_NODE.clone(),
             _ => {
                 if let Some(schema) = self.registry.get(name) {
                     return schema.clone();
                 }
-                SchemaKind::Ref
+                // An unresolved ref carries its target name, so it cannot be a
+                // shared canonical node.
+                Arc::new(Schema {
+                    kind: SchemaKind::Ref,
+                    name: Some(name.to_string()),
+                    fields: Vec::new(),
+                    items: None,
+                    values: None,
+                    union_of: Vec::new(),
+                    union_dispatch: Vec::new(),
+                    int_field_index: Vec::new(),
+                })
             }
-        };
-        let is_ref = matches!(kind, SchemaKind::Ref);
-        Arc::new(Schema {
-            kind,
-            name: is_ref.then(|| name.to_string()),
-            fields: Vec::new(),
-            items: None,
-            values: None,
-            union_of: Vec::new(),
-            union_dispatch: Vec::new(),
-        })
+        }
     }
 
     fn finish(self) -> Registry {
@@ -406,7 +440,7 @@ impl SchemaBuilder {
 }
 
 fn restore_json(
-    schema: &Arc<Schema>,
+    schema: &Schema,
     value: &JsonValue,
     registry: &Registry,
 ) -> Result<JsonValue, AppError> {
@@ -422,10 +456,10 @@ fn restore_json(
         | SchemaKind::String
         | SchemaKind::Any
         | SchemaKind::Ref => Ok(value.clone()),
-        SchemaKind::Array => restore_array(&schema, value, registry),
-        SchemaKind::Map => restore_map(&schema, value, registry),
-        SchemaKind::Union => restore_union(&schema, value, registry),
-        SchemaKind::Record => restore_record(&schema, value, registry),
+        SchemaKind::Array => restore_array(schema, value, registry),
+        SchemaKind::Map => restore_map(schema, value, registry),
+        SchemaKind::Union => restore_union(schema, value, registry),
+        SchemaKind::Record => restore_record(schema, value, registry),
     }
 }
 
@@ -439,17 +473,12 @@ fn restore_record(
     }
     if let Some(arr) = value.as_array() {
         let mut out = JsonMap::new();
-        let mut by_index: HashMap<i64, &Field> = HashMap::new();
-        for field in &schema.fields {
-            if let MsgpackKey::Int(idx) = field.key {
-                by_index.insert(idx, field);
-            }
-        }
         for (idx, item) in arr.iter().enumerate() {
             if item.is_null() {
                 continue;
             }
-            if let Some(field) = by_index.get(&(idx as i64)) {
+            if let Some(Some(field_idx)) = schema.int_field_index.get(idx) {
+                let field = &schema.fields[*field_idx];
                 out.insert(field.name.clone(), restore_json(&field.ty, item, registry)?);
             }
         }
@@ -532,7 +561,7 @@ fn restore_union(
     else {
         return Ok(value.clone());
     };
-    restore_json(&variant, value, registry)
+    restore_json(variant, value, registry)
 }
 
 fn restore_union_dispatch(
@@ -618,94 +647,48 @@ fn restore_selector_segments(
     Ok(())
 }
 
-fn resolve_schema(schema: &Arc<Schema>, registry: &Registry) -> Arc<Schema> {
+fn resolve_schema<'a>(schema: &'a Schema, registry: &'a Registry) -> &'a Schema {
     if matches!(schema.kind, SchemaKind::Ref) {
         if let Some(name) = &schema.name {
             if let Some(real) = registry.get(name) {
-                return real.clone();
+                return real;
             }
         }
     }
-    schema.clone()
+    schema
 }
 
-fn read_msgpack_json(data: &[u8]) -> Result<JsonValue, AppError> {
-    let mut cursor = Cursor::new(data);
-    let value = rmpv::decode::read_value(&mut cursor)
-        .map_err(|e| AppError::CryptoError(format!("MsgPack decode error: {}", e)))?;
-    rmpv_to_json(value)
-}
-
-fn rmpv_to_json(value: rmpv::Value) -> Result<JsonValue, AppError> {
-    match value {
-        rmpv::Value::Nil => Ok(JsonValue::Null),
-        rmpv::Value::Boolean(b) => Ok(JsonValue::Bool(b)),
-        rmpv::Value::Integer(i) => {
-            if let Some(n) = i.as_i64() {
-                Ok(JsonValue::Number(n.into()))
-            } else if let Some(n) = i.as_u64() {
-                Ok(JsonValue::Number(n.into()))
-            } else {
-                Ok(JsonValue::Null)
-            }
-        }
-        rmpv::Value::F32(f) => Number::from_f64(f as f64)
-            .map(JsonValue::Number)
-            .ok_or_else(|| AppError::CryptoError("Invalid float".to_string())),
-        rmpv::Value::F64(f) => Number::from_f64(f)
-            .map(JsonValue::Number)
-            .ok_or_else(|| AppError::CryptoError("Invalid float".to_string())),
-        rmpv::Value::String(s) => Ok(JsonValue::String(s.into_str().unwrap_or_default())),
-        rmpv::Value::Binary(b) => {
-            use base64::Engine as _;
-            Ok(JsonValue::String(
-                base64::engine::general_purpose::STANDARD.encode(&b),
-            ))
-        }
-        rmpv::Value::Array(arr) => arr
-            .into_iter()
-            .map(rmpv_to_json)
-            .collect::<Result<Vec<_>, _>>()
-            .map(JsonValue::Array),
-        rmpv::Value::Map(map) => {
-            let mut out = JsonMap::new();
-            for (k, v) in map {
-                let key = match k {
-                    rmpv::Value::String(s) => s.into_str().unwrap_or_default(),
-                    rmpv::Value::Integer(i) => i.to_string(),
-                    _ => continue,
-                };
-                out.insert(key, rmpv_to_json(v)?);
-            }
-            Ok(JsonValue::Object(out))
-        }
-        rmpv::Value::Ext(_, data) => {
-            use base64::Engine as _;
-            Ok(JsonValue::String(
-                base64::engine::general_purpose::STANDARD.encode(&data),
-            ))
-        }
-    }
-}
-
-fn any_schema() -> Schema {
+/// A leaf schema node (primitive / null / any): no fields, items, values or
+/// unions. These carry no per-store state, so one canonical Arc per kind is
+/// shared process-wide instead of allocating a fresh node per field occurrence
+/// (~4.5k field types in the bundle collapse to ~9 shared nodes).
+fn leaf_schema(kind: SchemaKind) -> Schema {
     Schema {
-        kind: SchemaKind::Any,
+        kind,
         name: None,
         fields: Vec::new(),
         items: None,
         values: None,
         union_of: Vec::new(),
         union_dispatch: Vec::new(),
+        int_field_index: Vec::new(),
     }
 }
 
-fn null_schema() -> Schema {
-    Schema {
-        kind: SchemaKind::Null,
-        ..any_schema()
-    }
-}
+static NULL_NODE: LazyLock<Arc<Schema>> = LazyLock::new(|| Arc::new(leaf_schema(SchemaKind::Null)));
+static BOOLEAN_NODE: LazyLock<Arc<Schema>> =
+    LazyLock::new(|| Arc::new(leaf_schema(SchemaKind::Boolean)));
+static INT_NODE: LazyLock<Arc<Schema>> = LazyLock::new(|| Arc::new(leaf_schema(SchemaKind::Int)));
+static LONG_NODE: LazyLock<Arc<Schema>> = LazyLock::new(|| Arc::new(leaf_schema(SchemaKind::Long)));
+static FLOAT_NODE: LazyLock<Arc<Schema>> =
+    LazyLock::new(|| Arc::new(leaf_schema(SchemaKind::Float)));
+static DOUBLE_NODE: LazyLock<Arc<Schema>> =
+    LazyLock::new(|| Arc::new(leaf_schema(SchemaKind::Double)));
+static BYTES_NODE: LazyLock<Arc<Schema>> =
+    LazyLock::new(|| Arc::new(leaf_schema(SchemaKind::Bytes)));
+static STRING_NODE: LazyLock<Arc<Schema>> =
+    LazyLock::new(|| Arc::new(leaf_schema(SchemaKind::String)));
+static ANY_NODE: LazyLock<Arc<Schema>> = LazyLock::new(|| Arc::new(leaf_schema(SchemaKind::Any)));
 
 #[cfg(test)]
 mod tests {

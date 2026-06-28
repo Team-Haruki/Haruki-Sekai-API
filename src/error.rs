@@ -37,6 +37,9 @@ pub enum AppError {
     #[error("Parse error: {0}")]
     ParseError(String),
 
+    #[error("Upstream data error: {0}")]
+    UpstreamData(String),
+
     #[error("Network error: {0}")]
     NetworkError(String),
 
@@ -72,6 +75,7 @@ impl AppError {
             AppError::UpgradeRequired => StatusCode::UPGRADE_REQUIRED,
             AppError::UnderMaintenance => StatusCode::SERVICE_UNAVAILABLE,
             AppError::InvalidServerRegion(_) | AppError::ParseError(_) => StatusCode::BAD_REQUEST,
+            AppError::UpstreamData(_) => StatusCode::BAD_GATEWAY,
             AppError::AuthError(_) => StatusCode::UNAUTHORIZED,
             AppError::NotFound(_) => StatusCode::NOT_FOUND,
             AppError::Forbidden(_) => StatusCode::FORBIDDEN,
@@ -131,7 +135,9 @@ impl From<sonic_rs::Error> for AppError {
 
 impl From<rmp_serde::decode::Error> for AppError {
     fn from(e: rmp_serde::decode::Error) -> Self {
-        AppError::ParseError(format!("MsgPack decode error: {}", e))
+        // Decoding an upstream game-server response that failed to deserialize:
+        // the upstream payload is at fault, not the API caller.
+        AppError::UpstreamData(format!("MsgPack decode error: {}", e))
     }
 }
 
