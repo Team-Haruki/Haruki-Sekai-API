@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use indexmap::IndexMap;
 use serde::Deserialize;
@@ -237,13 +237,13 @@ impl SchemaBuilder {
                 }))
             }
             JsonValue::Object(obj) => self.parse_object(obj),
-            _ => Ok(Arc::new(any_schema())),
+            _ => Ok(ANY_NODE.clone()),
         }
     }
 
     fn parse_object(&mut self, obj: &JsonMap<String, JsonValue>) -> Result<Arc<Schema>, AppError> {
         let Some(ty) = obj.get("type") else {
-            return Ok(Arc::new(null_schema()));
+            return Ok(NULL_NODE.clone());
         };
         if ty.is_array() {
             return self.parse_schema(ty);
@@ -256,7 +256,7 @@ impl SchemaBuilder {
                     .get("items")
                     .map(|v| self.parse_schema(v))
                     .transpose()?
-                    .unwrap_or_else(|| Arc::new(any_schema()));
+                    .unwrap_or_else(|| ANY_NODE.clone());
                 Ok(Arc::new(Schema {
                     kind: SchemaKind::Array,
                     name: None,
@@ -272,7 +272,7 @@ impl SchemaBuilder {
                     .get("values")
                     .map(|v| self.parse_schema(v))
                     .transpose()?
-                    .unwrap_or_else(|| Arc::new(any_schema()));
+                    .unwrap_or_else(|| ANY_NODE.clone());
                 Ok(Arc::new(Schema {
                     kind: SchemaKind::Map,
                     name: None,
@@ -361,7 +361,7 @@ impl SchemaBuilder {
             .get("type")
             .map(|v| self.parse_schema(v))
             .transpose()?
-            .unwrap_or_else(|| Arc::new(any_schema()));
+            .unwrap_or_else(|| ANY_NODE.clone());
         let key = match obj.get("msgpack_key") {
             Some(JsonValue::Number(n)) => MsgpackKey::Int(n.as_i64().unwrap_or_default()),
             Some(JsonValue::String(s)) => MsgpackKey::String(s.clone()),
@@ -371,32 +371,32 @@ impl SchemaBuilder {
     }
 
     fn primitive_or_ref(&self, name: &str) -> Arc<Schema> {
-        let kind = match name {
-            "null" => SchemaKind::Null,
-            "boolean" => SchemaKind::Boolean,
-            "int" => SchemaKind::Int,
-            "long" => SchemaKind::Long,
-            "float" => SchemaKind::Float,
-            "double" => SchemaKind::Double,
-            "bytes" => SchemaKind::Bytes,
-            "string" => SchemaKind::String,
+        match name {
+            "null" => NULL_NODE.clone(),
+            "boolean" => BOOLEAN_NODE.clone(),
+            "int" => INT_NODE.clone(),
+            "long" => LONG_NODE.clone(),
+            "float" => FLOAT_NODE.clone(),
+            "double" => DOUBLE_NODE.clone(),
+            "bytes" => BYTES_NODE.clone(),
+            "string" => STRING_NODE.clone(),
             _ => {
                 if let Some(schema) = self.registry.get(name) {
                     return schema.clone();
                 }
-                SchemaKind::Ref
+                // An unresolved ref carries its target name, so it cannot be a
+                // shared canonical node.
+                Arc::new(Schema {
+                    kind: SchemaKind::Ref,
+                    name: Some(name.to_string()),
+                    fields: Vec::new(),
+                    items: None,
+                    values: None,
+                    union_of: Vec::new(),
+                    union_dispatch: Vec::new(),
+                })
             }
-        };
-        let is_ref = matches!(kind, SchemaKind::Ref);
-        Arc::new(Schema {
-            kind,
-            name: is_ref.then(|| name.to_string()),
-            fields: Vec::new(),
-            items: None,
-            values: None,
-            union_of: Vec::new(),
-            union_dispatch: Vec::new(),
-        })
+        }
     }
 
     fn finish(self) -> Registry {
@@ -628,9 +628,13 @@ fn resolve_schema(schema: &Arc<Schema>, registry: &Registry) -> Arc<Schema> {
     schema.clone()
 }
 
-fn any_schema() -> Schema {
+/// A leaf schema node (primitive / null / any): no fields, items, values or
+/// unions. These carry no per-store state, so one canonical Arc per kind is
+/// shared process-wide instead of allocating a fresh node per field occurrence
+/// (~4.5k field types in the bundle collapse to ~9 shared nodes).
+fn leaf_schema(kind: SchemaKind) -> Schema {
     Schema {
-        kind: SchemaKind::Any,
+        kind,
         name: None,
         fields: Vec::new(),
         items: None,
@@ -640,12 +644,20 @@ fn any_schema() -> Schema {
     }
 }
 
-fn null_schema() -> Schema {
-    Schema {
-        kind: SchemaKind::Null,
-        ..any_schema()
-    }
-}
+static NULL_NODE: LazyLock<Arc<Schema>> = LazyLock::new(|| Arc::new(leaf_schema(SchemaKind::Null)));
+static BOOLEAN_NODE: LazyLock<Arc<Schema>> =
+    LazyLock::new(|| Arc::new(leaf_schema(SchemaKind::Boolean)));
+static INT_NODE: LazyLock<Arc<Schema>> = LazyLock::new(|| Arc::new(leaf_schema(SchemaKind::Int)));
+static LONG_NODE: LazyLock<Arc<Schema>> = LazyLock::new(|| Arc::new(leaf_schema(SchemaKind::Long)));
+static FLOAT_NODE: LazyLock<Arc<Schema>> =
+    LazyLock::new(|| Arc::new(leaf_schema(SchemaKind::Float)));
+static DOUBLE_NODE: LazyLock<Arc<Schema>> =
+    LazyLock::new(|| Arc::new(leaf_schema(SchemaKind::Double)));
+static BYTES_NODE: LazyLock<Arc<Schema>> =
+    LazyLock::new(|| Arc::new(leaf_schema(SchemaKind::Bytes)));
+static STRING_NODE: LazyLock<Arc<Schema>> =
+    LazyLock::new(|| Arc::new(leaf_schema(SchemaKind::String)));
+static ANY_NODE: LazyLock<Arc<Schema>> = LazyLock::new(|| Arc::new(leaf_schema(SchemaKind::Any)));
 
 #[cfg(test)]
 mod tests {
