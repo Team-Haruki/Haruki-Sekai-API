@@ -287,16 +287,16 @@ impl SekaiClient {
             .map_err(|e| AppError::Internal(format!("Failed to watch directory: {}", e)))?;
         let client = self.clone();
         let region_str = self.region.as_str().to_uppercase();
+        // Run reloads on the main multi-threaded runtime via its Handle, instead of
+        // building a dedicated current-thread runtime per region (which left 5 idle
+        // runtimes alive for the process lifetime).
+        let handle = tokio::runtime::Handle::current();
         std::thread::spawn(move || {
             let _watcher = watcher;
             info!(
                 "{} File watcher started for {} (polling mode, 5s interval)",
                 region_str, account_dir
             );
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("Failed to create tokio runtime for file watcher");
             let debounce_duration = Duration::from_secs(2);
             let is_account_change = |kind: &notify::EventKind| {
                 use notify::EventKind;
@@ -337,7 +337,7 @@ impl SekaiClient {
                     region_str
                 );
                 let client_clone = client.clone();
-                rt.block_on(async {
+                handle.block_on(async {
                     if let Err(e) = client_clone.reload_accounts().await {
                         error!("{} Failed to reload accounts: {}", region_str, e);
                     }
