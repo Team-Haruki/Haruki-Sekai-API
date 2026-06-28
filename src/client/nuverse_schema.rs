@@ -50,6 +50,10 @@ struct Schema {
     values: Option<Arc<Schema>>,
     union_of: Vec<Arc<Schema>>,
     union_dispatch: Vec<UnionVariant>,
+    /// For records: array position -> index into `fields` for int-`msgpack_key`
+    /// fields, sized to `max int key + 1`. Precomputed at parse time so the
+    /// array-restore hot path needs no per-record map allocation. Empty otherwise.
+    int_field_index: Vec<Option<usize>>,
 }
 
 #[derive(Debug, Clone)]
@@ -234,6 +238,7 @@ impl SchemaBuilder {
                     values: None,
                     union_of,
                     union_dispatch: Vec::new(),
+                    int_field_index: Vec::new(),
                 }))
             }
             JsonValue::Object(obj) => self.parse_object(obj),
@@ -265,6 +270,7 @@ impl SchemaBuilder {
                     values: None,
                     union_of: Vec::new(),
                     union_dispatch: Vec::new(),
+                    int_field_index: Vec::new(),
                 }))
             }
             "map" => {
@@ -281,6 +287,7 @@ impl SchemaBuilder {
                     values: Some(values),
                     union_of: Vec::new(),
                     union_dispatch: Vec::new(),
+                    int_field_index: Vec::new(),
                 }))
             }
             primitive => Ok(self.primitive_or_ref(primitive)),
@@ -330,6 +337,32 @@ impl SchemaBuilder {
             })
             .unwrap_or_default();
 
+        // Precompute array-position -> field-index for int-keyed fields, so the
+        // array-restore hot path is a direct Vec lookup instead of a per-record
+        // HashMap rebuild. Keys are sparse-safe (sized to max key) and last-write
+        // -wins matches the previous HashMap behavior.
+        let max_int_key = fields
+            .iter()
+            .filter_map(|f| match f.key {
+                MsgpackKey::Int(i) if i >= 0 => Some(i),
+                _ => None,
+            })
+            .max();
+        let int_field_index = match max_int_key {
+            Some(max) => {
+                let mut index = vec![None; (max as usize) + 1];
+                for (field_idx, field) in fields.iter().enumerate() {
+                    if let MsgpackKey::Int(i) = field.key {
+                        if i >= 0 {
+                            index[i as usize] = Some(field_idx);
+                        }
+                    }
+                }
+                index
+            }
+            None => Vec::new(),
+        };
+
         let schema = Arc::new(Schema {
             kind: SchemaKind::Record,
             name: Some(full_name.clone()),
@@ -338,6 +371,7 @@ impl SchemaBuilder {
             values: None,
             union_of: Vec::new(),
             union_dispatch,
+            int_field_index,
         });
         if !full_name.is_empty() {
             self.registry.insert(full_name, schema.clone());
@@ -394,6 +428,7 @@ impl SchemaBuilder {
                     values: None,
                     union_of: Vec::new(),
                     union_dispatch: Vec::new(),
+                    int_field_index: Vec::new(),
                 })
             }
         }
@@ -405,7 +440,7 @@ impl SchemaBuilder {
 }
 
 fn restore_json(
-    schema: &Arc<Schema>,
+    schema: &Schema,
     value: &JsonValue,
     registry: &Registry,
 ) -> Result<JsonValue, AppError> {
@@ -421,10 +456,10 @@ fn restore_json(
         | SchemaKind::String
         | SchemaKind::Any
         | SchemaKind::Ref => Ok(value.clone()),
-        SchemaKind::Array => restore_array(&schema, value, registry),
-        SchemaKind::Map => restore_map(&schema, value, registry),
-        SchemaKind::Union => restore_union(&schema, value, registry),
-        SchemaKind::Record => restore_record(&schema, value, registry),
+        SchemaKind::Array => restore_array(schema, value, registry),
+        SchemaKind::Map => restore_map(schema, value, registry),
+        SchemaKind::Union => restore_union(schema, value, registry),
+        SchemaKind::Record => restore_record(schema, value, registry),
     }
 }
 
@@ -438,17 +473,12 @@ fn restore_record(
     }
     if let Some(arr) = value.as_array() {
         let mut out = JsonMap::new();
-        let mut by_index: HashMap<i64, &Field> = HashMap::new();
-        for field in &schema.fields {
-            if let MsgpackKey::Int(idx) = field.key {
-                by_index.insert(idx, field);
-            }
-        }
         for (idx, item) in arr.iter().enumerate() {
             if item.is_null() {
                 continue;
             }
-            if let Some(field) = by_index.get(&(idx as i64)) {
+            if let Some(Some(field_idx)) = schema.int_field_index.get(idx) {
+                let field = &schema.fields[*field_idx];
                 out.insert(field.name.clone(), restore_json(&field.ty, item, registry)?);
             }
         }
@@ -531,7 +561,7 @@ fn restore_union(
     else {
         return Ok(value.clone());
     };
-    restore_json(&variant, value, registry)
+    restore_json(variant, value, registry)
 }
 
 fn restore_union_dispatch(
@@ -617,15 +647,15 @@ fn restore_selector_segments(
     Ok(())
 }
 
-fn resolve_schema(schema: &Arc<Schema>, registry: &Registry) -> Arc<Schema> {
+fn resolve_schema<'a>(schema: &'a Schema, registry: &'a Registry) -> &'a Schema {
     if matches!(schema.kind, SchemaKind::Ref) {
         if let Some(name) = &schema.name {
             if let Some(real) = registry.get(name) {
-                return real.clone();
+                return real;
             }
         }
     }
-    schema.clone()
+    schema
 }
 
 /// A leaf schema node (primitive / null / any): no fields, items, values or
@@ -641,6 +671,7 @@ fn leaf_schema(kind: SchemaKind) -> Schema {
         values: None,
         union_of: Vec::new(),
         union_dispatch: Vec::new(),
+        int_field_index: Vec::new(),
     }
 }
 
