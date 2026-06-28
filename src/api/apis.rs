@@ -81,7 +81,10 @@ async fn proxy_game_api_with_params(
 }
 
 /// Cache TTLs (seconds) for the global, non-user-specific read endpoints.
-const RANKING_CACHE_TTL_SECS: u64 = 30;
+// Cache TTLs bounded by each endpoint's freshness requirement: top100 is near
+// real-time (<=1s), border tolerates 10-30s, system/information change rarely.
+const RANKING_TOP100_CACHE_TTL_SECS: u64 = 1;
+const RANKING_BORDER_CACHE_TTL_SECS: u64 = 30;
 const STATIC_CACHE_TTL_SECS: u64 = 300;
 
 fn json_string_response(status: StatusCode, json: String) -> Response {
@@ -322,7 +325,7 @@ pub async fn get_event_ranking_top100(
         "/user/{{userId}}/event/{}/ranking?rankingViewType=top100",
         event_id
     );
-    proxy_game_api_cached(&state, &server, &path, RANKING_CACHE_TTL_SECS).await
+    proxy_game_api_cached(&state, &server, &path, RANKING_TOP100_CACHE_TTL_SECS).await
 }
 
 pub async fn get_event_ranking_border(
@@ -333,5 +336,5 @@ pub async fn get_event_ranking_border(
         return Err(AppError::ParseError("event_id must be numeric".to_string()));
     }
     let path = format!("/event/{}/ranking-border", event_id);
-    proxy_game_api_cached(&state, &server, &path, RANKING_CACHE_TTL_SECS).await
+    proxy_game_api_cached(&state, &server, &path, RANKING_BORDER_CACHE_TTL_SECS).await
 }
