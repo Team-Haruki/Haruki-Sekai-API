@@ -10,7 +10,7 @@ rust-version = "1.85"
 tokio = { version = "1", features = ["full"] }
 futures = "0.3"
 axum = { version = "0.8", features = ["macros"] }
-tower-http = { version = "0.6", features = ["cors", "trace"] }
+tower-http = { version = "0.7", features = ["cors", "trace"] }
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "gzip", "brotli", "query", "http2"] }
 sonic-rs = "0.5"
 serde = { version = "1", features = ["derive"] }
