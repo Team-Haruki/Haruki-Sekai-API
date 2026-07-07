@@ -7,6 +7,48 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::AppError;
 
+/// Write `contents` to `path` atomically: write a uniquely-named temp file in the
+/// same directory and rename it over the target. A concurrent reader therefore
+/// never observes a truncated/partial file (e.g. version_helper.load on the
+/// request path while an updater rewrites the version file).
+pub async fn write_file_atomic(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let tmp = dir.join(format!(".{}.tmp", uuid::Uuid::new_v4()));
+    tokio::fs::write(&tmp, contents).await?;
+    tokio::fs::rename(&tmp, path).await?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::write_file_atomic;
+
+    // Atomic write: target ends with the new contents, overwrite works, and no
+    // temp file is left behind in the directory.
+    #[tokio::test]
+    async fn write_file_atomic_overwrites_and_leaves_no_temp() {
+        let dir = std::env::temp_dir().join(format!("haruki_atomic_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("current_version.json");
+
+        write_file_atomic(&target, b"{\"v\":1}").await.unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"{\"v\":1}");
+
+        write_file_atomic(&target, b"{\"v\":2}").await.unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"{\"v\":2}");
+
+        let temp_leftovers = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
+            .count();
+        assert_eq!(temp_leftovers, 0, "temp file must be renamed away");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
 pub struct CookieHelper {
     url: String,
     cookies: Arc<Mutex<String>>,

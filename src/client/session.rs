@@ -9,6 +9,7 @@ pub struct AccountSession {
     pub account: Arc<Mutex<AccountType>>,
     pub session_token: Arc<Mutex<Option<String>>>,
     api_lock: Arc<tokio::sync::Mutex<()>>,
+    login_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl AccountSession {
@@ -17,6 +18,7 @@ impl AccountSession {
             account: Arc::new(Mutex::new(account)),
             session_token: Arc::new(Mutex::new(None)),
             api_lock: Arc::new(tokio::sync::Mutex::new(())),
+            login_lock: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
@@ -32,6 +34,23 @@ impl AccountSession {
         self.api_lock.lock().await
     }
 
+    /// Non-blocking hint for session selection: true if this account's api_lock is
+    /// currently free (no in-flight call). The guard is dropped immediately, so this
+    /// only biases routing toward idle accounts; the real lock is taken in
+    /// call_api_with_timeout.
+    #[must_use]
+    pub fn try_reserve(&self) -> bool {
+        self.api_lock.try_lock().is_ok()
+    }
+
+    /// Serializes re-login for a single account so concurrent in-flight requests
+    /// that all observe an expired token do not each issue their own login. This
+    /// is a dedicated lock (not `api_lock`) because `tokio::sync::Mutex` is not
+    /// reentrant and `call_api_with_timeout` re-acquires `api_lock`.
+    pub async fn lock_login(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.login_lock.lock().await
+    }
+
     pub fn get_session_token(&self) -> Option<String> {
         self.session_token.lock().clone()
     }
@@ -42,5 +61,31 @@ impl AccountSession {
 
     pub fn dump_account(&self) -> Result<Vec<u8>, crate::error::AppError> {
         self.account.lock().dump()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::account::{AccountType, SekaiAccountNuverse};
+    use super::AccountSession;
+
+    fn dummy_session() -> AccountSession {
+        AccountSession::new(AccountType::Nuverse(SekaiAccountNuverse {
+            user_id: "1".to_string(),
+            device_id: String::new(),
+            access_token: String::new(),
+        }))
+    }
+
+    // try_reserve (used by lock-aware session routing) must reflect whether the
+    // per-account api_lock is currently free, without holding it.
+    #[tokio::test]
+    async fn try_reserve_reflects_lock_state() {
+        let session = dummy_session();
+        assert!(session.try_reserve(), "free lock is reservable");
+        let guard = session.lock_api().await;
+        assert!(!session.try_reserve(), "held lock is not reservable");
+        drop(guard);
+        assert!(session.try_reserve(), "released lock is reservable again");
     }
 }

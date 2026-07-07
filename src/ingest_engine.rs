@@ -125,11 +125,16 @@ impl IngestionEngine {
             .await;
 
         if !failed_tables.is_empty() {
-            warn!("Completed with failures in: {:?}", failed_tables);
-        } else {
-            info!("Successfully ingested all master data files for {}", region);
+            // Surface the failure so the caller (master updater) does NOT advance
+            // the saved version on a partial ingest, which would otherwise leave
+            // the DB silently out of sync with the recorded version.
+            anyhow::bail!(
+                "ingestion failed for {} file(s): {:?}",
+                failed_tables.len(),
+                failed_tables
+            );
         }
-
+        info!("Successfully ingested all master data files for {}", region);
         Ok(())
     }
 

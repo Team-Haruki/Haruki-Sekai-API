@@ -1,6 +1,5 @@
 mod account;
 pub mod helper;
-pub mod nuverse;
 pub mod nuverse_schema;
 pub mod sekai_client;
 mod session;

@@ -45,7 +45,11 @@ async fn main() -> anyhow::Result<()> {
         }
         let path = format!("{}/master", server.master_dir.trim_end_matches('/'));
         println!("Ingesting {} region data from {}...", region.as_str(), path);
-        engine.ingest_master_data(&path, region.as_str()).await?;
+        // Tolerate per-region failures so one region with bad files does not abort
+        // ingestion for the others; ingest_master_data now errors on any bad file.
+        if let Err(e) = engine.ingest_master_data(&path, region.as_str()).await {
+            eprintln!("Ingestion failed for {}: {e:#}", region.as_str());
+        }
     }
     Ok(())
 }

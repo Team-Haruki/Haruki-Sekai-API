@@ -69,6 +69,9 @@ pub async fn start_scheduler(
 
     for (region, client) in clients {
         let server_config = &client.config;
+        // One lock per region, shared by the master and apphash updaters so their
+        // version-file read-modify-writes never clobber each other.
+        let version_lock = Arc::new(tokio::sync::Mutex::new(()));
         if server_config.enable_master_updater && !server_config.master_updater_cron.is_empty() {
             let region_name = region.as_str().to_uppercase();
             let cron_expr = server_config.master_updater_cron.clone();
@@ -85,6 +88,7 @@ pub async fn start_scheduler(
                 proxy.clone(),
                 config.asset_updater_servers.clone(),
                 db.clone(),
+                version_lock.clone(),
             ));
             match Job::new_async(cron_expr.as_str(), move |_uuid, _lock| {
                 let updater = updater.clone();
@@ -122,6 +126,7 @@ pub async fn start_scheduler(
                 config.apphash_sources.clone(),
                 server_config.version_path.clone(),
                 proxy.clone(),
+                version_lock.clone(),
             ));
             match Job::new_async(cron_expr.as_str(), move |_uuid, _lock| {
                 let updater = updater.clone();

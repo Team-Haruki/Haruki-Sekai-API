@@ -19,6 +19,8 @@ pub struct AppHashUpdater {
     pub sources: Vec<AppHashSource>,
     pub version_path: String,
     pub proxy: Option<String>,
+    /// Shared with the region's MasterUpdater to serialize version-file writes.
+    version_lock: std::sync::Arc<tokio::sync::Mutex<()>>,
 }
 
 impl AppHashUpdater {
@@ -27,12 +29,14 @@ impl AppHashUpdater {
         sources: Vec<AppHashSource>,
         version_path: String,
         proxy: Option<String>,
+        version_lock: std::sync::Arc<tokio::sync::Mutex<()>>,
     ) -> Self {
         Self {
             region,
             sources,
             version_path,
             proxy,
+            version_lock,
         }
     }
 
@@ -153,6 +157,9 @@ impl AppHashUpdater {
     }
 
     async fn update_version(&self, info: &AppInfo) -> Result<(), AppError> {
+        // Serialize with the MasterUpdater so neither clobbers the other's fields,
+        // and read-modify-write the file under the lock.
+        let _guard = self.version_lock.lock().await;
         let data = tokio::fs::read(&self.version_path).await?;
         let mut version: serde_json::Map<String, serde_json::Value> = sonic_rs::from_slice(&data)?;
         version.insert(
@@ -164,7 +171,11 @@ impl AppHashUpdater {
             serde_json::Value::String(info.app_hash.clone()),
         );
         let json = sonic_rs::to_string_pretty(&version)?;
-        tokio::fs::write(&self.version_path, json).await?;
+        crate::client::helper::write_file_atomic(
+            std::path::Path::new(&self.version_path),
+            json.as_bytes(),
+        )
+        .await?;
         Ok(())
     }
 }
