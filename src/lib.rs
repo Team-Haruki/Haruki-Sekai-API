@@ -28,6 +28,24 @@ pub struct RequestCoalescer {
     pub inflight: parking_lot::Mutex<HashMap<String, CoalescedCell>>,
 }
 
+struct InflightGuard<'a> {
+    coalescer: &'a RequestCoalescer,
+    key: &'a str,
+    cell: CoalescedCell,
+}
+
+impl Drop for InflightGuard<'_> {
+    fn drop(&mut self) {
+        let mut inflight = self.coalescer.inflight.lock();
+        let should_remove = inflight
+            .get(self.key)
+            .is_some_and(|cell| Arc::ptr_eq(cell, &self.cell));
+        if should_remove {
+            inflight.remove(self.key);
+        }
+    }
+}
+
 impl RequestCoalescer {
     /// Run `fetch` under single-flight for `key`: concurrent callers with the same
     /// key share one in-flight execution and clone its result. Returns
@@ -53,11 +71,15 @@ impl RequestCoalescer {
                 }
             }
         };
+        // Keep cleanup tied to the leader future's lifetime. If that request is
+        // cancelled while fetching, Drop still removes the abandoned slot so a
+        // follower cannot populate an OnceCell that remains cached forever.
+        let _guard = is_leader.then(|| InflightGuard {
+            coalescer: self,
+            key,
+            cell: cell.clone(),
+        });
         let outcome = cell.get_or_try_init(fetch).await.cloned();
-        // The leader clears the slot so the next freshness window starts fresh.
-        if is_leader {
-            self.inflight.lock().remove(key);
-        }
         (outcome, is_leader)
     }
 }
@@ -138,5 +160,44 @@ mod coalescer_tests {
             assert!(leader);
         }
         assert_eq!(calls.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn cancelled_leader_does_not_leave_a_permanent_result() {
+        let coalescer = Arc::new(RequestCoalescer::default());
+        let fetch_started = Arc::new(tokio::sync::Notify::new());
+        let release_fetch = Arc::new(tokio::sync::Notify::new());
+
+        let leader = {
+            let coalescer = coalescer.clone();
+            let fetch_started = fetch_started.clone();
+            let release_fetch = release_fetch.clone();
+            tokio::spawn(async move {
+                coalescer
+                    .coalesce("k", || async move {
+                        fetch_started.notify_one();
+                        release_fetch.notified().await;
+                        Ok((200, Arc::from("stale")))
+                    })
+                    .await
+            })
+        };
+
+        fetch_started.notified().await;
+        leader.abort();
+        assert!(leader.await.unwrap_err().is_cancelled());
+        assert!(coalescer.inflight.lock().is_empty());
+
+        let (first, is_leader) = coalescer
+            .coalesce("k", || async { Ok((200, Arc::from("fresh-1"))) })
+            .await;
+        assert!(is_leader);
+        assert_eq!(&*first.unwrap().1, "fresh-1");
+
+        let (second, is_leader) = coalescer
+            .coalesce("k", || async { Ok((200, Arc::from("fresh-2"))) })
+            .await;
+        assert!(is_leader);
+        assert_eq!(&*second.unwrap().1, "fresh-2");
     }
 }
