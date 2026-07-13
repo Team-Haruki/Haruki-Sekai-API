@@ -38,7 +38,7 @@ chrono = "0.4"
 num_enum = "0.7"
 notify = "9.0.0-rc.4"
 figment = { version = "0.10", features = ["yaml", "env"] }
-opendal = { version = "0.57", default-features = false, features = ["reqwest-rustls-tls", "executors-tokio", "services-fs", "services-s3", "services-oss", "services-cos", "services-gcs", "services-azblob", "services-obs"] }
+opendal = { version = "0.58", default-features = false, features = ["reqwest-rustls-tls", "executors-tokio", "services-fs", "services-s3", "services-oss", "services-cos", "services-gcs", "services-azblob", "services-obs"] }
 
 [profile.release]
 lto = "thin"
