@@ -41,12 +41,24 @@ pub async fn auth_middleware(
     next: Next,
 ) -> Response {
     req.extensions_mut().insert(None::<AuthUser>);
+    // Fail closed: protected routes must not silently become public when the
+    // auth dependencies are missing or misconfigured.
     let Some(ref db) = state.db else {
-        return next.run(req).await;
+        tracing::error!("Auth middleware: database unavailable; refusing request");
+        return error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Authentication service unavailable",
+        );
     };
     let jwt_secret = match &state.jwt_secret {
         Some(s) if !s.is_empty() => s,
-        _ => return next.run(req).await,
+        _ => {
+            tracing::error!("Auth middleware: JWT signing key not configured; refusing request");
+            return error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Authentication service unavailable",
+            );
+        }
     };
     let token = match req.headers().get("x-haruki-sekai-token") {
         Some(h) => match h.to_str() {

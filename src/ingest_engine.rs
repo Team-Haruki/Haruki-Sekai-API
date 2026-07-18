@@ -141,7 +141,11 @@ impl IngestionEngine {
 
     async fn ingest_file(&self, path: &Path, region: &str) -> Result<()> {
         let Some(file_stem) = path.file_stem().and_then(|s| s.to_str()) else {
-            warn!("Skipping {}: non-UTF-8 filename", path.display());
+            warn!(
+                "{} Skipping {}: non-UTF-8 filename",
+                region.to_uppercase(),
+                path.display()
+            );
             return Ok(());
         };
         let table_name = match self.resolve_table_name(file_stem) {

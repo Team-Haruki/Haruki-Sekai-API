@@ -41,16 +41,6 @@ pub struct SekaiClient {
     cookie_lock: tokio::sync::Mutex<()>,
 }
 
-/// Truncate a token for logging without risking a panic on a non-ASCII byte
-/// boundary (`&s[..40]` panics if byte 40 is mid-character).
-fn token_preview(s: &str) -> &str {
-    let mut end = s.len().min(40);
-    while !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    &s[..end]
-}
-
 impl SekaiClient {
     /// Build the shared reqwest client. Every region uses identical settings (only
     /// the global proxy varies), so one client is built once in init_app_state and
@@ -205,8 +195,19 @@ impl SekaiClient {
     pub async fn reload_accounts(&self) -> Result<(), AppError> {
         let region = self.region.as_str().to_uppercase();
         info!("{} Reloading accounts...", region);
-        let accounts = self.parse_accounts()?;
+        let (accounts, json_file_count) = self.parse_accounts()?;
         if accounts.is_empty() {
+            if json_file_count > 0 {
+                // Account files exist but none parsed — likely a transient state
+                // (mid-upload, bad deploy). Keep serving with the existing pool
+                // instead of swapping in an empty one.
+                let existing = self.sessions.read().len();
+                error!(
+                    "{} All {} account file(s) in {} failed to parse; keeping {} existing session(s)",
+                    region, json_file_count, self.config.account_dir, existing
+                );
+                return Ok(());
+            }
             warn!(
                 "{} No accounts found in {}",
                 region, self.config.account_dir
@@ -331,11 +332,15 @@ impl SekaiClient {
         Ok(())
     }
 
-    fn parse_accounts(&self) -> Result<Vec<AccountType>, AppError> {
+    /// Parse every account JSON file in the account directory. Returns the
+    /// parsed accounts and the number of `.json` files seen, so callers can
+    /// distinguish "directory is empty" from "every file failed to parse".
+    fn parse_accounts(&self) -> Result<(Vec<AccountType>, usize), AppError> {
         let mut accounts = Vec::new();
+        let mut json_file_count = 0usize;
         let account_dir = Path::new(&self.config.account_dir);
         if !account_dir.exists() {
-            return Ok(accounts);
+            return Ok((accounts, json_file_count));
         }
         let entries = fs::read_dir(account_dir)
             .map_err(|e| AppError::ParseError(format!("Failed to read account dir: {}", e)))?;
@@ -344,6 +349,7 @@ impl SekaiClient {
             if path.extension().and_then(|e| e.to_str()) != Some("json") {
                 continue;
             }
+            json_file_count += 1;
             let data = match fs::read(&path) {
                 Ok(d) => d,
                 Err(e) => {
@@ -358,7 +364,7 @@ impl SekaiClient {
                 }
             }
         }
-        Ok(accounts)
+        Ok((accounts, json_file_count))
     }
 
     fn parse_account_file(&self, path: &Path, data: &[u8]) -> Result<Vec<AccountType>, AppError> {
@@ -493,11 +499,11 @@ impl SekaiClient {
             if let Ok(token_str) = token.to_str() {
                 let old_token = session.get_session_token();
                 session.set_session_token(Some(token_str.to_string()));
+                // Log only rotation metadata — never token contents.
                 debug!(
-                    "Account #{} session token updated (old: {:?}, new: {}...)",
+                    "Account #{} session token updated (had_previous: {})",
                     session.user_id(),
-                    old_token.as_deref().map(token_preview),
-                    token_preview(token_str)
+                    old_token.is_some()
                 );
             }
         }

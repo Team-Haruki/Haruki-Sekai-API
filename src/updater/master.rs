@@ -416,7 +416,7 @@ treating difference as an update",
             written_keys.extend(restored.keys().cloned());
         }
         self.remove_stale_master_files(master_dir, &written_keys)
-            .await;
+            .await?;
 
         // Ingest into the DB synchronously (awaited so failures are visible and
         // engine-init errors are caught; CPU parsing is offloaded via
@@ -478,20 +478,20 @@ retry on the next cron tick): {e:#}",
     /// (and keep getting re-ingested) forever. Conservative: only touches
     /// identifier-like stems — version snapshots (`4.3.1.20.json`) and other
     /// dotted names are left alone — and never the configured version file.
+    /// Failures propagate so a stale table cannot silently survive: the caller
+    /// aborts the update, the version is not saved, and the next cron tick
+    /// retries the whole download-and-clean cycle.
     async fn remove_stale_master_files(
         &self,
         master_dir: &str,
         written_keys: &std::collections::HashSet<String>,
-    ) {
+    ) -> Result<(), crate::error::AppError> {
         if written_keys.is_empty() {
-            return;
+            return Ok(());
         }
         let version_canon = std::fs::canonicalize(&self.client.config.version_path).ok();
-        let mut rd = match tokio::fs::read_dir(master_dir).await {
-            Ok(rd) => rd,
-            Err(_) => return,
-        };
-        while let Ok(Some(entry)) = rd.next_entry().await {
+        let mut rd = tokio::fs::read_dir(master_dir).await?;
+        while let Some(entry) = rd.next_entry().await? {
             let p = entry.path();
             if p.extension().and_then(|e| e.to_str()) != Some("json") {
                 continue;
@@ -509,20 +509,20 @@ retry on the next cron tick): {e:#}",
                     continue;
                 }
             }
-            match tokio::fs::remove_file(&p).await {
-                Ok(()) => info!(
-                    "{} Removed stale master file {}",
-                    self.region.as_str().to_uppercase(),
-                    p.display()
-                ),
-                Err(e) => warn!(
-                    "{} Failed to remove stale master file {}: {}",
-                    self.region.as_str().to_uppercase(),
+            tokio::fs::remove_file(&p).await.map_err(|e| {
+                crate::error::AppError::IoError(format!(
+                    "Failed to remove stale master file {}: {}",
                     p.display(),
                     e
-                ),
-            }
+                ))
+            })?;
+            info!(
+                "{} Removed stale master file {}",
+                self.region.as_str().to_uppercase(),
+                p.display()
+            );
         }
+        Ok(())
     }
 
     /// Download and restore the Nuverse master blob with a bounded retry, mirroring
@@ -697,7 +697,7 @@ retry on the next cron tick): {e:#}",
                     continue;
                 }
             };
-            match tokio::fs::write(&file_path, json).await {
+            match crate::client::helper::write_file_atomic(&file_path, json.as_bytes()).await {
                 Ok(_) => success_count += 1,
                 Err(e) => {
                     warn!(

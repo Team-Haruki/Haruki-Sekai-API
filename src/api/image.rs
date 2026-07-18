@@ -12,11 +12,23 @@ use crate::AppState;
 /// Map an upstream image-fetch error to a client response: a 404 from the game
 /// server means the image does not exist and is propagated as 404; everything
 /// else uses the error's own status mapping (upstream faults surface as 502).
+/// Always emits the standard JSON error body.
 fn image_error_response(context: &str, e: AppError) -> Response {
-    if let AppError::Unknown { status: 404, .. } = e {
-        return (StatusCode::NOT_FOUND, format!("{}: not found", context)).into_response();
-    }
-    (e.status_code(), format!("{}: {}", context, e)).into_response()
+    let (status, message) = match e {
+        AppError::Unknown { status: 404, .. } => {
+            (StatusCode::NOT_FOUND, format!("{}: not found", context))
+        }
+        other => (other.status_code(), format!("{}: {}", context, other)),
+    };
+    let body = crate::error::ApiErrorResponse {
+        result: "failed",
+        status: status.as_u16(),
+        message,
+    };
+    let json = sonic_rs::to_string(&body).unwrap_or_else(|_| {
+        r#"{"result":"failed","status":500,"message":"Internal error"}"#.to_string()
+    });
+    (status, [("content-type", "application/json")], json).into_response()
 }
 
 pub async fn get_mysekai_image(
