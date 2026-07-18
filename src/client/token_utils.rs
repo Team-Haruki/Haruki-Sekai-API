@@ -5,8 +5,15 @@ use crate::error::AppError;
 
 #[derive(Deserialize)]
 struct JwtPayload {
-    #[serde(alias = "userId", alias = "user_id")]
-    user_id: Option<String>,
+    // userId appears as either a JSON string or a number depending on the
+    // token source, same as in account files (see null_or_number_to_string).
+    #[serde(
+        alias = "userId",
+        alias = "user_id",
+        default,
+        deserialize_with = "super::account::null_or_number_to_string"
+    )]
+    user_id: String,
 }
 
 #[derive(Deserialize)]
@@ -26,9 +33,10 @@ pub fn extract_user_id_from_jwt(token: &str) -> Result<String, AppError> {
         .map_err(|e| AppError::ParseError(format!("JWT base64 decode error: {}", e)))?;
     let payload: JwtPayload = sonic_rs::from_slice(&payload_bytes)
         .map_err(|e| AppError::ParseError(format!("JWT payload parse error: {}", e)))?;
-    payload
-        .user_id
-        .ok_or_else(|| AppError::ParseError("userId not found in JWT".to_string()))
+    if payload.user_id.is_empty() {
+        return Err(AppError::ParseError("userId not found in JWT".to_string()));
+    }
+    Ok(payload.user_id)
 }
 
 pub fn extract_user_id_from_nuverse_token(token: &str) -> Result<String, AppError> {
@@ -63,6 +71,15 @@ mod tests {
     #[test]
     fn test_extract_user_id_from_jwt() {
         let payload = r#"{"userId":"12345"}"#;
+        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload);
+        let jwt = format!("header.{}.signature", encoded);
+        let result = extract_user_id_from_jwt(&jwt);
+        assert_eq!(result.unwrap(), "12345");
+    }
+
+    #[test]
+    fn test_extract_numeric_user_id_from_jwt() {
+        let payload = r#"{"userId":12345}"#;
         let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload);
         let jwt = format!("header.{}.signature", encoded);
         let result = extract_user_id_from_jwt(&jwt);
