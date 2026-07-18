@@ -18,20 +18,22 @@ mod logging;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    logging::init();
+    // Config is loaded before logging init so backend.log_level can seed the
+    // default filter (RUST_LOG still wins); config errors go to stderr directly.
+    let config = match Config::load() {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            eprintln!("Failed to load config: {}", e);
+            std::process::exit(1);
+        }
+    };
+    logging::init(&config.backend.log_level);
 
     info!(
         "========================= Haruki Sekai API v{} =========================",
         env!("CARGO_PKG_VERSION")
     );
     info!("Powered by Haruki Dev Team");
-    let config = match Config::load() {
-        Ok(cfg) => cfg,
-        Err(e) => {
-            error!("Failed to load config: {}", e);
-            std::process::exit(1);
-        }
-    };
     let state = match init_app_state(config).await {
         Ok(s) => Arc::new(s),
         Err(e) => {

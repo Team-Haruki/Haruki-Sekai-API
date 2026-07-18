@@ -50,9 +50,11 @@ impl std::str::FromStr for ServerRegion {
 pub struct RedisConfig {
     #[serde(default)]
     pub enabled: bool,
-    #[serde(default)]
+    // Field-level defaults must match `impl Default`: a *partial* `redis:`
+    // section takes these, while a fully absent section takes the Default impl.
+    #[serde(default = "default_redis_host")]
     pub host: String,
-    #[serde(default)]
+    #[serde(default = "default_redis_port")]
     pub port: u16,
     #[serde(default)]
     pub password: String,
@@ -64,28 +66,12 @@ pub struct BackendConfig {
     pub host: String,
     #[serde(default = "default_port")]
     pub port: u16,
-    #[serde(default)]
-    pub ssl: bool,
-    #[serde(default)]
-    pub ssl_cert: String,
-    #[serde(default)]
-    pub ssl_key: String,
+    /// Default log level for this crate's targets; the RUST_LOG env var, when
+    /// set, takes precedence.
     #[serde(default = "default_log_level")]
     pub log_level: String,
     #[serde(default)]
-    pub main_log_file: String,
-    #[serde(default)]
-    pub access_log: String,
-    #[serde(default)]
-    pub access_log_path: String,
-    #[serde(default)]
     pub sekai_user_jwt_signing_key: String,
-    #[serde(default)]
-    pub enable_trust_proxy: bool,
-    #[serde(default)]
-    pub trusted_proxies: Vec<String>,
-    #[serde(default)]
-    pub proxy_header: String,
 }
 
 fn default_host() -> String {
@@ -97,21 +83,39 @@ fn default_port() -> u16 {
 fn default_log_level() -> String {
     "info".to_string()
 }
+fn default_redis_host() -> String {
+    "localhost".to_string()
+}
+fn default_redis_port() -> u16 {
+    6379
+}
 
 fn default_nuverse_schema_bundle_path() -> String {
     "Data/structures/nuverse_schema_bundle.json".to_string()
 }
 
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct DatabaseConfig {
     #[serde(default)]
     pub enabled: bool,
     #[serde(default)]
-    pub driver: String,
-    #[serde(default)]
     pub dsn: String,
-    #[serde(default)]
+    #[serde(default = "default_max_connections")]
     pub max_connections: u32,
+}
+
+fn default_max_connections() -> u32 {
+    10
+}
+
+impl Default for DatabaseConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            dsn: String::new(),
+            max_connections: default_max_connections(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]

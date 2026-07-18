@@ -21,8 +21,12 @@ const COLOR_BRIGHT_MAGENTA: &str = "\x1b[95m";
 const COLOR_BRIGHT_CYAN: &str = "\x1b[96m";
 const COLOR_RESET: &str = "\x1b[0m";
 
-pub fn init() {
+/// Initialize logging. `default_level` (from backend.log_level) sets this
+/// crate's level when RUST_LOG is not set; RUST_LOG always takes precedence.
+pub fn init(default_level: &str) {
+    let default_directives = format!("haruki_sekai_api={},warn", default_level);
     let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .or_else(|_| tracing_subscriber::EnvFilter::try_new(&default_directives))
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("haruki_sekai_api=info,warn"));
     let _ = tracing_subscriber::fmt()
         .event_format(ColoredFormatter)

@@ -67,13 +67,30 @@ pub async fn init_master_db(config: &DatabaseConfig) -> Result<DatabaseConnectio
     Ok(db)
 }
 
+/// Percent-encode a URL userinfo component so passwords containing URL-special
+/// characters (@ / # : etc.) do not corrupt the redis:// connection URL.
+fn percent_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{:02X}", b)),
+        }
+    }
+    out
+}
+
 pub async fn init_redis(config: &RedisConfig) -> Result<redis::aio::ConnectionManager, AppError> {
     let url = if config.password.is_empty() {
         format!("redis://{}:{}", config.host, config.port)
     } else {
         format!(
             "redis://:{}@{}:{}",
-            config.password, config.host, config.port
+            percent_encode(&config.password),
+            config.host,
+            config.port
         )
     };
     let client = redis::Client::open(url)
