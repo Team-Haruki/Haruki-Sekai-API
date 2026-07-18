@@ -6,7 +6,18 @@ use axum::{
 use regex::Regex;
 
 use crate::config::ServerRegion;
+use crate::error::AppError;
 use crate::AppState;
+
+/// Map an upstream image-fetch error to a client response: a 404 from the game
+/// server means the image does not exist and is propagated as 404; everything
+/// else uses the error's own status mapping (upstream faults surface as 502).
+fn image_error_response(context: &str, e: AppError) -> Response {
+    if let AppError::Unknown { status: 404, .. } = e {
+        return (StatusCode::NOT_FOUND, format!("{}: not found", context)).into_response();
+    }
+    (e.status_code(), format!("{}: {}", context, e)).into_response()
+}
 
 pub async fn get_mysekai_image(
     State(state): State<std::sync::Arc<AppState>>,
@@ -51,11 +62,7 @@ pub async fn get_mysekai_image(
     };
     match image_result {
         Ok(bytes) => (StatusCode::OK, [("content-type", "image/png")], bytes).into_response(),
-        Err(e) => (
-            StatusCode::BAD_GATEWAY,
-            format!("Fetch image failed: {}", e),
-        )
-            .into_response(),
+        Err(e) => image_error_response("Fetch image failed", e),
     }
 }
 
@@ -103,11 +110,7 @@ pub async fn get_mysekai_housing_thumbnail(
         .await
     {
         Ok(bytes) => (StatusCode::OK, [("content-type", "image/png")], bytes).into_response(),
-        Err(e) => (
-            StatusCode::BAD_GATEWAY,
-            format!("Fetch MySekai housing thumbnail failed: {}", e),
-        )
-            .into_response(),
+        Err(e) => image_error_response("Fetch MySekai housing thumbnail failed", e),
     }
 }
 
@@ -152,11 +155,7 @@ pub async fn get_custom_profile_card_thumbnail(
     let combined = format!("{}/{}", param1, param2);
     match client.get_cp_custom_profile_card_thumbnail(&combined).await {
         Ok(bytes) => (StatusCode::OK, [("content-type", "image/png")], bytes).into_response(),
-        Err(e) => (
-            StatusCode::BAD_GATEWAY,
-            format!("Fetch image failed: {}", e),
-        )
-            .into_response(),
+        Err(e) => image_error_response("Fetch image failed", e),
     }
 }
 
@@ -201,10 +200,6 @@ pub async fn get_custom_music_score(
             bytes,
         )
             .into_response(),
-        Err(e) => (
-            StatusCode::BAD_GATEWAY,
-            format!("Fetch custom music score failed: {}", e),
-        )
-            .into_response(),
+        Err(e) => image_error_response("Fetch custom music score failed", e),
     }
 }

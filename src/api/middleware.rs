@@ -15,6 +15,11 @@ use crate::db::entity::{sekai_user, sekai_user_server};
 use crate::error::ApiErrorResponse;
 use crate::AppState;
 
+/// Auth cache TTL. Deliberately short: revocation by deleting the user or the
+/// per-server grant row does not rotate the credential (which is part of the
+/// cache key), so this TTL bounds how long a revoked user keeps access.
+const AUTH_CACHE_TTL_SECS: u64 = 300;
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Claims {
     pub uid: String,
@@ -36,9 +41,9 @@ pub async fn auth_middleware(
     next: Next,
 ) -> Response {
     req.extensions_mut().insert(None::<AuthUser>);
-    if state.db.is_none() {
+    let Some(ref db) = state.db else {
         return next.run(req).await;
-    }
+    };
     let jwt_secret = match &state.jwt_secret {
         Some(s) if !s.is_empty() => s,
         _ => return next.run(req).await,
@@ -74,7 +79,9 @@ pub async fn auth_middleware(
     if let Some(ref redis) = state.redis {
         // The credential is part of the key so a rotated/revoked credential misses
         // the cache and falls through to the DB check instead of being honored for
-        // up to the TTL.
+        // up to the TTL. The TTL is kept short because row deletion (revoking a
+        // user or a server grant) does not change the credential and is only
+        // picked up when the cache entry expires.
         let cache_key = format!(
             "haruki_sekai_api:{}:{}:{}",
             claims.uid, server, claims.credential
@@ -91,67 +98,65 @@ pub async fn auth_middleware(
             }
         }
     }
-    if let Some(ref db) = state.db {
-        tracing::debug!("Checking user {} for server {}", claims.uid, server);
-        let user_result = sekai_user::Entity::find_by_id(&claims.uid).one(db).await;
-        match user_result {
-            Ok(Some(user)) => {
-                if user.credential != claims.credential {
-                    return error_response(StatusCode::UNAUTHORIZED, "Invalid credential");
-                }
-                tracing::debug!(
-                    "Checking server authorization: user={}, server={}",
-                    user.id,
-                    server
-                );
-                let server_result = sekai_user_server::Entity::find()
-                    .filter(sekai_user_server::Column::UserId.eq(&user.id))
-                    .filter(sekai_user_server::Column::Server.eq(&server))
-                    .one(db)
-                    .await;
-                match server_result {
-                    Ok(Some(_)) => {
-                        tracing::debug!("User {} authorized for server {}", user.id, server);
-                        if let Some(ref redis) = state.redis {
-                            let cache_key = format!(
-                                "haruki_sekai_api:{}:{}:{}",
-                                user.id, server, claims.credential
-                            );
-                            let mut conn: redis::aio::ConnectionManager = redis.clone();
-                            let _: Result<(), _> =
-                                redis::AsyncCommands::set_ex(&mut conn, &cache_key, "1", 43200u64)
-                                    .await;
-                        }
-                        req.extensions_mut().insert(Some(AuthUser {
-                            id: claims.uid,
-                            credential: claims.credential,
-                        }));
-                        return next.run(req).await;
-                    }
-                    Ok(None) => {
-                        tracing::warn!("User {} not authorized for server {}", user.id, server);
-                        return error_response(
-                            StatusCode::FORBIDDEN,
-                            "Not authorized for this server",
+    tracing::debug!("Checking user {} for server {}", claims.uid, server);
+    let user_result = sekai_user::Entity::find_by_id(&claims.uid).one(db).await;
+    match user_result {
+        Ok(Some(user)) => {
+            if user.credential != claims.credential {
+                return error_response(StatusCode::UNAUTHORIZED, "Invalid credential");
+            }
+            tracing::debug!(
+                "Checking server authorization: user={}, server={}",
+                user.id,
+                server
+            );
+            let server_result = sekai_user_server::Entity::find()
+                .filter(sekai_user_server::Column::UserId.eq(&user.id))
+                .filter(sekai_user_server::Column::Server.eq(&server))
+                .one(db)
+                .await;
+            match server_result {
+                Ok(Some(_)) => {
+                    tracing::debug!("User {} authorized for server {}", user.id, server);
+                    if let Some(ref redis) = state.redis {
+                        let cache_key = format!(
+                            "haruki_sekai_api:{}:{}:{}",
+                            user.id, server, claims.credential
                         );
+                        let mut conn: redis::aio::ConnectionManager = redis.clone();
+                        let _: Result<(), _> = redis::AsyncCommands::set_ex(
+                            &mut conn,
+                            &cache_key,
+                            "1",
+                            AUTH_CACHE_TTL_SECS,
+                        )
+                        .await;
                     }
-                    Err(e) => {
-                        tracing::error!("Database error checking server auth: {:?}", e);
-                        return error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error");
-                    }
+                    req.extensions_mut().insert(Some(AuthUser {
+                        id: claims.uid,
+                        credential: claims.credential,
+                    }));
+                    next.run(req).await
                 }
-            }
-            Ok(None) => {
-                tracing::warn!("User {} not found in database", claims.uid);
-                return error_response(StatusCode::UNAUTHORIZED, "User not found");
-            }
-            Err(e) => {
-                tracing::error!("Database error looking up user: {:?}", e);
-                return error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error");
+                Ok(None) => {
+                    tracing::warn!("User {} not authorized for server {}", user.id, server);
+                    error_response(StatusCode::FORBIDDEN, "Not authorized for this server")
+                }
+                Err(e) => {
+                    tracing::error!("Database error checking server auth: {:?}", e);
+                    error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error")
+                }
             }
         }
+        Ok(None) => {
+            tracing::warn!("User {} not found in database", claims.uid);
+            error_response(StatusCode::UNAUTHORIZED, "User not found")
+        }
+        Err(e) => {
+            tracing::error!("Database error looking up user: {:?}", e);
+            error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error")
+        }
     }
-    next.run(req).await
 }
 
 fn extract_server_from_path(path: &str) -> String {
@@ -160,7 +165,7 @@ fn extract_server_from_path(path: &str) -> String {
         Some(part) => part,
         None => return String::new(),
     };
-    let server = if first.eq_ignore_ascii_case("api") {
+    let server = if first.eq_ignore_ascii_case("api") || first.eq_ignore_ascii_case("image") {
         parts.next().unwrap_or_default()
     } else {
         first
@@ -198,5 +203,10 @@ mod tests {
     fn extract_server_handles_empty_or_incomplete_paths() {
         assert_eq!(extract_server_from_path("/"), "");
         assert_eq!(extract_server_from_path("/api"), "");
+    }
+
+    #[test]
+    fn extract_server_uses_segment_after_image_prefix() {
+        assert_eq!(extract_server_from_path("/image/tw/mysekai/1/2"), "tw");
     }
 }

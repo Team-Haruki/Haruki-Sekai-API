@@ -2,7 +2,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use thiserror::Error;
 
-#[derive(Debug, Error)]
+#[derive(Debug, Clone, Error)]
 pub enum AppError {
     #[error("Session expired")]
     SessionError,
@@ -75,7 +75,12 @@ impl AppError {
             AppError::UpgradeRequired => StatusCode::UPGRADE_REQUIRED,
             AppError::UnderMaintenance => StatusCode::SERVICE_UNAVAILABLE,
             AppError::InvalidServerRegion(_) | AppError::ParseError(_) => StatusCode::BAD_REQUEST,
-            AppError::UpstreamData(_) => StatusCode::BAD_GATEWAY,
+            // Upstream-fault classes: the game server (or the path to it) broke,
+            // not this service — surface as 502 so callers don't misattribute.
+            AppError::UpstreamData(_)
+            | AppError::NetworkError(_)
+            | AppError::InvalidHttpStatus(_)
+            | AppError::Unknown { .. } => StatusCode::BAD_GATEWAY,
             AppError::AuthError(_) => StatusCode::UNAUTHORIZED,
             AppError::NotFound(_) => StatusCode::NOT_FOUND,
             AppError::Forbidden(_) => StatusCode::FORBIDDEN,
