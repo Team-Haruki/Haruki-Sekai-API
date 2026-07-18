@@ -71,6 +71,22 @@ impl GitHelper {
         command
     }
 
+    /// Strip the configured password (raw and percent-encoded, as it appears in
+    /// credential-injected URLs) from text that may end up in errors/logs — git's
+    /// stderr for "unable to access" failures echoes the full remote URL
+    /// including userinfo.
+    fn redact(&self, text: &str) -> String {
+        if self.password.is_empty() {
+            return text.to_string();
+        }
+        let mut out = text.replace(&self.password, "***");
+        let encoded = pct_encode(&self.password);
+        if encoded != self.password {
+            out = out.replace(&encoded, "***");
+        }
+        out
+    }
+
     fn run(&self, mut command: Command, action: &str) -> Result<Output, AppError> {
         let output = command
             .output()
@@ -82,7 +98,7 @@ impl GitHelper {
             let detail = if detail.is_empty() {
                 output.status.to_string()
             } else {
-                detail.to_string()
+                self.redact(detail)
             };
             return Err(AppError::NetworkError(format!(
                 "git {} failed: {}",

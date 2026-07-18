@@ -43,7 +43,8 @@ async fn main() -> anyhow::Result<()> {
         if !server.enabled || server.master_dir.is_empty() {
             continue;
         }
-        let path = format!("{}/master", server.master_dir.trim_end_matches('/'));
+        // Same layout as the master updater: files live directly in master_dir.
+        let path = server.master_dir.trim_end_matches('/').to_string();
         println!("Ingesting {} region data from {}...", region.as_str(), path);
         // Tolerate per-region failures so one region with bad files does not abort
         // ingestion for the others; ingest_master_data now errors on any bad file.

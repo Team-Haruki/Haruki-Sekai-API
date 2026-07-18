@@ -66,7 +66,9 @@ impl AppHashUpdater {
                             "{} Found new app version: {} (hash: {})",
                             self.region.as_str().to_uppercase(),
                             new_info.app_version,
-                            &new_info.app_hash[..new_info.app_hash.len().min(16)]
+                            // chars(), not byte slicing: the hash is
+                            // network-supplied and panic = "abort" in release.
+                            new_info.app_hash.chars().take(16).collect::<String>()
                         );
 
                         if let Err(e) = self.update_version(&new_info).await {

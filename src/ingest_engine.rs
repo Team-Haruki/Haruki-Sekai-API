@@ -125,9 +125,10 @@ impl IngestionEngine {
             .await;
 
         if !failed_tables.is_empty() {
-            // Surface the failure so the caller (master updater) does NOT advance
-            // the saved version on a partial ingest, which would otherwise leave
-            // the DB silently out of sync with the recorded version.
+            // Surface the failure to the caller. The master updater treats ingest
+            // as best-effort (files on disk and the git mirror track the download,
+            // not DB health) but records the failure and retries the ingest on its
+            // next cron tick; the CLI reports it per region.
             anyhow::bail!(
                 "ingestion failed for {} file(s): {:?}",
                 failed_tables.len(),
@@ -139,7 +140,10 @@ impl IngestionEngine {
     }
 
     async fn ingest_file(&self, path: &Path, region: &str) -> Result<()> {
-        let file_stem = path.file_stem().unwrap().to_str().unwrap();
+        let Some(file_stem) = path.file_stem().and_then(|s| s.to_str()) else {
+            warn!("Skipping {}: non-UTF-8 filename", path.display());
+            return Ok(());
+        };
         let table_name = match self.resolve_table_name(file_stem) {
             Some(t) => t,
             None => return Ok(()),

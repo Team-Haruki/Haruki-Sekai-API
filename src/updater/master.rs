@@ -37,6 +37,10 @@ pub struct MasterUpdater {
     /// so their read-modify-writes do not clobber each other's fields.
     version_lock: Arc<tokio::sync::Mutex<()>>,
     db: Option<sea_orm::DatabaseConnection>,
+    /// Set when the last DB ingest failed. The next cron tick retries the ingest
+    /// even if the master version is unchanged, so a transient DB failure does not
+    /// leave the DB out of sync until the next upstream version bump.
+    ingest_failed: std::sync::atomic::AtomicBool,
 }
 
 impl MasterUpdater {
@@ -68,6 +72,7 @@ impl MasterUpdater {
             update_lock: tokio::sync::Mutex::new(()),
             version_lock,
             db,
+            ingest_failed: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -154,8 +159,20 @@ impl MasterUpdater {
             self.call_all_asset_updaters(&login_response.asset_version, &login_response.asset_hash)
                 .await;
         }
-        if need_master_update {
-            if self.region.is_cp_server() {
+        let retry_ingest = !need_master_update
+            && self
+                .ingest_failed
+                .load(std::sync::atomic::Ordering::Relaxed);
+        if retry_ingest {
+            warn!(
+                "{} Previous DB ingest failed; re-running master update for the current version...",
+                self.region.as_str().to_uppercase()
+            );
+        }
+        if need_master_update || retry_ingest {
+            if !need_master_update {
+                // retry path: version unchanged, just re-download + re-ingest
+            } else if self.region.is_cp_server() {
                 info!(
                     "{} New master data version: {}",
                     self.region.as_str().to_uppercase(),
@@ -186,15 +203,20 @@ impl MasterUpdater {
                 asset_hash: login_response.asset_hash.clone(),
                 cdn_version: login_response.cdn_version,
             };
-            if let Err(e) = self.save_version(&new_version).await {
-                error!(
-                    "{} Failed to save version file: {}",
-                    self.region.as_str().to_uppercase(),
-                    e
-                );
-                return;
-            }
-            self.client.version_helper.update(new_version);
+            // save_version returns the merged on-disk state so a concurrent
+            // app-hash update that landed mid-download is preserved in memory too.
+            let merged_version = match self.save_version(&new_version).await {
+                Ok(v) => v,
+                Err(e) => {
+                    error!(
+                        "{} Failed to save version file: {}",
+                        self.region.as_str().to_uppercase(),
+                        e
+                    );
+                    return;
+                }
+            };
+            self.client.version_helper.update(merged_version);
             if let Some(ref git_helper) = self.git_helper {
                 // git shells out via std::process and the push is a network call;
                 // run it on a blocking thread so it never stalls a tokio worker.
@@ -225,10 +247,27 @@ impl MasterUpdater {
         login: &crate::client::LoginResponse,
         current: &VersionInfo,
     ) -> (bool, bool) {
-        let need_master =
-            compare_version(&login.data_version, &current.data_version).unwrap_or(false);
-        let need_asset =
-            compare_version(&login.asset_version, &current.asset_version).unwrap_or(false);
+        // A version string that fails to parse must not silently freeze updates
+        // forever: log it, and treat "different and unparseable" as an update.
+        let compare_or_differ = |what: &str, new: &str, cur: &str| -> bool {
+            match compare_version(new, cur) {
+                Ok(newer) => newer,
+                Err(e) => {
+                    warn!(
+                        "{} Failed to compare {} versions ({:?} vs {:?}): {}; \
+treating difference as an update",
+                        self.region.as_str().to_uppercase(),
+                        what,
+                        new,
+                        cur,
+                        e
+                    );
+                    new != cur
+                }
+            }
+        };
+        let need_master = compare_or_differ("data", &login.data_version, &current.data_version);
+        let need_asset = compare_or_differ("asset", &login.asset_version, &current.asset_version);
 
         (need_master, need_asset)
     }
@@ -349,6 +388,7 @@ impl MasterUpdater {
         let master_dir = &self.client.config.master_dir;
         tokio::fs::create_dir_all(master_dir).await?;
 
+        let mut written_keys: std::collections::HashSet<String> = std::collections::HashSet::new();
         if self.region.is_cp_server() {
             let paths: Vec<String> = login
                 .suite_master_split_path
@@ -364,6 +404,7 @@ impl MasterUpdater {
             for api_path in paths {
                 let data = self.download_cp_master_split(session, &api_path).await?;
                 self.save_master_files(&data, master_dir).await?;
+                written_keys.extend(data.keys().cloned());
             }
         } else {
             let url = format!(
@@ -372,7 +413,10 @@ impl MasterUpdater {
             );
             let restored = self.download_nuverse_master(&url).await?;
             self.save_master_files(&restored, master_dir).await?;
+            written_keys.extend(restored.keys().cloned());
         }
+        self.remove_stale_master_files(master_dir, &written_keys)
+            .await;
 
         // Ingest into the DB synchronously (awaited so failures are visible and
         // engine-init errors are caught; CPU parsing is offloaded via
@@ -388,26 +432,38 @@ impl MasterUpdater {
                 "{} Starting database ingestion for new master data...",
                 region_upper
             );
-            match crate::ingest_engine::IngestionEngine::new(db).await {
+            let ingest_ok = match crate::ingest_engine::IngestionEngine::new(db).await {
                 Ok(engine) => {
                     let region_str = self.region.as_str().to_lowercase();
                     match engine.ingest_master_data(master_dir, &region_str).await {
-                        Ok(()) => info!(
-                            "{} Master Data successfully ingested into database",
-                            region_upper
-                        ),
-                        Err(e) => error!(
-                            "{} Master Data DB ingestion failed (files saved; git mirror and \
-version unaffected): {e:#}",
-                            region_upper
-                        ),
+                        Ok(()) => {
+                            info!(
+                                "{} Master Data successfully ingested into database",
+                                region_upper
+                            );
+                            true
+                        }
+                        Err(e) => {
+                            error!(
+                                "{} Master Data DB ingestion failed (files saved; git mirror and \
+version unaffected; will retry on the next cron tick): {e:#}",
+                                region_upper
+                            );
+                            false
+                        }
                     }
                 }
-                Err(e) => error!(
-                    "{} Failed to initialize ingestion engine (skipping DB ingest): {e:#}",
-                    region_upper
-                ),
-            }
+                Err(e) => {
+                    error!(
+                        "{} Failed to initialize ingestion engine (skipping DB ingest; will \
+retry on the next cron tick): {e:#}",
+                        region_upper
+                    );
+                    false
+                }
+            };
+            self.ingest_failed
+                .store(!ingest_ok, std::sync::atomic::Ordering::Relaxed);
         }
 
         info!(
@@ -415,6 +471,58 @@ version unaffected): {e:#}",
             self.region.as_str().to_uppercase()
         );
         Ok(())
+    }
+
+    /// Remove top-level `{key}.json` files whose key vanished from the newly
+    /// downloaded master set, so tables deleted upstream do not survive locally
+    /// (and keep getting re-ingested) forever. Conservative: only touches
+    /// identifier-like stems — version snapshots (`4.3.1.20.json`) and other
+    /// dotted names are left alone — and never the configured version file.
+    async fn remove_stale_master_files(
+        &self,
+        master_dir: &str,
+        written_keys: &std::collections::HashSet<String>,
+    ) {
+        if written_keys.is_empty() {
+            return;
+        }
+        let version_canon = std::fs::canonicalize(&self.client.config.version_path).ok();
+        let mut rd = match tokio::fs::read_dir(master_dir).await {
+            Ok(rd) => rd,
+            Err(_) => return,
+        };
+        while let Ok(Some(entry)) = rd.next_entry().await {
+            let p = entry.path();
+            if p.extension().and_then(|e| e.to_str()) != Some("json") {
+                continue;
+            }
+            let Some(stem) = p.file_stem().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            let identifier_like = stem.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
+                && stem.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+            if !identifier_like || written_keys.contains(stem) {
+                continue;
+            }
+            if let (Some(vc), Ok(pc)) = (&version_canon, std::fs::canonicalize(&p)) {
+                if *vc == pc {
+                    continue;
+                }
+            }
+            match tokio::fs::remove_file(&p).await {
+                Ok(()) => info!(
+                    "{} Removed stale master file {}",
+                    self.region.as_str().to_uppercase(),
+                    p.display()
+                ),
+                Err(e) => warn!(
+                    "{} Failed to remove stale master file {}: {}",
+                    self.region.as_str().to_uppercase(),
+                    p.display(),
+                    e
+                ),
+            }
+        }
     }
 
     /// Download and restore the Nuverse master blob with a bounded retry, mirroring
@@ -566,6 +674,15 @@ version unaffected): {e:#}",
         let mut success_count = 0;
         let mut fail_count = 0;
         for (key, value) in data {
+            if !is_safe_path_component(key) {
+                warn!(
+                    "{} Skipping master key {:?}: not a safe filename",
+                    self.region.as_str().to_uppercase(),
+                    key
+                );
+                fail_count += 1;
+                continue;
+            }
             let file_path = Path::new(master_dir).join(format!("{}.json", key));
             let json = match sonic_rs::to_string_pretty(value) {
                 Ok(j) => j,
@@ -600,15 +717,27 @@ version unaffected): {e:#}",
             total_keys,
             fail_count
         );
-        if fail_count > 0 && success_count == 0 {
-            return Err(crate::error::AppError::ParseError(
-                "All master file writes failed".to_string(),
-            ));
+        if fail_count > 0 {
+            // A torn write set must not be recorded as a completed update: bail so
+            // the caller neither saves the version nor pushes the git mirror, and
+            // the next cron tick re-downloads.
+            return Err(crate::error::AppError::IoError(format!(
+                "{} of {} master file writes failed",
+                fail_count, total_keys
+            )));
         }
         Ok(())
     }
 
-    async fn save_version(&self, version: &VersionInfo) -> Result<(), crate::error::AppError> {
+    /// Persist the master/asset version fields, preserving whatever
+    /// `appVersion`/`appHash` are currently on disk: those belong to the
+    /// AppHashUpdater, and our in-memory copy may be minutes stale (snapshotted
+    /// before a long download), so overwriting them here would revert a
+    /// concurrent app-hash update. Returns the merged state as written.
+    async fn save_version(
+        &self,
+        version: &VersionInfo,
+    ) -> Result<VersionInfo, crate::error::AppError> {
         let path = &self.client.config.version_path;
         // Serialize with the AppHashUpdater so neither clobbers the other's fields.
         let _guard = self.version_lock.lock().await;
@@ -618,14 +747,12 @@ version unaffected): {e:#}",
         } else {
             serde_json::Map::new()
         };
-        existing.insert(
-            "appVersion".to_string(),
-            serde_json::Value::String(version.app_version.clone()),
-        );
-        existing.insert(
-            "appHash".to_string(),
-            serde_json::Value::String(version.app_hash.clone()),
-        );
+        existing
+            .entry("appVersion".to_string())
+            .or_insert_with(|| serde_json::Value::String(version.app_version.clone()));
+        existing
+            .entry("appHash".to_string())
+            .or_insert_with(|| serde_json::Value::String(version.app_hash.clone()));
         existing.insert(
             "dataVersion".to_string(),
             serde_json::Value::String(version.data_version.clone()),
@@ -645,9 +772,44 @@ version unaffected): {e:#}",
         let json = sonic_rs::to_string_pretty(&existing)
             .map_err(|e| crate::error::AppError::ParseError(e.to_string()))?;
         crate::client::helper::write_file_atomic(Path::new(path), json.as_bytes()).await?;
-        let dir = Path::new(path).parent().unwrap_or(Path::new("."));
-        let versioned_path = dir.join(format!("{}.json", version.data_version));
-        crate::client::helper::write_file_atomic(&versioned_path, json.as_bytes()).await?;
-        Ok(())
+        // The versioned snapshot filename embeds a server-supplied string; refuse
+        // anything that could escape the version directory.
+        if is_safe_path_component(&version.data_version) {
+            let dir = Path::new(path).parent().unwrap_or(Path::new("."));
+            let versioned_path = dir.join(format!("{}.json", version.data_version));
+            crate::client::helper::write_file_atomic(&versioned_path, json.as_bytes()).await?;
+        } else {
+            warn!(
+                "{} Skipping versioned snapshot: dataVersion {:?} is not a safe filename",
+                self.region.as_str().to_uppercase(),
+                version.data_version
+            );
+        }
+        let str_field = |key: &str, fallback: &str| -> String {
+            existing
+                .get(key)
+                .and_then(|v| v.as_str())
+                .unwrap_or(fallback)
+                .to_string()
+        };
+        Ok(VersionInfo {
+            app_version: str_field("appVersion", &version.app_version),
+            app_hash: str_field("appHash", &version.app_hash),
+            data_version: version.data_version.clone(),
+            asset_version: version.asset_version.clone(),
+            asset_hash: version.asset_hash.clone(),
+            cdn_version: version.cdn_version,
+        })
     }
+}
+
+/// True if `s` can be safely embedded in a filename within the intended
+/// directory: non-empty, no path separators, and not a dot-relative component.
+fn is_safe_path_component(s: &str) -> bool {
+    !s.is_empty()
+        && s != "."
+        && s != ".."
+        && !s.contains('/')
+        && !s.contains('\\')
+        && !s.contains('\0')
 }
