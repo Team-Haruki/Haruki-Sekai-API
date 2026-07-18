@@ -15,9 +15,12 @@ use sea_orm::DatabaseConnection;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-/// A shared in-flight upstream call: holds the (status, serialized-json) result
-/// once the leader resolves it; followers await and clone the Arc<str> cheaply.
-pub type CoalescedCell = Arc<tokio::sync::OnceCell<(u16, Arc<str>)>>;
+/// A shared in-flight upstream call: holds the leader's outcome — success or
+/// error — once it resolves; followers await and clone it cheaply. Errors are
+/// stored too so a burst attached to a failing upstream produces exactly one
+/// upstream attempt, not one per follower.
+pub type CoalescedCell =
+    Arc<tokio::sync::OnceCell<Result<(u16, Arc<str>), crate::error::AppError>>>;
 
 /// In-process single-flight for read-endpoint responses. Concurrent requests for
 /// the same cache key share one in-flight upstream call (and its result) instead
@@ -48,9 +51,10 @@ impl Drop for InflightGuard<'_> {
 
 impl RequestCoalescer {
     /// Run `fetch` under single-flight for `key`: concurrent callers with the same
-    /// key share one in-flight execution and clone its result. Returns
-    /// `(result, was_leader)` — the leader is the caller that actually ran `fetch`
-    /// (and is responsible for any post-fetch work such as caching).
+    /// key share one in-flight execution and clone its outcome — including a
+    /// failure, so a struggling upstream sees one attempt per window rather than
+    /// one retry per queued follower. Returns `(result, was_leader)` — the leader
+    /// is the caller that actually ran `fetch`.
     pub async fn coalesce<F, Fut>(
         &self,
         key: &str,
@@ -79,7 +83,7 @@ impl RequestCoalescer {
             key,
             cell: cell.clone(),
         });
-        let outcome = cell.get_or_try_init(fetch).await.cloned();
+        let outcome = cell.get_or_init(|| async { fetch().await }).await.clone();
         (outcome, is_leader)
     }
 }

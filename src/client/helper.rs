@@ -80,7 +80,7 @@ impl CookieHelper {
             .map_err(|e| AppError::NetworkError(e.to_string()))?;
 
         let mut last_error = None;
-        for _ in 0..4 {
+        for attempt in 0..4 {
             let result = client
                 .post(&self.url)
                 .header("Accept", "*/*")
@@ -94,8 +94,24 @@ impl CookieHelper {
             match result {
                 Ok(resp) => {
                     if resp.status().is_success() {
-                        if let Some(cookie) = resp.headers().get("set-cookie") {
-                            let cookie_str = cookie.to_str().unwrap_or("").to_string();
+                        // Collect every Set-Cookie header (multi-cookie auth like
+                        // CDN signed cookies sets several), keep only the
+                        // name=value pair of each (attributes such as Path/Expires
+                        // do not belong in a Cookie request header), and treat an
+                        // unparseable/empty result as a failure instead of caching
+                        // an empty cookie as success.
+                        let cookie_str = resp
+                            .headers()
+                            .get_all("set-cookie")
+                            .iter()
+                            .filter_map(|v| v.to_str().ok())
+                            .filter_map(|v| {
+                                let pair = v.split(';').next().unwrap_or("").trim();
+                                (!pair.is_empty()).then(|| pair.to_string())
+                            })
+                            .collect::<Vec<_>>()
+                            .join("; ");
+                        if !cookie_str.is_empty() {
                             *self.cookies.lock() = cookie_str.clone();
                             return Ok(cookie_str);
                         }
@@ -106,7 +122,9 @@ impl CookieHelper {
                     last_error = Some(AppError::NetworkError(e.to_string()));
                 }
             }
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            if attempt < 3 {
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            }
         }
         Err(last_error
             .unwrap_or_else(|| AppError::NetworkError("Failed to fetch cookies".to_string())))

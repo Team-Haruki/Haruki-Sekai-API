@@ -2,7 +2,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use thiserror::Error;
 
-#[derive(Debug, Error)]
+#[derive(Debug, Clone, Error)]
 pub enum AppError {
     #[error("Session expired")]
     SessionError,
@@ -75,7 +75,12 @@ impl AppError {
             AppError::UpgradeRequired => StatusCode::UPGRADE_REQUIRED,
             AppError::UnderMaintenance => StatusCode::SERVICE_UNAVAILABLE,
             AppError::InvalidServerRegion(_) | AppError::ParseError(_) => StatusCode::BAD_REQUEST,
-            AppError::UpstreamData(_) => StatusCode::BAD_GATEWAY,
+            // Upstream-fault classes: the game server (or the path to it) broke,
+            // not this service — surface as 502 so callers don't misattribute.
+            AppError::UpstreamData(_)
+            | AppError::NetworkError(_)
+            | AppError::InvalidHttpStatus(_)
+            | AppError::Unknown { .. } => StatusCode::BAD_GATEWAY,
             AppError::AuthError(_) => StatusCode::UNAUTHORIZED,
             AppError::NotFound(_) => StatusCode::NOT_FOUND,
             AppError::Forbidden(_) => StatusCode::FORBIDDEN,
@@ -102,10 +107,16 @@ impl IntoResponse for AppError {
             status: status.as_u16(),
             message: self.to_string(),
         };
-        let json = sonic_rs::to_string(&body).unwrap_or_else(|_| {
-            r#"{"result":"failed","status":500,"message":"Internal error"}"#.to_string()
-        });
-        (status, [("content-type", "application/json")], json).into_response()
+        match sonic_rs::to_string(&body) {
+            Ok(json) => (status, [("content-type", "application/json")], json).into_response(),
+            // Keep the HTTP status consistent with the fallback body's status.
+            Err(_) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                [("content-type", "application/json")],
+                r#"{"result":"failed","status":500,"message":"Internal error"}"#.to_string(),
+            )
+                .into_response(),
+        }
     }
 }
 

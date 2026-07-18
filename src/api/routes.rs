@@ -40,10 +40,6 @@ pub fn create_router(state: Arc<MainAppState>) -> Router {
     let public_routes = Router::new()
         .route("/health", get(health_check))
         .route(
-            "/image/{server}/mysekai/{param1}/{param2}",
-            get(image::get_mysekai_image),
-        )
-        .route(
             "/image/{server}/mysekai-housing/{param1}/{param2}",
             get(image::get_mysekai_housing_thumbnail),
         )
@@ -55,6 +51,20 @@ pub fn create_router(state: Arc<MainAppState>) -> Router {
             "/image/{server}/blob/custom-music-score/full/{param1}/{param2}",
             get(image::get_custom_music_score),
         );
+
+    // The mysekai image route is authenticated: unlike the other image routes
+    // (CP-only, gated by unguessable 64-hex hashes), its Nuverse branch takes a
+    // guessable numeric user_id/index and drives an authenticated game API call
+    // with the shared bot account, so it must not be publicly reachable.
+    let authed_image_routes = Router::new()
+        .route(
+            "/image/{server}/mysekai/{param1}/{param2}",
+            get(image::get_mysekai_image),
+        )
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            auth_middleware,
+        ));
 
     let api_routes = Router::new()
         .route("/{server}/{user_id}/profile", get(apis::get_user_profile))
@@ -95,6 +105,7 @@ pub fn create_router(state: Arc<MainAppState>) -> Router {
 
     Router::new()
         .merge(public_routes)
+        .merge(authed_image_routes)
         .nest("/api", api_routes)
         .layer(TraceLayer::new_for_http())
         .with_state(state)

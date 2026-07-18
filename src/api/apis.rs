@@ -127,26 +127,23 @@ async fn proxy_game_api_cached(
     }
 
     // Coalesce concurrent misses for the same key onto a single upstream call;
-    // followers await and share the leader's result.
-    let (outcome, is_leader) = state
+    // followers await and share the leader's outcome (success or failure).
+    let (outcome, _is_leader) = state
         .coalescer
         .coalesce(&cache_key, || async {
             let resp = proxy_game_api(state, server, path).await?;
             let status = resp.status.as_u16();
             let json: Arc<str> =
                 Arc::from(sonic_rs::to_string(&resp.body).unwrap_or_else(|_| "{}".to_string()));
+            // Populate the cache inside the in-flight window (200 only), so
+            // requests arriving between slot release and SETEX completion still
+            // hit the cache instead of stampeding upstream.
+            if status == 200 {
+                cache_set(state, &cache_key, &json, ttl_secs).await;
+            }
             Ok((status, json))
         })
         .await;
-
-    // The leader populates the cache (200 only); followers just reuse the result.
-    if is_leader {
-        if let Ok((status, json)) = &outcome {
-            if *status == 200 {
-                cache_set(state, &cache_key, json, ttl_secs).await;
-            }
-        }
-    }
 
     let (status, json) = outcome?;
     Ok(json_string_response(
