@@ -344,7 +344,13 @@ impl SekaiClient {
         }
         let entries = fs::read_dir(account_dir)
             .map_err(|e| AppError::ParseError(format!("Failed to read account dir: {}", e)))?;
-        for entry in entries.flatten() {
+        // Propagate entry errors instead of flattening them away: a transiently
+        // unreadable directory must abort the reload, not read as "no accounts"
+        // (which would clear the live session pool).
+        for entry in entries {
+            let entry = entry.map_err(|e| {
+                AppError::ParseError(format!("Failed to read account entry: {}", e))
+            })?;
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) != Some("json") {
                 continue;
@@ -501,7 +507,8 @@ impl SekaiClient {
                 session.set_session_token(Some(token_str.to_string()));
                 // Log only rotation metadata — never token contents.
                 debug!(
-                    "Account #{} session token updated (had_previous: {})",
+                    "{} Account #{} session token updated (had_previous: {})",
+                    self.region.as_str().to_uppercase(),
                     session.user_id(),
                     old_token.is_some()
                 );
@@ -562,15 +569,18 @@ impl SekaiClient {
                 Err(e) => {
                     if e.is_timeout() {
                         warn!(
-                            "Account #{} request timed out (attempt {}/{})",
-                            user_id, attempt, max_attempts
+                            "{} Account #{} request timed out (attempt {}/{})",
+                            self.region.as_str().to_uppercase(),
+                            user_id,
+                            attempt,
+                            max_attempts
                         );
                     } else {
                         error!(
-                            "request error (attempt {}/{}): server={}, err={}",
+                            "{} Request error (attempt {}/{}): {}",
+                            self.region.as_str().to_uppercase(),
                             attempt,
                             max_attempts,
-                            self.region.as_str().to_uppercase(),
                             e
                         );
                     }

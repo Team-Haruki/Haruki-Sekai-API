@@ -107,10 +107,16 @@ impl IntoResponse for AppError {
             status: status.as_u16(),
             message: self.to_string(),
         };
-        let json = sonic_rs::to_string(&body).unwrap_or_else(|_| {
-            r#"{"result":"failed","status":500,"message":"Internal error"}"#.to_string()
-        });
-        (status, [("content-type", "application/json")], json).into_response()
+        match sonic_rs::to_string(&body) {
+            Ok(json) => (status, [("content-type", "application/json")], json).into_response(),
+            // Keep the HTTP status consistent with the fallback body's status.
+            Err(_) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                [("content-type", "application/json")],
+                r#"{"result":"failed","status":500,"message":"Internal error"}"#.to_string(),
+            )
+                .into_response(),
+        }
     }
 }
 
