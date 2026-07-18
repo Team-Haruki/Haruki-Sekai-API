@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::{Arc, LazyLock};
 
 use indexmap::IndexMap;
@@ -54,6 +54,10 @@ struct Schema {
     /// fields, sized to `max int key + 1`. Precomputed at parse time so the
     /// array-restore hot path needs no per-record map allocation. Empty otherwise.
     int_field_index: Vec<Option<usize>>,
+    /// For records: msgpack key (string form) -> index into `fields`. Precomputed
+    /// at parse time so the object-restore path is a single by-value pass over
+    /// the source map instead of per-field lookups plus a leftover scan.
+    str_field_index: HashMap<String, usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -118,21 +122,18 @@ impl NuverseSchemaStore {
         msgpack: &[u8],
     ) -> Result<IndexMap<String, JsonValue>, AppError> {
         let raw = crate::crypto::decode_msgpack_value(msgpack)?;
-        let raw_obj = raw.as_object().ok_or_else(|| {
-            AppError::ParseError("Nuverse master payload must be an object".to_string())
-        })?;
+        let JsonValue::Object(raw_obj) = raw else {
+            return Err(AppError::ParseError(
+                "Nuverse master payload must be an object".to_string(),
+            ));
+        };
         let mut restored = IndexMap::with_capacity(raw_obj.len());
         for (key, value) in raw_obj {
-            if let Some(schema_name) = self.master.get(key) {
-                if let Some(schema) = self.schema(schema_name) {
-                    restored.insert(
-                        key.clone(),
-                        restore_master_value(schema, value, &self.registry)?,
-                    );
-                    continue;
-                }
-            }
-            restored.insert(key.clone(), value.clone());
+            let value = match self.master.get(&key).and_then(|name| self.schema(name)) {
+                Some(schema) => restore_master_value(schema, value, &self.registry)?,
+                None => value,
+            };
+            restored.insert(key, value);
         }
         Ok(restored)
     }
@@ -141,14 +142,13 @@ impl NuverseSchemaStore {
         let Some(mapping) = self.api_mapping_for_path(path) else {
             return Ok(value);
         };
-        let mut restored = if let Some(schema_name) = &mapping.schema {
-            if let Some(schema) = self.schema(schema_name) {
-                restore_json(schema, &value, &self.registry)?
-            } else {
-                value
-            }
-        } else {
-            value
+        let mut restored = match mapping
+            .schema
+            .as_ref()
+            .and_then(|schema_name| self.schema(schema_name))
+        {
+            Some(schema) => restore_json(schema, value, &self.registry)?,
+            None => value,
         };
         for field in &mapping.fields {
             if let Some(schema) = self.schema(&field.schema) {
@@ -171,13 +171,13 @@ impl NuverseSchemaStore {
 }
 
 fn restore_master_value(
-    schema: &Arc<Schema>,
-    value: &JsonValue,
+    schema: &Schema,
+    value: JsonValue,
     registry: &Registry,
 ) -> Result<JsonValue, AppError> {
-    if let Some(arr) = value.as_array() {
+    if let JsonValue::Array(arr) = value {
         return arr
-            .iter()
+            .into_iter()
             .map(|item| restore_json(schema, item, registry))
             .collect::<Result<Vec<_>, _>>()
             .map(JsonValue::Array);
@@ -239,6 +239,7 @@ impl SchemaBuilder {
                     union_of,
                     union_dispatch: Vec::new(),
                     int_field_index: Vec::new(),
+                    str_field_index: HashMap::new(),
                 }))
             }
             JsonValue::Object(obj) => self.parse_object(obj),
@@ -271,6 +272,7 @@ impl SchemaBuilder {
                     union_of: Vec::new(),
                     union_dispatch: Vec::new(),
                     int_field_index: Vec::new(),
+                    str_field_index: HashMap::new(),
                 }))
             }
             "map" => {
@@ -288,6 +290,7 @@ impl SchemaBuilder {
                     union_of: Vec::new(),
                     union_dispatch: Vec::new(),
                     int_field_index: Vec::new(),
+                    str_field_index: HashMap::new(),
                 }))
             }
             primitive => Ok(self.primitive_or_ref(primitive)),
@@ -363,6 +366,15 @@ impl SchemaBuilder {
             None => Vec::new(),
         };
 
+        let mut str_field_index = HashMap::with_capacity(fields.len());
+        for (field_idx, field) in fields.iter().enumerate() {
+            let key = match &field.key {
+                MsgpackKey::String(key) => key.clone(),
+                MsgpackKey::Int(idx) => idx.to_string(),
+            };
+            str_field_index.insert(key, field_idx);
+        }
+
         let schema = Arc::new(Schema {
             kind: SchemaKind::Record,
             name: Some(full_name.clone()),
@@ -372,6 +384,7 @@ impl SchemaBuilder {
             union_of: Vec::new(),
             union_dispatch,
             int_field_index,
+            str_field_index,
         });
         if !full_name.is_empty() {
             self.registry.insert(full_name, schema.clone());
@@ -429,6 +442,7 @@ impl SchemaBuilder {
                     union_of: Vec::new(),
                     union_dispatch: Vec::new(),
                     int_field_index: Vec::new(),
+                    str_field_index: HashMap::new(),
                 })
             }
         }
@@ -441,7 +455,7 @@ impl SchemaBuilder {
 
 fn restore_json(
     schema: &Schema,
-    value: &JsonValue,
+    value: JsonValue,
     registry: &Registry,
 ) -> Result<JsonValue, AppError> {
     let schema = resolve_schema(schema, registry);
@@ -455,7 +469,7 @@ fn restore_json(
         | SchemaKind::Bytes
         | SchemaKind::String
         | SchemaKind::Any
-        | SchemaKind::Ref => Ok(value.clone()),
+        | SchemaKind::Ref => Ok(value),
         SchemaKind::Array => restore_array(schema, value, registry),
         SchemaKind::Map => restore_map(schema, value, registry),
         SchemaKind::Union => restore_union(schema, value, registry),
@@ -465,63 +479,71 @@ fn restore_json(
 
 fn restore_record(
     schema: &Schema,
-    value: &JsonValue,
+    value: JsonValue,
     registry: &Registry,
 ) -> Result<JsonValue, AppError> {
     if !schema.union_dispatch.is_empty() {
         return restore_union_dispatch(schema, value, registry);
     }
-    if let Some(arr) = value.as_array() {
-        let mut out = JsonMap::new();
-        for (idx, item) in arr.iter().enumerate() {
-            if item.is_null() {
-                continue;
-            }
-            if let Some(Some(field_idx)) = schema.int_field_index.get(idx) {
-                let field = &schema.fields[*field_idx];
-                out.insert(field.name.clone(), restore_json(&field.ty, item, registry)?);
-            }
-        }
-        return Ok(JsonValue::Object(out));
-    }
-    if let Some(obj) = value.as_object() {
-        let mut out = JsonMap::new();
-        let mut consumed = HashSet::new();
-        for field in &schema.fields {
-            let key = match &field.key {
-                MsgpackKey::String(key) => key.clone(),
-                MsgpackKey::Int(idx) => idx.to_string(),
-            };
-            let item = obj.get(&key);
-            if let Some(item) = item {
-                consumed.insert(key);
-                if !item.is_null() {
+    match value {
+        JsonValue::Array(arr) => {
+            let mut out = JsonMap::new();
+            for (idx, item) in arr.into_iter().enumerate() {
+                if item.is_null() {
+                    continue;
+                }
+                if let Some(Some(field_idx)) = schema.int_field_index.get(idx) {
+                    let field = &schema.fields[*field_idx];
                     out.insert(field.name.clone(), restore_json(&field.ty, item, registry)?);
                 }
             }
+            Ok(JsonValue::Object(out))
         }
-        for (key, item) in obj {
-            if !consumed.contains(key) {
-                out.insert(key.clone(), item.clone());
+        JsonValue::Object(obj) => {
+            // Single by-value pass: schema fields are emitted first (in schema
+            // order, matching the previous per-field lookup), then unknown keys
+            // in their original order.
+            let mut restored_fields: Vec<Option<JsonValue>> = vec![None; schema.fields.len()];
+            let mut leftovers: Vec<(String, JsonValue)> = Vec::new();
+            for (key, item) in obj {
+                match schema.str_field_index.get(&key) {
+                    Some(&field_idx) => {
+                        if !item.is_null() {
+                            let field = &schema.fields[field_idx];
+                            restored_fields[field_idx] =
+                                Some(restore_json(&field.ty, item, registry)?);
+                        }
+                    }
+                    None => leftovers.push((key, item)),
+                }
             }
+            let mut out = JsonMap::new();
+            for (field_idx, restored) in restored_fields.into_iter().enumerate() {
+                if let Some(restored) = restored {
+                    out.insert(schema.fields[field_idx].name.clone(), restored);
+                }
+            }
+            for (key, item) in leftovers {
+                out.insert(key, item);
+            }
+            Ok(JsonValue::Object(out))
         }
-        return Ok(JsonValue::Object(out));
+        other => Ok(other),
     }
-    Ok(value.clone())
 }
 
 fn restore_array(
     schema: &Schema,
-    value: &JsonValue,
+    value: JsonValue,
     registry: &Registry,
 ) -> Result<JsonValue, AppError> {
     let Some(items) = &schema.items else {
-        return Ok(value.clone());
+        return Ok(value);
     };
-    let Some(arr) = value.as_array() else {
-        return Ok(value.clone());
+    let JsonValue::Array(arr) = value else {
+        return Ok(value);
     };
-    arr.iter()
+    arr.into_iter()
         .map(|item| restore_json(items, item, registry))
         .collect::<Result<Vec<_>, _>>()
         .map(JsonValue::Array)
@@ -529,25 +551,25 @@ fn restore_array(
 
 fn restore_map(
     schema: &Schema,
-    value: &JsonValue,
+    value: JsonValue,
     registry: &Registry,
 ) -> Result<JsonValue, AppError> {
     let Some(values) = &schema.values else {
-        return Ok(value.clone());
+        return Ok(value);
     };
-    let Some(obj) = value.as_object() else {
-        return Ok(value.clone());
+    let JsonValue::Object(obj) = value else {
+        return Ok(value);
     };
     let mut out = JsonMap::new();
     for (key, item) in obj {
-        out.insert(key.clone(), restore_json(values, item, registry)?);
+        out.insert(key, restore_json(values, item, registry)?);
     }
     Ok(JsonValue::Object(out))
 }
 
 fn restore_union(
     schema: &Schema,
-    value: &JsonValue,
+    value: JsonValue,
     registry: &Registry,
 ) -> Result<JsonValue, AppError> {
     if value.is_null() {
@@ -559,32 +581,35 @@ fn restore_union(
         .map(|s| resolve_schema(s, registry))
         .find(|s| !matches!(s.kind, SchemaKind::Null))
     else {
-        return Ok(value.clone());
+        return Ok(value);
     };
     restore_json(variant, value, registry)
 }
 
 fn restore_union_dispatch(
     schema: &Schema,
-    value: &JsonValue,
+    value: JsonValue,
     registry: &Registry,
 ) -> Result<JsonValue, AppError> {
-    let Some(arr) = value.as_array() else {
-        return Ok(value.clone());
+    let mut arr = match value {
+        JsonValue::Array(arr) if arr.len() == 2 => arr,
+        other => return Ok(other),
     };
-    if arr.len() != 2 {
-        return Ok(value.clone());
-    }
-    let discriminator = arr[0].as_i64().unwrap_or_default();
+    let payload_raw = arr.pop().expect("len checked == 2");
+    let discriminator = arr
+        .pop()
+        .expect("len checked == 2")
+        .as_i64()
+        .unwrap_or_default();
     let variant = schema
         .union_dispatch
         .iter()
         .find(|variant| variant.key == discriminator)
         .and_then(|variant| registry.get(&variant.ty));
     let payload = if let Some(variant) = variant {
-        restore_json(variant, &arr[1], registry)?
+        restore_json(variant, payload_raw, registry)?
     } else {
-        arr[1].clone()
+        payload_raw
     };
     Ok(serde_json::json!({
         "__type": discriminator,
@@ -612,7 +637,7 @@ fn restore_selector_segments(
     registry: &Registry,
 ) -> Result<(), AppError> {
     let Some((segment, rest)) = segments.split_first() else {
-        *value = restore_json(schema, value, registry)?;
+        *value = restore_json(schema, std::mem::take(value), registry)?;
         return Ok(());
     };
     let (field_name, iter_array) = segment
@@ -672,6 +697,7 @@ fn leaf_schema(kind: SchemaKind) -> Schema {
         union_of: Vec::new(),
         union_dispatch: Vec::new(),
         int_field_index: Vec::new(),
+        str_field_index: HashMap::new(),
     }
 }
 
@@ -718,7 +744,7 @@ mod tests {
         let store = bundle(vec![schema], HashMap::new());
         let value = json!([1001, 2, 1711000000_i64]);
         let restored =
-            restore_json(store.schema("UserHonor").unwrap(), &value, &store.registry).unwrap();
+            restore_json(store.schema("UserHonor").unwrap(), value, &store.registry).unwrap();
         assert_eq!(restored["honorId"], json!(1001));
         assert_eq!(restored["level"], json!(2));
         assert_eq!(restored["obtainedAt"], json!(1711000000_i64));
@@ -746,8 +772,7 @@ mod tests {
         });
         let store = bundle(vec![schema], HashMap::new());
         let value = json!([1, [[100, 10], [200, 20]]]);
-        let restored =
-            restore_json(store.schema("Card").unwrap(), &value, &store.registry).unwrap();
+        let restored = restore_json(store.schema("Card").unwrap(), value, &store.registry).unwrap();
         assert_eq!(restored["costs"][0]["resourceId"], json!(100));
         assert_eq!(restored["costs"][1]["quantity"], json!(20));
     }
@@ -761,7 +786,7 @@ mod tests {
         let store = bundle(vec![schemas], HashMap::new());
         let value = json!([0, [42]]);
         let restored =
-            restore_json(store.schema("UnionBase").unwrap(), &value, &store.registry).unwrap();
+            restore_json(store.schema("UnionBase").unwrap(), value, &store.registry).unwrap();
         assert_eq!(restored["__type"], json!(0));
         assert_eq!(restored["value"]["x"], json!(42));
     }
@@ -816,7 +841,7 @@ mod tests {
         let store = bundle(vec![schema], HashMap::new());
         let value = json!({"Id": 1, "ExchangeCategory": "normal", "unknownPascal": true});
         let restored =
-            restore_json(store.schema("Summary").unwrap(), &value, &store.registry).unwrap();
+            restore_json(store.schema("Summary").unwrap(), value, &store.registry).unwrap();
         assert_eq!(restored["id"], json!(1));
         assert_eq!(restored["exchangeCategory"], json!("normal"));
         assert!(restored.get("Id").is_none());
