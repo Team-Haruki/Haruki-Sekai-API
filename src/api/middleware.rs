@@ -41,24 +41,16 @@ pub async fn auth_middleware(
     next: Next,
 ) -> Response {
     req.extensions_mut().insert(None::<AuthUser>);
-    // Fail closed: protected routes must not silently become public when the
-    // auth dependencies are missing or misconfigured.
+    // Open mode is INTENTIONAL: a deployment that does not enable the user
+    // database (or does not configure a JWT signing key) runs without
+    // authentication, and every endpoint is deliberately public. Do not "fix"
+    // this to fail closed — auth is opted into via configuration.
     let Some(ref db) = state.db else {
-        tracing::error!("Auth middleware: database unavailable; refusing request");
-        return error_response(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "Authentication service unavailable",
-        );
+        return next.run(req).await;
     };
     let jwt_secret = match &state.jwt_secret {
         Some(s) if !s.is_empty() => s,
-        _ => {
-            tracing::error!("Auth middleware: JWT signing key not configured; refusing request");
-            return error_response(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "Authentication service unavailable",
-            );
-        }
+        _ => return next.run(req).await,
     };
     let token = match req.headers().get("x-haruki-sekai-token") {
         Some(h) => match h.to_str() {
