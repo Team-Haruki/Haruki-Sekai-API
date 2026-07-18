@@ -36,6 +36,19 @@ pub struct SekaiClient {
 
     sessions: Arc<RwLock<Vec<Arc<AccountSession>>>>,
     session_index: AtomicUsize,
+    /// Serializes cookie refresh (client-wide state) so concurrent requests that
+    /// all observe expired cookies do not each hit the cookie service.
+    cookie_lock: tokio::sync::Mutex<()>,
+}
+
+/// Truncate a token for logging without risking a panic on a non-ASCII byte
+/// boundary (`&s[..40]` panics if byte 40 is mid-character).
+fn token_preview(s: &str) -> &str {
+    let mut end = s.len().min(40);
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
 }
 
 impl SekaiClient {
@@ -108,6 +121,7 @@ impl SekaiClient {
             http_client,
             sessions: Arc::new(RwLock::new(Vec::new())),
             session_index: AtomicUsize::new(0),
+            cookie_lock: tokio::sync::Mutex::new(()),
         };
         Ok(client)
     }
@@ -147,43 +161,7 @@ impl SekaiClient {
         }
         let version = self.version_helper.load().await?;
         self.update_version_headers(&version);
-        let accounts = self.parse_accounts()?;
-        if accounts.is_empty() {
-            warn!(
-                "{} No accounts found in {}",
-                self.region.as_str().to_uppercase(),
-                self.config.account_dir
-            );
-            return Ok(());
-        }
-        for account in accounts {
-            if self.region.is_cp_server() && account.user_id().is_empty() {
-                warn!(
-                    "{} Skipping account with empty user_id",
-                    self.region.as_str().to_uppercase()
-                );
-                continue;
-            }
-            let session = Arc::new(AccountSession::new(account));
-            match self.login(&session).await {
-                Ok(_) => {
-                    self.sessions.write().push(session);
-                }
-                Err(e) => {
-                    error!(
-                        "{} Failed to login account: {}",
-                        self.region.as_str().to_uppercase(),
-                        e
-                    );
-                }
-            }
-        }
-        info!(
-            "{} Client initialized with {} sessions",
-            self.region.as_str().to_uppercase(),
-            self.sessions.read().len()
-        );
-        Ok(())
+        self.reload_accounts().await
     }
 
     fn update_version_headers(&self, version: &VersionInfo) {
@@ -228,6 +206,12 @@ impl SekaiClient {
         let region = self.region.as_str().to_uppercase();
         info!("{} Reloading accounts...", region);
         let accounts = self.parse_accounts()?;
+        if accounts.is_empty() {
+            warn!(
+                "{} No accounts found in {}",
+                region, self.config.account_dir
+            );
+        }
 
         // Log every account in concurrently, building the new session set off to
         // the side. The existing sessions keep serving traffic the whole time, so
@@ -512,8 +496,8 @@ impl SekaiClient {
                 debug!(
                     "Account #{} session token updated (old: {:?}, new: {}...)",
                     session.user_id(),
-                    old_token.as_deref().map(|s| &s[..s.len().min(40)]),
-                    &token_str[..token_str.len().min(40)]
+                    old_token.as_deref().map(token_preview),
+                    token_preview(token_str)
                 );
             }
         }
@@ -522,7 +506,7 @@ impl SekaiClient {
     pub async fn call_api<T: serde::Serialize>(
         &self,
         session: &AccountSession,
-        method: &str,
+        method: reqwest::Method,
         path: &str,
         data: Option<&T>,
         params: Option<&HashMap<String, String>>,
@@ -534,37 +518,35 @@ impl SekaiClient {
     async fn call_api_with_timeout<T: serde::Serialize>(
         &self,
         session: &AccountSession,
-        method: &str,
+        method: reqwest::Method,
         path: &str,
         data: Option<&T>,
         params: Option<&HashMap<String, String>>,
         request_timeout: Option<Duration>,
     ) -> Result<Response, AppError> {
         let _lock = session.lock_api().await;
-        let user_id = session.user_id().to_string();
+        let user_id = session.user_id();
         let url = format!("{}/api{}", self.config.api_url, path).replace("{userId}", &user_id);
-        info!("Account #{} {} {}", user_id, method.to_uppercase(), path);
-        let max_retries = 4;
+        info!("Account #{} {} {}", user_id, method, path);
+        // Only idempotent requests are retried at the network layer: a timed-out
+        // POST/PUT may already have been executed server-side, so resending it
+        // risks double-executing the game action.
+        let max_attempts = if method == reqwest::Method::GET { 2 } else { 1 };
+        let packed = match data {
+            Some(body_data) => Some(self.cryptor.pack(body_data)?),
+            None => None,
+        };
         let mut last_error = None;
-        for attempt in 1..=max_retries {
-            let method_enum = match method.to_uppercase().as_str() {
-                "GET" => reqwest::Method::GET,
-                "POST" => reqwest::Method::POST,
-                "PUT" => reqwest::Method::PUT,
-                "DELETE" => reqwest::Method::DELETE,
-                "PATCH" => reqwest::Method::PATCH,
-                _ => reqwest::Method::GET,
-            };
-            let mut req = self.prepare_request(session, method_enum, &url);
+        for attempt in 1..=max_attempts {
+            let mut req = self.prepare_request(session, method.clone(), &url);
             if let Some(timeout) = request_timeout {
                 req = req.timeout(timeout);
             }
             if let Some(p) = params {
                 req = req.query(p);
             }
-            if let Some(body_data) = data {
-                let packed = self.cryptor.pack(body_data)?;
-                req = req.body(packed);
+            if let Some(body) = &packed {
+                req = req.body(body.clone());
             }
             match req.send().await {
                 Ok(resp) => {
@@ -574,14 +556,14 @@ impl SekaiClient {
                 Err(e) => {
                     if e.is_timeout() {
                         warn!(
-                            "Account #{} request timed out (attempt {}), retrying...",
-                            session.user_id(),
-                            attempt
+                            "Account #{} request timed out (attempt {}/{})",
+                            user_id, attempt, max_attempts
                         );
                     } else {
                         error!(
-                            "request error (attempt {}): server={}, err={}",
+                            "request error (attempt {}/{}): server={}, err={}",
                             attempt,
+                            max_attempts,
                             self.region.as_str().to_uppercase(),
                             e
                         );
@@ -589,7 +571,7 @@ impl SekaiClient {
                     last_error = Some(AppError::NetworkError(e.to_string()));
                 }
             }
-            if attempt < max_retries {
+            if attempt < max_attempts {
                 tokio::time::sleep(Duration::from_secs(1)).await;
             }
         }
@@ -604,7 +586,7 @@ impl SekaiClient {
         path: &str,
         params: Option<&HashMap<String, String>>,
     ) -> Result<Response, AppError> {
-        self.call_api::<()>(session, "GET", path, None, params)
+        self.call_api::<()>(session, reqwest::Method::GET, path, None, params)
             .await
     }
 
@@ -615,8 +597,15 @@ impl SekaiClient {
         params: Option<&HashMap<String, String>>,
         timeout: Duration,
     ) -> Result<Response, AppError> {
-        self.call_api_with_timeout::<()>(session, "GET", path, None, params, Some(timeout))
-            .await
+        self.call_api_with_timeout::<()>(
+            session,
+            reqwest::Method::GET,
+            path,
+            None,
+            params,
+            Some(timeout),
+        )
+        .await
     }
 
     pub async fn post<T: serde::Serialize>(
@@ -626,7 +615,8 @@ impl SekaiClient {
         data: Option<&T>,
         params: Option<&HashMap<String, String>>,
     ) -> Result<Response, AppError> {
-        self.call_api(session, "POST", path, data, params).await
+        self.call_api(session, reqwest::Method::POST, path, data, params)
+            .await
     }
 
     /// Read an octet-stream game response: classify the Sekai HTTP status, then
@@ -772,7 +762,7 @@ impl SekaiClient {
         params: Option<&HashMap<String, String>>,
     ) -> Result<(JsonValue, u16), AppError> {
         let session = self.get_session().ok_or(AppError::NoClientAvailable)?;
-        self.drive_game_api::<()>(&session, "GET", path, None, params, true)
+        self.drive_game_api::<()>(&session, reqwest::Method::GET, path, None, params, true)
             .await
     }
 
@@ -783,7 +773,7 @@ impl SekaiClient {
     async fn drive_game_api<T: serde::Serialize>(
         &self,
         session: &AccountSession,
-        method: &str,
+        method: reqwest::Method,
         path: &str,
         body: Option<&T>,
         params: Option<&HashMap<String, String>>,
@@ -792,7 +782,9 @@ impl SekaiClient {
         let max_retries = 4;
         let mut retry_count = 0;
         while retry_count < max_retries {
-            let resp = self.call_api(session, method, path, body, params).await?;
+            let resp = self
+                .call_api(session, method.clone(), path, body, params)
+                .await?;
             match self.handle_response_value(resp).await {
                 Ok((mut json_value, upstream_status)) => {
                     if restore && !self.region.is_cp_server() {
@@ -830,7 +822,15 @@ impl SekaiClient {
                             "{} Cookies expired, refreshing...",
                             self.region.as_str().to_uppercase()
                         );
-                        self.refresh_cookies().await?;
+                        // Single-flight: cookies are client-wide state, so only the
+                        // first caller refreshes; the rest wait on cookie_lock and
+                        // skip the refresh once they see the cookie already changed.
+                        let cookie_before = self.headers.lock().get("Cookie").cloned();
+                        let guard = self.cookie_lock.lock().await;
+                        if self.headers.lock().get("Cookie").cloned() == cookie_before {
+                            self.refresh_cookies().await?;
+                        }
+                        drop(guard);
                         retry_count += 1;
                         tokio::time::sleep(Duration::from_secs(1)).await;
                     } else {
@@ -842,42 +842,50 @@ impl SekaiClient {
                         "{} Server upgrade required, refreshing version and re-logging in...",
                         self.region.as_str().to_uppercase()
                     );
-                    // First attempt: refresh version from file and try login
-                    self.refresh_version().await?;
-                    match self.login(session).await {
-                        Ok(login_resp) => {
-                            self.update_version_headers_from_login(&login_resp);
-                        }
-                        Err(AppError::UpgradeRequired) => {
-                            warn!(
-                                "{} Login returned 426, waiting for app version update...",
-                                self.region.as_str().to_uppercase()
-                            );
-                            tokio::time::sleep(Duration::from_secs(10)).await;
-                            self.refresh_version().await?;
-                            match self.login(session).await {
-                                Ok(login_resp) => {
-                                    self.update_version_headers_from_login(&login_resp);
-                                }
-                                Err(e) => {
-                                    error!(
-                                        "{} Re-login after waiting for app update failed: {}",
-                                        self.region.as_str().to_uppercase(),
-                                        e
-                                    );
-                                    return Err(AppError::UpgradeRequired);
+                    // Single-flight per account, same pattern as SessionError: the
+                    // first caller refreshes version headers and re-logs-in; waiters
+                    // see the rotated token and go straight to the retry.
+                    let token_before = session.get_session_token();
+                    let guard = session.lock_login().await;
+                    if session.get_session_token() == token_before {
+                        // First attempt: refresh version from file and try login
+                        self.refresh_version().await?;
+                        match self.login(session).await {
+                            Ok(login_resp) => {
+                                self.update_version_headers_from_login(&login_resp);
+                            }
+                            Err(AppError::UpgradeRequired) => {
+                                warn!(
+                                    "{} Login returned 426, waiting for app version update...",
+                                    self.region.as_str().to_uppercase()
+                                );
+                                tokio::time::sleep(Duration::from_secs(10)).await;
+                                self.refresh_version().await?;
+                                match self.login(session).await {
+                                    Ok(login_resp) => {
+                                        self.update_version_headers_from_login(&login_resp);
+                                    }
+                                    Err(e) => {
+                                        error!(
+                                            "{} Re-login after waiting for app update failed: {}",
+                                            self.region.as_str().to_uppercase(),
+                                            e
+                                        );
+                                        return Err(AppError::UpgradeRequired);
+                                    }
                                 }
                             }
-                        }
-                        Err(e) => {
-                            error!(
-                                "{} Re-login after version refresh failed: {}",
-                                self.region.as_str().to_uppercase(),
-                                e
-                            );
-                            return Err(AppError::UpgradeRequired);
+                            Err(e) => {
+                                error!(
+                                    "{} Re-login after version refresh failed: {}",
+                                    self.region.as_str().to_uppercase(),
+                                    e
+                                );
+                                return Err(AppError::UpgradeRequired);
+                            }
                         }
                     }
+                    drop(guard);
                     retry_count += 1;
                     tokio::time::sleep(Duration::from_secs(1)).await;
                 }
@@ -889,9 +897,10 @@ impl SekaiClient {
                 }
             }
         }
-        Err(AppError::NetworkError(
-            "Max retry attempts reached".to_string(),
-        ))
+        Err(AppError::Internal(format!(
+            "Game API call gave up after {} session recovery attempts",
+            max_retries
+        )))
     }
 
     #[tracing::instrument(skip(self, body, params), fields(region = ?self.region))]
@@ -902,8 +911,15 @@ impl SekaiClient {
         params: Option<&HashMap<String, String>>,
     ) -> Result<(JsonValue, u16), AppError> {
         let session = self.get_session().ok_or(AppError::NoClientAvailable)?;
-        self.drive_game_api(&session, "POST", path, Some(body), params, false)
-            .await
+        self.drive_game_api(
+            &session,
+            reqwest::Method::POST,
+            path,
+            Some(body),
+            params,
+            false,
+        )
+        .await
     }
 
     async fn get_cp_image(&self, relative_path: &str) -> Result<Vec<u8>, AppError> {
