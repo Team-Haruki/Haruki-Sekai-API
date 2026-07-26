@@ -21,7 +21,9 @@ pub async fn write_file_atomic(path: &Path, contents: &[u8]) -> std::io::Result<
 
 #[cfg(test)]
 mod tests {
-    use super::write_file_atomic;
+    use reqwest::header::{HeaderMap, HeaderValue, SET_COOKIE};
+
+    use super::{extract_request_cookies, write_file_atomic};
 
     // Atomic write: target ends with the new contents, overwrite works, and no
     // temp file is left behind in the directory.
@@ -47,6 +49,90 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn extracts_cookies_from_multiple_set_cookie_headers() {
+        let mut headers = HeaderMap::new();
+        headers.append(
+            SET_COOKIE,
+            HeaderValue::from_static("session=abc; Path=/; HttpOnly"),
+        );
+        headers.append(
+            SET_COOKIE,
+            HeaderValue::from_static("token=def==; Secure; SameSite=None"),
+        );
+
+        assert_eq!(
+            extract_request_cookies(&headers),
+            "session=abc; token=def=="
+        );
+    }
+
+    #[test]
+    fn preserves_multiple_cookie_pairs_in_one_set_cookie_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            SET_COOKIE,
+            HeaderValue::from_static(
+                "cloudfront_policy=one; cloudfront_signature=two; cloudfront_key=three; Path=/",
+            ),
+        );
+
+        assert_eq!(
+            extract_request_cookies(&headers),
+            "cloudfront_policy=one; cloudfront_signature=two; cloudfront_key=three"
+        );
+    }
+
+    #[test]
+    fn ignores_set_cookie_attributes_case_insensitively() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            SET_COOKIE,
+            HeaderValue::from_static(
+                "session=abc; DOMAIN=example.com; expires=Wed, 21 Oct 2026 07:28:00 GMT; \
+                 MAX-AGE=3600; samesite=Lax; Priority=High",
+            ),
+        );
+
+        assert_eq!(extract_request_cookies(&headers), "session=abc");
+    }
+}
+
+fn extract_request_cookies(headers: &reqwest::header::HeaderMap) -> String {
+    headers
+        .get_all(reqwest::header::SET_COOKIE)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(';'))
+        .filter_map(|segment| {
+            let (name, value) = segment.trim().split_once('=')?;
+            let name = name.trim();
+            let value = value.trim();
+            if name.is_empty() || is_set_cookie_attribute(name) {
+                return None;
+            }
+            Some(format!("{name}={value}"))
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+fn is_set_cookie_attribute(name: &str) -> bool {
+    [
+        "domain",
+        "path",
+        "expires",
+        "max-age",
+        "samesite",
+        "priority",
+        "version",
+        "comment",
+        "commenturl",
+        "port",
+    ]
+    .iter()
+    .any(|attribute| name.eq_ignore_ascii_case(attribute))
 }
 
 pub struct CookieHelper {
@@ -94,23 +180,10 @@ impl CookieHelper {
             match result {
                 Ok(resp) => {
                     if resp.status().is_success() {
-                        // Collect every Set-Cookie header (multi-cookie auth like
-                        // CDN signed cookies sets several), keep only the
-                        // name=value pair of each (attributes such as Path/Expires
-                        // do not belong in a Cookie request header), and treat an
-                        // unparseable/empty result as a failure instead of caching
-                        // an empty cookie as success.
-                        let cookie_str = resp
-                            .headers()
-                            .get_all("set-cookie")
-                            .iter()
-                            .filter_map(|v| v.to_str().ok())
-                            .filter_map(|v| {
-                                let pair = v.split(';').next().unwrap_or("").trim();
-                                (!pair.is_empty()).then(|| pair.to_string())
-                            })
-                            .collect::<Vec<_>>()
-                            .join("; ");
+                        // The JP cookie service may combine several cookie pairs in
+                        // one Set-Cookie header, so parse every semicolon-delimited
+                        // pair while dropping response-only attributes.
+                        let cookie_str = extract_request_cookies(resp.headers());
                         if !cookie_str.is_empty() {
                             *self.cookies.lock() = cookie_str.clone();
                             return Ok(cookie_str);
