@@ -135,6 +135,20 @@ impl NuverseSchemaStore {
             };
             restored.insert(key, value);
         }
+        let expanded = restored
+            .iter()
+            .filter_map(|(key, value)| {
+                let suffix = key.strip_prefix("compact")?;
+                let first = suffix.chars().next()?;
+                let table = value.as_object()?;
+                let mut derived_key = first.to_lowercase().collect::<String>();
+                derived_key.push_str(&suffix[first.len_utf8()..]);
+                Some((derived_key, expand_compact_master_table(table)))
+            })
+            .collect::<Vec<_>>();
+        for (key, value) in expanded {
+            restored.insert(key, value);
+        }
         Ok(restored)
     }
 
@@ -168,6 +182,50 @@ impl NuverseSchemaStore {
     fn schema(&self, name: &str) -> Option<&Arc<Schema>> {
         self.registry.get(name)
     }
+}
+
+fn expand_compact_master_table(data: &JsonMap<String, JsonValue>) -> JsonValue {
+    let enums = data.get("__ENUM__").and_then(JsonValue::as_object);
+    let columns = data
+        .iter()
+        .filter_map(|(key, value)| {
+            if key == "__ENUM__" {
+                return None;
+            }
+            value.as_array().map(|values| (key, values))
+        })
+        .collect::<Vec<_>>();
+    let row_count = columns
+        .iter()
+        .map(|(_, values)| values.len())
+        .min()
+        .unwrap_or(0);
+    let rows = (0..row_count)
+        .map(|index| {
+            columns
+                .iter()
+                .map(|(key, values)| {
+                    let value = match enums
+                        .and_then(|enums| enums.get(*key))
+                        .and_then(JsonValue::as_array)
+                    {
+                        Some(_) if values[index].is_null() => JsonValue::Null,
+                        Some(enum_values) => match values[index].as_u64() {
+                            Some(value) => enum_values
+                                .get(value as usize)
+                                .cloned()
+                                .unwrap_or(JsonValue::Null),
+                            None => values[index].clone(),
+                        },
+                        None => values[index].clone(),
+                    };
+                    ((*key).clone(), value)
+                })
+                .collect::<JsonMap<_, _>>()
+        })
+        .map(JsonValue::Object)
+        .collect();
+    JsonValue::Array(rows)
 }
 
 fn restore_master_value(
@@ -847,6 +905,33 @@ mod tests {
         assert!(restored.get("Id").is_none());
         assert!(restored.get("ExchangeCategory").is_none());
         assert_eq!(restored["unknownPascal"], json!(true));
+    }
+
+    #[test]
+    fn expands_compact_master_tables() {
+        let store = bundle(Vec::new(), HashMap::new());
+        let master = json!({
+            "compactWidgetItems": {
+                "__ENUM__": {"kind": ["normal", "special"]},
+                "id": [1, 2, 3],
+                "kind": [0, 1, null],
+                "name": ["one", "two", "three"]
+            },
+            "widgetItems": [{"id": 999, "kind": "stale", "name": "stale"}]
+        });
+        let msgpack = rmp_serde::to_vec(&master).unwrap();
+
+        let restored = store.restore_master_msgpack(&msgpack).unwrap();
+
+        assert_eq!(restored["compactWidgetItems"], master["compactWidgetItems"]);
+        assert_eq!(
+            restored["widgetItems"],
+            json!([
+                {"id": 1, "kind": "normal", "name": "one"},
+                {"id": 2, "kind": "special", "name": "two"},
+                {"id": 3, "kind": null, "name": "three"}
+            ])
+        );
     }
 
     #[test]
