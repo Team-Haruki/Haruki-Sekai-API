@@ -8,8 +8,8 @@ use serde_json::Value as JsonValue;
 use tracing::{error, info, warn};
 
 use super::git::GitHelper;
-use crate::client::helper::{compare_version, VersionInfo};
-use crate::client::SekaiClient;
+use crate::client::helper::{compare_version, effective_app_version, VersionInfo};
+use crate::client::{LoginResponse, SekaiClient};
 use crate::config::{AssetUpdaterInfo, GitConfig, ServerRegion};
 
 const ASSET_UPDATER_CONFLICT_RETRY_DELAY_SECS: u64 = 60;
@@ -148,13 +148,27 @@ impl MasterUpdater {
                 return;
             }
         };
-        let (need_master_update, need_asset_update, need_version_save) =
-            if self.region.is_cp_server() {
-                let (master, asset) = self.check_cp_versions(&login_response, &current_version);
-                (master, asset, master || asset)
-            } else {
-                self.check_nuverse_versions(&login_response, &current_version)
-            };
+        let (need_master_update, need_asset_update, need_version_save) = if self
+            .region
+            .is_cp_server()
+        {
+            let (master, asset) = self.check_cp_versions(&login_response, &current_version);
+            (master, asset, master || asset)
+        } else {
+            if login_response.data_version.trim().is_empty()
+                || login_response.asset_version.trim().is_empty()
+                || login_response.cdn_version <= 0
+            {
+                warn!(
+                        "{} Ignoring incomplete Nuverse version metadata: dataVersion_present={}, assetVersion_present={}, cdnVersion={}",
+                        self.region.as_str().to_uppercase(),
+                        !login_response.data_version.trim().is_empty(),
+                        !login_response.asset_version.trim().is_empty(),
+                        login_response.cdn_version
+                    );
+            }
+            check_nuverse_versions(&login_response, &current_version)
+        };
         if need_asset_update {
             self.call_all_asset_updaters(&login_response.asset_version, &login_response.asset_hash)
                 .await;
@@ -216,13 +230,13 @@ impl MasterUpdater {
                     return;
                 }
             };
+            let data_version = merged_version.data_version.clone();
             self.client.version_helper.update(merged_version);
             if let Some(ref git_helper) = self.git_helper {
                 // git shells out via std::process and the push is a network call;
                 // run it on a blocking thread so it never stalls a tokio worker.
                 let git_helper = git_helper.clone();
                 let master_dir = self.client.config.master_dir.clone();
-                let data_version = login_response.data_version.clone();
                 let region_upper = self.region.as_str().to_uppercase();
                 let push = tokio::task::spawn_blocking(move || {
                     git_helper.push_changes(&master_dir, &data_version)
@@ -250,6 +264,14 @@ impl MasterUpdater {
         // A version string that fails to parse must not silently freeze updates
         // forever: log it, and treat "different and unparseable" as an update.
         let compare_or_differ = |what: &str, new: &str, cur: &str| -> bool {
+            if new.trim().is_empty() {
+                warn!(
+                    "{} Ignoring empty {} version from login",
+                    self.region.as_str().to_uppercase(),
+                    what
+                );
+                return false;
+            }
             match compare_version(new, cur) {
                 Ok(newer) => newer,
                 Err(e) => {
@@ -270,17 +292,6 @@ treating difference as an update",
         let need_asset = compare_or_differ("asset", &login.asset_version, &current.asset_version);
 
         (need_master, need_asset)
-    }
-
-    fn check_nuverse_versions(
-        &self,
-        login: &crate::client::LoginResponse,
-        current: &VersionInfo,
-    ) -> (bool, bool, bool) {
-        let need_cdn_update = login.cdn_version > current.cdn_version;
-        let need_data_version_save = login.data_version != current.data_version;
-        let need_version_save = need_cdn_update || need_data_version_save;
-        (need_cdn_update, need_cdn_update, need_version_save)
     }
 
     async fn call_all_asset_updaters(&self, asset_version: &str, asset_hash: &str) {
@@ -694,59 +705,135 @@ retry on the next cron tick): {e:#}",
         } else {
             serde_json::Map::new()
         };
-        existing
-            .entry("appVersion".to_string())
-            .or_insert_with(|| serde_json::Value::String(version.app_version.clone()));
-        existing
-            .entry("appHash".to_string())
-            .or_insert_with(|| serde_json::Value::String(version.app_hash.clone()));
-        existing.insert(
-            "dataVersion".to_string(),
-            serde_json::Value::String(version.data_version.clone()),
-        );
-        existing.insert(
-            "assetVersion".to_string(),
-            serde_json::Value::String(version.asset_version.clone()),
-        );
-        existing.insert(
-            "assetHash".to_string(),
-            serde_json::Value::String(version.asset_hash.clone()),
-        );
-        existing.insert(
-            "cdnVersion".to_string(),
-            serde_json::Value::Number(version.cdn_version.into()),
-        );
+        let merged_version = merge_version_state(self.region, &mut existing, version);
         let json = sonic_rs::to_string_pretty(&existing)
             .map_err(|e| crate::error::AppError::ParseError(e.to_string()))?;
         crate::client::helper::write_file_atomic(Path::new(path), json.as_bytes()).await?;
         // The versioned snapshot filename embeds a server-supplied string; refuse
         // anything that could escape the version directory.
-        if is_safe_path_component(&version.data_version) {
+        if is_safe_path_component(&merged_version.data_version) {
             let dir = Path::new(path).parent().unwrap_or(Path::new("."));
-            let versioned_path = dir.join(format!("{}.json", version.data_version));
+            let versioned_path = dir.join(format!("{}.json", merged_version.data_version));
             crate::client::helper::write_file_atomic(&versioned_path, json.as_bytes()).await?;
         } else {
             warn!(
                 "{} Skipping versioned snapshot: dataVersion {:?} is not a safe filename",
                 self.region.as_str().to_uppercase(),
-                version.data_version
+                merged_version.data_version
             );
         }
-        let str_field = |key: &str, fallback: &str| -> String {
-            existing
-                .get(key)
-                .and_then(|v| v.as_str())
-                .unwrap_or(fallback)
-                .to_string()
-        };
-        Ok(VersionInfo {
-            app_version: str_field("appVersion", &version.app_version),
-            app_hash: str_field("appHash", &version.app_hash),
-            data_version: version.data_version.clone(),
-            asset_version: version.asset_version.clone(),
-            asset_hash: version.asset_hash.clone(),
-            cdn_version: version.cdn_version,
+        Ok(merged_version)
+    }
+}
+
+fn check_nuverse_versions(login: &LoginResponse, current: &VersionInfo) -> (bool, bool, bool) {
+    let need_cdn_update = login.cdn_version > current.cdn_version;
+    let need_asset_update = need_cdn_update && !login.asset_version.trim().is_empty();
+    let need_data_version_save =
+        !login.data_version.trim().is_empty() && login.data_version != current.data_version;
+    let need_version_save = need_cdn_update || need_data_version_save;
+    (need_cdn_update, need_asset_update, need_version_save)
+}
+
+fn non_empty_or_existing(
+    incoming: &str,
+    existing: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+) -> String {
+    if !incoming.trim().is_empty() {
+        return incoming.to_string();
+    }
+    existing
+        .get(key)
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_default()
+        .to_string()
+}
+
+fn existing_or_non_empty(
+    existing: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+    fallback: &str,
+) -> String {
+    existing
+        .get(key)
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| {
+            if fallback.trim().is_empty() {
+                ""
+            } else {
+                fallback
+            }
         })
+        .to_string()
+}
+
+fn merge_version_state(
+    region: ServerRegion,
+    existing: &mut serde_json::Map<String, serde_json::Value>,
+    incoming: &VersionInfo,
+) -> VersionInfo {
+    // AppHashUpdater owns these two fields, so the on-disk values win unless
+    // they are empty. appVersion is still normalized for Nuverse regions.
+    let app_version = effective_app_version(
+        region,
+        &existing_or_non_empty(existing, "appVersion", &incoming.app_version),
+    );
+    let app_hash = existing_or_non_empty(existing, "appHash", &incoming.app_hash);
+    let data_version = non_empty_or_existing(&incoming.data_version, existing, "dataVersion");
+    let asset_version = non_empty_or_existing(&incoming.asset_version, existing, "assetVersion");
+    // Nuverse legitimately returns an empty assetHash. CP servers do not, so an
+    // empty CP value is treated as missing and preserves the previous hash.
+    let asset_hash = if region.is_cp_server() {
+        non_empty_or_existing(&incoming.asset_hash, existing, "assetHash")
+    } else {
+        incoming.asset_hash.clone()
+    };
+    let cdn_version = if incoming.cdn_version > 0 {
+        incoming.cdn_version
+    } else {
+        existing
+            .get("cdnVersion")
+            .and_then(|value| value.as_i64())
+            .and_then(|value| i32::try_from(value).ok())
+            .filter(|value| *value > 0)
+            .unwrap_or_default()
+    };
+
+    existing.insert(
+        "appVersion".to_string(),
+        serde_json::Value::String(app_version.clone()),
+    );
+    existing.insert(
+        "appHash".to_string(),
+        serde_json::Value::String(app_hash.clone()),
+    );
+    existing.insert(
+        "dataVersion".to_string(),
+        serde_json::Value::String(data_version.clone()),
+    );
+    existing.insert(
+        "assetVersion".to_string(),
+        serde_json::Value::String(asset_version.clone()),
+    );
+    existing.insert(
+        "assetHash".to_string(),
+        serde_json::Value::String(asset_hash.clone()),
+    );
+    existing.insert(
+        "cdnVersion".to_string(),
+        serde_json::Value::Number(cdn_version.into()),
+    );
+
+    VersionInfo {
+        app_version,
+        app_hash,
+        data_version,
+        asset_version,
+        asset_hash,
+        cdn_version,
     }
 }
 
@@ -759,4 +846,101 @@ fn is_safe_path_component(s: &str) -> bool {
         && !s.contains('/')
         && !s.contains('\\')
         && !s.contains('\0')
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn version_info() -> VersionInfo {
+        VersionInfo {
+            app_version: "6.0.2".to_string(),
+            app_hash: "app-hash".to_string(),
+            data_version: "6.0.0.48".to_string(),
+            asset_version: "6.0.0.1".to_string(),
+            asset_hash: "stale-asset-hash".to_string(),
+            cdn_version: 159,
+        }
+    }
+
+    fn login_response() -> LoginResponse {
+        LoginResponse {
+            session_token: String::new(),
+            data_version: String::new(),
+            asset_version: String::new(),
+            asset_hash: String::new(),
+            suite_master_split_path: Vec::new(),
+            cdn_version: 0,
+            user_registration: None,
+        }
+    }
+
+    #[test]
+    fn empty_nuverse_data_version_does_not_trigger_save() {
+        assert_eq!(
+            check_nuverse_versions(&login_response(), &version_info()),
+            (false, false, false)
+        );
+    }
+
+    #[test]
+    fn nuverse_cdn_update_does_not_send_empty_asset_version() {
+        let mut login = login_response();
+        login.cdn_version = 160;
+
+        assert_eq!(
+            check_nuverse_versions(&login, &version_info()),
+            (true, false, true)
+        );
+    }
+
+    #[test]
+    fn nuverse_empty_fields_preserve_versions_but_allow_empty_asset_hash() {
+        let mut existing = serde_json::json!({
+            "appVersion": "6.0.2",
+            "appHash": "app-hash",
+            "dataVersion": "6.0.0.48",
+            "assetVersion": "6.0.0.1",
+            "assetHash": "stale-asset-hash",
+            "cdnVersion": 159
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let incoming = login_response();
+        let merged = merge_version_state(
+            ServerRegion::Cn,
+            &mut existing,
+            &VersionInfo {
+                app_version: String::new(),
+                app_hash: String::new(),
+                data_version: incoming.data_version,
+                asset_version: incoming.asset_version,
+                asset_hash: incoming.asset_hash,
+                cdn_version: incoming.cdn_version,
+            },
+        );
+
+        assert_eq!(merged.app_version, "6.0.0");
+        assert_eq!(merged.app_hash, "app-hash");
+        assert_eq!(merged.data_version, "6.0.0.48");
+        assert_eq!(merged.asset_version, "6.0.0.1");
+        assert_eq!(merged.asset_hash, "");
+        assert_eq!(merged.cdn_version, 159);
+        assert_eq!(existing["assetHash"], "");
+    }
+
+    #[test]
+    fn cp_empty_asset_hash_preserves_existing_value() {
+        let mut existing = serde_json::json!({"assetHash": "cp-asset-hash"})
+            .as_object()
+            .unwrap()
+            .clone();
+        let mut incoming = version_info();
+        incoming.asset_hash.clear();
+
+        let merged = merge_version_state(ServerRegion::Jp, &mut existing, &incoming);
+
+        assert_eq!(merged.asset_hash, "cp-asset-hash");
+    }
 }

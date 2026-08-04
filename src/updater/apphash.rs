@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 use tracing::{error, info, warn};
 
+use crate::client::helper::effective_app_version;
 use crate::config::{AppHashSource, ServerRegion};
 use crate::error::AppError;
 
@@ -58,18 +59,37 @@ impl AppHashUpdater {
         };
         for source in &self.sources {
             match self.fetch_from_source(source).await {
-                Ok(Some(new_info)) => {
+                Ok(Some(mut new_info)) => {
+                    let advertised_app_version = new_info.app_version.clone();
+                    new_info.app_version = if new_info.app_version.trim().is_empty() {
+                        effective_app_version(self.region, &current.app_version)
+                    } else {
+                        effective_app_version(self.region, &new_info.app_version)
+                    };
+                    if new_info.app_hash.trim().is_empty() {
+                        new_info.app_hash = current.app_hash.clone();
+                    }
                     if new_info.app_version != current.app_version
                         || new_info.app_hash != current.app_hash
                     {
-                        info!(
-                            "{} Found new app version: {} (hash: {})",
-                            self.region.as_str().to_uppercase(),
-                            new_info.app_version,
-                            // chars(), not byte slicing: the hash is
-                            // network-supplied and panic = "abort" in release.
-                            new_info.app_hash.chars().take(16).collect::<String>()
-                        );
+                        if advertised_app_version == new_info.app_version {
+                            info!(
+                                "{} Found new app version: {} (hash: {})",
+                                self.region.as_str().to_uppercase(),
+                                new_info.app_version,
+                                // chars(), not byte slicing: the hash is
+                                // network-supplied and panic = "abort" in release.
+                                new_info.app_hash.chars().take(16).collect::<String>()
+                            );
+                        } else {
+                            info!(
+                                "{} Found new app version: {} (effective: {}, hash: {})",
+                                self.region.as_str().to_uppercase(),
+                                advertised_app_version,
+                                new_info.app_version,
+                                new_info.app_hash.chars().take(16).collect::<String>()
+                            );
+                        }
 
                         if let Err(e) = self.update_version(&new_info).await {
                             error!(
@@ -164,14 +184,19 @@ impl AppHashUpdater {
         let _guard = self.version_lock.lock().await;
         let data = tokio::fs::read(&self.version_path).await?;
         let mut version: serde_json::Map<String, serde_json::Value> = sonic_rs::from_slice(&data)?;
-        version.insert(
-            "appVersion".to_string(),
-            serde_json::Value::String(info.app_version.clone()),
-        );
-        version.insert(
-            "appHash".to_string(),
-            serde_json::Value::String(info.app_hash.clone()),
-        );
+        if !info.app_version.trim().is_empty() {
+            let app_version = effective_app_version(self.region, &info.app_version);
+            version.insert(
+                "appVersion".to_string(),
+                serde_json::Value::String(app_version),
+            );
+        }
+        if !info.app_hash.trim().is_empty() {
+            version.insert(
+                "appHash".to_string(),
+                serde_json::Value::String(info.app_hash.clone()),
+            );
+        }
         let json = sonic_rs::to_string_pretty(&version)?;
         crate::client::helper::write_file_atomic(
             std::path::Path::new(&self.version_path),
@@ -179,5 +204,63 @@ impl AppHashUpdater {
         )
         .await?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn persists_zero_patch_for_nuverse_app_version() {
+        let dir = std::env::temp_dir().join(format!(
+            "haruki_nuverse_app_version_{}_{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let version_path = dir.join("current_version.json");
+        std::fs::write(
+            &version_path,
+            br#"{"appVersion":"6.0.0","appHash":"old","dataVersion":"6.0.0.48"}"#,
+        )
+        .unwrap();
+
+        let updater = AppHashUpdater::new(
+            ServerRegion::Cn,
+            Vec::new(),
+            version_path.to_string_lossy().into_owned(),
+            None,
+            Arc::new(tokio::sync::Mutex::new(())),
+        );
+        updater
+            .update_version(&AppInfo {
+                app_version: "6.0.2".to_string(),
+                app_hash: "new".to_string(),
+            })
+            .await
+            .unwrap();
+
+        let saved: serde_json::Value =
+            sonic_rs::from_slice(&std::fs::read(&version_path).unwrap()).unwrap();
+        assert_eq!(saved["appVersion"], "6.0.0");
+        assert_eq!(saved["appHash"], "new");
+        assert_eq!(saved["dataVersion"], "6.0.0.48");
+
+        updater
+            .update_version(&AppInfo {
+                app_version: String::new(),
+                app_hash: String::new(),
+            })
+            .await
+            .unwrap();
+        let saved: serde_json::Value =
+            sonic_rs::from_slice(&std::fs::read(&version_path).unwrap()).unwrap();
+        assert_eq!(saved["appVersion"], "6.0.0");
+        assert_eq!(saved["appHash"], "new");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

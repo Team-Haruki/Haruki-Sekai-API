@@ -18,7 +18,7 @@ use crate::crypto::SekaiCryptor;
 use crate::error::{AppError, SekaiHttpStatus};
 
 use super::account::{AccountType, SekaiAccount, SekaiAccountCP, SekaiAccountNuverse};
-use super::helper::{CookieHelper, VersionHelper, VersionInfo};
+use super::helper::{effective_app_version, CookieHelper, VersionHelper, VersionInfo};
 use super::nuverse_schema::NuverseSchemaStore;
 use super::session::AccountSession;
 use super::token_utils;
@@ -149,9 +149,24 @@ impl SekaiClient {
             let cookie = helper.get_cookies(self.proxy.as_deref()).await?;
             self.headers.lock().insert("Cookie".to_string(), cookie);
         }
-        let version = self.version_helper.load().await?;
+        let mut version = self.version_helper.load().await?;
+        self.normalize_app_version(&mut version);
+        self.version_helper.update(version.clone());
         self.update_version_headers(&version);
         self.reload_accounts().await
+    }
+
+    fn normalize_app_version(&self, version: &mut VersionInfo) {
+        let effective = effective_app_version(self.region, &version.app_version);
+        if effective != version.app_version {
+            info!(
+                "{} Normalized appVersion {} to {}",
+                self.region.as_str().to_uppercase(),
+                version.app_version,
+                effective
+            );
+            version.app_version = effective;
+        }
     }
 
     fn update_version_headers(&self, version: &VersionInfo) {
@@ -179,7 +194,9 @@ impl SekaiClient {
     }
 
     pub async fn refresh_version(&self) -> Result<(), AppError> {
-        let version = self.version_helper.load().await?;
+        let mut version = self.version_helper.load().await?;
+        self.normalize_app_version(&mut version);
+        self.version_helper.update(version.clone());
         self.update_version_headers(&version);
         Ok(())
     }

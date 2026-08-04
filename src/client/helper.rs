@@ -5,6 +5,7 @@ use parking_lot::Mutex;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
+use crate::config::ServerRegion;
 use crate::error::AppError;
 
 /// Write `contents` to `path` atomically: write a uniquely-named temp file in the
@@ -23,7 +24,9 @@ pub async fn write_file_atomic(path: &Path, contents: &[u8]) -> std::io::Result<
 mod tests {
     use reqwest::header::{HeaderMap, HeaderValue, SET_COOKIE};
 
-    use super::{extract_request_cookies, write_file_atomic};
+    use crate::config::ServerRegion;
+
+    use super::{effective_app_version, extract_request_cookies, write_file_atomic};
 
     // Atomic write: target ends with the new contents, overwrite works, and no
     // temp file is left behind in the directory.
@@ -97,6 +100,45 @@ mod tests {
 
         assert_eq!(extract_request_cookies(&headers), "session=abc");
     }
+
+    #[test]
+    fn forces_nuverse_app_version_patch_to_zero() {
+        for region in [ServerRegion::Tw, ServerRegion::Kr, ServerRegion::Cn] {
+            assert_eq!(effective_app_version(region, "6.0.2"), "6.0.0");
+            assert_eq!(effective_app_version(region, "3.4.99"), "3.4.0");
+        }
+    }
+
+    #[test]
+    fn preserves_cp_and_malformed_app_versions() {
+        assert_eq!(effective_app_version(ServerRegion::Jp, "6.0.2"), "6.0.2");
+        assert_eq!(effective_app_version(ServerRegion::En, "3.4.99"), "3.4.99");
+        assert_eq!(effective_app_version(ServerRegion::Cn, "6.0"), "6.0");
+        assert_eq!(
+            effective_app_version(ServerRegion::Cn, "invalid"),
+            "invalid"
+        );
+    }
+}
+
+/// Nuverse may advertise a patch release before its login endpoint accepts that
+/// exact version. Patch releases do not affect the Nuverse protocol, so requests
+/// and persisted version state use the corresponding `.0` patch as a fallback.
+pub fn effective_app_version(region: ServerRegion, app_version: &str) -> String {
+    if region.is_cp_server() {
+        return app_version.to_string();
+    }
+
+    let segments: Vec<&str> = app_version.split('.').collect();
+    if segments.len() != 3
+        || segments
+            .iter()
+            .any(|segment| segment.parse::<u32>().is_err())
+    {
+        return app_version.to_string();
+    }
+
+    format!("{}.{}.0", segments[0], segments[1])
 }
 
 fn extract_request_cookies(headers: &reqwest::header::HeaderMap) -> String {
