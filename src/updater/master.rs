@@ -388,7 +388,6 @@ treating difference as an update",
         let master_dir = &self.client.config.master_dir;
         tokio::fs::create_dir_all(master_dir).await?;
 
-        let mut written_keys: std::collections::HashSet<String> = std::collections::HashSet::new();
         if self.region.is_cp_server() {
             let paths: Vec<String> = login
                 .suite_master_split_path
@@ -404,7 +403,6 @@ treating difference as an update",
             for api_path in paths {
                 let data = self.download_cp_master_split(session, &api_path).await?;
                 self.save_master_files(&data, master_dir).await?;
-                written_keys.extend(data.keys().cloned());
             }
         } else {
             let url = format!(
@@ -413,10 +411,11 @@ treating difference as an update",
             );
             let restored = self.download_nuverse_master(&url).await?;
             self.save_master_files(&restored, master_dir).await?;
-            written_keys.extend(restored.keys().cloned());
         }
-        self.remove_stale_master_files(master_dir, &written_keys)
-            .await?;
+
+        // Master payloads may omit unchanged or optional tables. An absent key
+        // is therefore not a deletion marker: preserve existing files unless a
+        // later payload explicitly overwrites them.
 
         // Ingest into the DB synchronously (awaited so failures are visible and
         // engine-init errors are caught; CPU parsing is offloaded via
@@ -470,58 +469,6 @@ retry on the next cron tick): {e:#}",
             "{} Master data updated",
             self.region.as_str().to_uppercase()
         );
-        Ok(())
-    }
-
-    /// Remove top-level `{key}.json` files whose key vanished from the newly
-    /// downloaded master set, so tables deleted upstream do not survive locally
-    /// (and keep getting re-ingested) forever. Conservative: only touches
-    /// identifier-like stems — version snapshots (`4.3.1.20.json`) and other
-    /// dotted names are left alone — and never the configured version file.
-    /// Failures propagate so a stale table cannot silently survive: the caller
-    /// aborts the update, the version is not saved, and the next cron tick
-    /// retries the whole download-and-clean cycle.
-    async fn remove_stale_master_files(
-        &self,
-        master_dir: &str,
-        written_keys: &std::collections::HashSet<String>,
-    ) -> Result<(), crate::error::AppError> {
-        if written_keys.is_empty() {
-            return Ok(());
-        }
-        let version_canon = std::fs::canonicalize(&self.client.config.version_path).ok();
-        let mut rd = tokio::fs::read_dir(master_dir).await?;
-        while let Some(entry) = rd.next_entry().await? {
-            let p = entry.path();
-            if p.extension().and_then(|e| e.to_str()) != Some("json") {
-                continue;
-            }
-            let Some(stem) = p.file_stem().and_then(|s| s.to_str()) else {
-                continue;
-            };
-            let identifier_like = stem.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
-                && stem.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
-            if !identifier_like || written_keys.contains(stem) {
-                continue;
-            }
-            if let (Some(vc), Ok(pc)) = (&version_canon, std::fs::canonicalize(&p)) {
-                if *vc == pc {
-                    continue;
-                }
-            }
-            tokio::fs::remove_file(&p).await.map_err(|e| {
-                crate::error::AppError::IoError(format!(
-                    "Failed to remove stale master file {}: {}",
-                    p.display(),
-                    e
-                ))
-            })?;
-            info!(
-                "{} Removed stale master file {}",
-                self.region.as_str().to_uppercase(),
-                p.display()
-            );
-        }
         Ok(())
     }
 
