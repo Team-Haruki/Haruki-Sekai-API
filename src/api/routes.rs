@@ -109,6 +109,7 @@ pub fn create_router(state: Arc<MainAppState>) -> Router {
     // backend.internal_token (404 when unconfigured), not by user auth.
     let internal_routes = Router::new()
         .route("/internal/sekai-api", post(internal::post_sekai_api))
+        .route("/internal/sekai-image", post(internal::post_sekai_image))
         .route(
             "/internal/master/{server}/version",
             get(internal::get_master_version),

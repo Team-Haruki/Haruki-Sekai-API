@@ -64,6 +64,64 @@ pub struct InternalApiResponse {
     pub message: Option<String>,
 }
 
+/// Image fetch kinds proxied through the router. Mirrors the SekaiClient image
+/// methods; CP kinds combine `param1/param2` into one path, Nuverse takes
+/// (user_id, index).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImageKind {
+    CpMysekai,
+    CpProfileCardThumbnail,
+    CpMusicScore,
+    CpHousingThumbnail,
+    NuverseMysekai,
+}
+
+impl ImageKind {
+    /// Content type of a successful fetch. Never `application/json`, which is
+    /// what lets the internal endpoint disambiguate bytes from an error
+    /// envelope on the same 200 status.
+    pub fn content_type(&self) -> &'static str {
+        match self {
+            ImageKind::CpMusicScore => "application/octet-stream",
+            _ => "image/png",
+        }
+    }
+}
+
+/// Request envelope for a peer node's `POST /internal/sekai-image` endpoint.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct InternalImageRequest {
+    pub server: String,
+    pub kind: ImageKind,
+    pub param1: String,
+    pub param2: String,
+}
+
+/// Execute an image fetch on a local client. Shared by the local router target
+/// and the internal endpoint so both combine parameters identically.
+pub(crate) async fn execute_local_image(
+    client: &SekaiClient,
+    kind: ImageKind,
+    param1: &str,
+    param2: &str,
+) -> Result<Vec<u8>, AppError> {
+    let combined = format!("{}/{}", param1, param2);
+    match kind {
+        ImageKind::CpMysekai => client.get_cp_mysekai_image(&combined).await,
+        ImageKind::CpProfileCardThumbnail => {
+            client.get_cp_custom_profile_card_thumbnail(&combined).await
+        }
+        ImageKind::CpMusicScore => client.get_cp_custom_music_score(&combined).await,
+        ImageKind::CpHousingThumbnail => {
+            client
+                .get_cp_mysekai_housing_competition_thumbnail(&combined)
+                .await
+        }
+        ImageKind::NuverseMysekai => client.get_nuverse_mysekai_image(param1, param2).await,
+    }
+}
+
 /// Whether an error indicts the *target* (its node, path, or accounts) rather
 /// than the game itself. Target faults fail over to the next target and count
 /// toward the breaker; everything else is returned to the caller unchanged,
@@ -145,8 +203,8 @@ impl CircuitBreaker {
 /// A remote Haruki Sekai API node serving one region.
 struct RemoteUpstream {
     name: String,
-    /// Full URL of the peer's internal endpoint.
-    endpoint: String,
+    /// Base URL of the peer node (no trailing slash).
+    base_url: String,
     token: String,
     http: reqwest::Client,
 }
@@ -155,7 +213,7 @@ impl RemoteUpstream {
     async fn call(&self, req: &InternalApiRequest) -> Result<(JsonValue, u16), AppError> {
         let resp = self
             .http
-            .post(&self.endpoint)
+            .post(format!("{}/internal/sekai-api", self.base_url))
             .bearer_auth(&self.token)
             .json(req)
             .send()
@@ -191,6 +249,48 @@ impl RemoteUpstream {
             ))
         }
     }
+
+    /// Fetch an image through the peer. Success is raw bytes with an image
+    /// content type; an `application/json` body on 200 is an error envelope.
+    async fn call_image(&self, req: &InternalImageRequest) -> Result<Vec<u8>, AppError> {
+        let resp = self
+            .http
+            .post(format!("{}/internal/sekai-image", self.base_url))
+            .bearer_auth(&self.token)
+            .json(req)
+            .send()
+            .await
+            .map_err(|e| AppError::NetworkError(format!("upstream {}: {}", self.name, e)))?;
+        let status = resp.status();
+        let is_json = resp
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| v.starts_with("application/json"));
+        let bytes = resp
+            .bytes()
+            .await
+            .map_err(|e| AppError::NetworkError(format!("upstream {}: {}", self.name, e)))?;
+        if !status.is_success() {
+            let body = String::from_utf8_lossy(&bytes);
+            let body = body.chars().take(200).collect::<String>();
+            return Err(AppError::NetworkError(format!(
+                "upstream {} returned {}: {}",
+                self.name, status, body
+            )));
+        }
+        if is_json {
+            let envelope: InternalApiResponse = serde_json::from_slice(&bytes).map_err(|e| {
+                AppError::NetworkError(format!("upstream {}: invalid envelope: {}", self.name, e))
+            })?;
+            return Err(AppError::from_kind(
+                envelope.kind.as_deref().unwrap_or(""),
+                envelope.status,
+                envelope.message.unwrap_or_default(),
+            ));
+        }
+        Ok(bytes.to_vec())
+    }
 }
 
 enum TargetKind {
@@ -219,6 +319,15 @@ impl Target {
                 }
             }
             TargetKind::Remote(remote) => remote.call(req).await,
+        }
+    }
+
+    async fn call_image(&self, req: &InternalImageRequest) -> Result<Vec<u8>, AppError> {
+        match &self.kind {
+            TargetKind::Local(client) => {
+                execute_local_image(client, req.kind, &req.param1, &req.param2).await
+            }
+            TargetKind::Remote(remote) => remote.call_image(req).await,
         }
     }
 }
@@ -272,7 +381,7 @@ impl RegionRouter {
                     } else {
                         up.name.clone()
                     },
-                    endpoint: format!("{}/internal/sekai-api", up.url.trim_end_matches('/')),
+                    base_url: up.url.trim_end_matches('/').to_string(),
                     token: up.token.clone(),
                     http: internal_http.clone(),
                 }),
@@ -328,29 +437,69 @@ impl RegionRouter {
         self.dispatch(&req).await
     }
 
-    /// Try targets in priority order, closed breakers first; targets with open
+    /// Fetch an image via the first healthy target, with the same failover and
+    /// breaker semantics as game API calls.
+    pub async fn get_image(
+        &self,
+        kind: ImageKind,
+        param1: &str,
+        param2: &str,
+    ) -> Result<Vec<u8>, AppError> {
+        let req = InternalImageRequest {
+            server: self.region.as_str().to_string(),
+            kind,
+            param1: param1.to_string(),
+            param2: param2.to_string(),
+        };
+        let mut last_err = AppError::NoClientAvailable;
+        for target in self.candidates() {
+            match target.call_image(&req).await {
+                Ok(bytes) => {
+                    target.breaker.on_success();
+                    return Ok(bytes);
+                }
+                Err(e) if is_target_fault(&e) => {
+                    self.note_target_fault(target, &e);
+                    last_err = e;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        Err(last_err)
+    }
+
+    /// Targets in priority order, closed breakers first; targets with open
     /// breakers are appended as a last resort so a total outage still probes
-    /// them instead of failing without an attempt. Target faults fail over,
-    /// game-level outcomes return immediately.
-    async fn dispatch(&self, req: &InternalApiRequest) -> Result<(JsonValue, u16), AppError> {
+    /// them instead of failing without an attempt.
+    fn candidates(&self) -> impl Iterator<Item = &Target> {
         let closed = self.targets.iter().filter(|t| !t.breaker.is_open());
         let open = self.targets.iter().filter(|t| t.breaker.is_open());
+        closed.chain(open)
+    }
+
+    fn note_target_fault(&self, target: &Target, e: &AppError) {
+        let opened = target.breaker.on_failure();
+        warn!(
+            "{} Target '{}' failed ({}){}, trying next",
+            self.region.as_str().to_uppercase(),
+            target.name,
+            e,
+            if opened { ", breaker opened" } else { "" }
+        );
+    }
+
+    /// Try targets in candidate order. Target faults fail over, game-level
+    /// outcomes return immediately.
+    async fn dispatch(&self, req: &InternalApiRequest) -> Result<(JsonValue, u16), AppError> {
         let mut last_err = AppError::NoClientAvailable;
-        for target in closed.chain(open) {
+        for target in self.candidates() {
             match target.call(req).await {
                 Ok(result) => {
                     target.breaker.on_success();
                     return Ok(result);
                 }
                 Err(e) if is_target_fault(&e) => {
-                    let opened = target.breaker.on_failure();
-                    warn!(
-                        "{} Target '{}' failed ({}){}, trying next",
-                        self.region.as_str().to_uppercase(),
-                        target.name,
-                        e,
-                        if opened { ", breaker opened" } else { "" }
-                    );
+                    self.note_target_fault(target, &e);
                     last_err = e;
                 }
                 Err(e) => return Err(e),

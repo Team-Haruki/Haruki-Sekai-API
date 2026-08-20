@@ -20,7 +20,7 @@ use serde_json::Value as JsonValue;
 
 use crate::config::ServerRegion;
 use crate::error::AppError;
-use crate::upstream::{InternalApiRequest, InternalApiResponse};
+use crate::upstream::{InternalApiRequest, InternalApiResponse, InternalImageRequest};
 use crate::AppState;
 
 fn envelope_response(envelope: &InternalApiResponse) -> Response {
@@ -116,6 +116,40 @@ pub async fn post_sekai_api(
             kind: None,
             message: None,
         }),
+        Err(e) => envelope_response(&error_envelope(&e)),
+    }
+}
+
+/// POST /internal/sekai-image — fetch an image with this node's local client
+/// for a peer node. Success is raw bytes with the kind's content type; errors
+/// come back as a 200 JSON envelope (the content type disambiguates), keeping
+/// the "non-200 transport status = node fault" failover convention intact.
+pub async fn post_sekai_image(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(req): Json<InternalImageRequest>,
+) -> Response {
+    if let Some(resp) = check_internal_auth(&state, &headers) {
+        return resp;
+    }
+    let region: ServerRegion = match req.server.parse() {
+        Ok(r) => r,
+        Err(_) => {
+            return envelope_response(&error_envelope(&AppError::InvalidServerRegion(
+                req.server.clone(),
+            )));
+        }
+    };
+    let Some(client) = state.clients.get(&region) else {
+        return envelope_response(&error_envelope(&AppError::NoClientAvailable));
+    };
+    match crate::upstream::execute_local_image(client, req.kind, &req.param1, &req.param2).await {
+        Ok(bytes) => (
+            StatusCode::OK,
+            [("content-type", req.kind.content_type())],
+            bytes,
+        )
+            .into_response(),
         Err(e) => envelope_response(&error_envelope(&e)),
     }
 }

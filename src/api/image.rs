@@ -7,6 +7,7 @@ use regex::Regex;
 
 use crate::config::ServerRegion;
 use crate::error::AppError;
+use crate::upstream::ImageKind;
 use crate::AppState;
 
 /// Map an upstream image-fetch error to a client response: a 404 from the game
@@ -51,7 +52,7 @@ pub async fn get_mysekai_image(
                 .into_response();
         }
     };
-    let Some(client) = state.clients.get(&region) else {
+    let Some(router) = state.routers.get(&region) else {
         return (StatusCode::SERVICE_UNAVAILABLE, "Server not initialized").into_response();
     };
     static HEX64: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
@@ -66,8 +67,9 @@ pub async fn get_mysekai_image(
             )
                 .into_response();
         }
-        let combined = format!("{}/{}", param1, param2);
-        client.get_cp_mysekai_image(&combined).await
+        router
+            .get_image(ImageKind::CpMysekai, &param1, &param2)
+            .await
     } else {
         if !digits.is_match(&param1) || !digits.is_match(&param2) {
             return (
@@ -76,7 +78,9 @@ pub async fn get_mysekai_image(
             )
                 .into_response();
         }
-        client.get_nuverse_mysekai_image(&param1, &param2).await
+        router
+            .get_image(ImageKind::NuverseMysekai, &param1, &param2)
+            .await
     };
     match image_result {
         Ok(bytes) => (StatusCode::OK, [("content-type", "image/png")], bytes).into_response(),
@@ -105,7 +109,7 @@ pub async fn get_mysekai_housing_thumbnail(
         )
             .into_response();
     }
-    let Some(client) = state.clients.get(&region) else {
+    let Some(router) = state.routers.get(&region) else {
         return (StatusCode::SERVICE_UNAVAILABLE, "Server not initialized").into_response();
     };
     static HEX64: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
@@ -122,9 +126,8 @@ pub async fn get_mysekai_housing_thumbnail(
         )
             .into_response();
     }
-    let combined = format!("{}/{}", param1, param2);
-    match client
-        .get_cp_mysekai_housing_competition_thumbnail(&combined)
+    match router
+        .get_image(ImageKind::CpHousingThumbnail, &param1, &param2)
         .await
     {
         Ok(bytes) => (StatusCode::OK, [("content-type", "image/png")], bytes).into_response(),
@@ -153,7 +156,7 @@ pub async fn get_custom_profile_card_thumbnail(
         )
             .into_response();
     }
-    let Some(client) = state.clients.get(&region) else {
+    let Some(router) = state.routers.get(&region) else {
         return (StatusCode::SERVICE_UNAVAILABLE, "Server not initialized").into_response();
     };
     static HEX64: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
@@ -170,8 +173,10 @@ pub async fn get_custom_profile_card_thumbnail(
         )
             .into_response();
     }
-    let combined = format!("{}/{}", param1, param2);
-    match client.get_cp_custom_profile_card_thumbnail(&combined).await {
+    match router
+        .get_image(ImageKind::CpProfileCardThumbnail, &param1, &param2)
+        .await
+    {
         Ok(bytes) => (StatusCode::OK, [("content-type", "image/png")], bytes).into_response(),
         Err(e) => image_error_response("Fetch image failed", e),
     }
@@ -198,7 +203,7 @@ pub async fn get_custom_music_score(
         )
             .into_response();
     }
-    let Some(client) = state.clients.get(&region) else {
+    let Some(router) = state.routers.get(&region) else {
         return (StatusCode::SERVICE_UNAVAILABLE, "Server not initialized").into_response();
     };
     static HEX64: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
@@ -210,8 +215,10 @@ pub async fn get_custom_music_score(
         )
             .into_response();
     }
-    let combined = format!("{}/{}", param1, param2);
-    match client.get_cp_custom_music_score(&combined).await {
+    match router
+        .get_image(ImageKind::CpMusicScore, &param1, &param2)
+        .await
+    {
         Ok(bytes) => (
             StatusCode::OK,
             [("content-type", "application/octet-stream")],
