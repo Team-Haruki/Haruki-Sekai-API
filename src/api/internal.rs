@@ -20,8 +20,15 @@ use serde_json::Value as JsonValue;
 
 use crate::config::ServerRegion;
 use crate::error::AppError;
-use crate::upstream::{InternalApiRequest, InternalApiResponse, InternalImageRequest};
+use crate::upstream::{
+    GameStreamRequest, InternalApiRequest, InternalApiResponse, InternalImageRequest,
+    LoginProbeRequest, LoginProbeResponse,
+};
 use crate::AppState;
+
+/// Timeout for a relayed master-split GET; matches the CP master split timeout
+/// used by the local master updater.
+const GAME_STREAM_TIMEOUT_SECS: u64 = 120;
 
 fn envelope_response(envelope: &InternalApiResponse) -> Response {
     // serde_json (preserve_order) keeps game response key order intact;
@@ -116,6 +123,123 @@ pub async fn post_sekai_api(
             kind: None,
             message: None,
         }),
+        Err(e) => envelope_response(&error_envelope(&e)),
+    }
+}
+
+/// POST /internal/login-probe — log in with this node's own accounts for the
+/// given region and return only the version metadata the login yields, so a
+/// peer can drive master production without holding accounts. Session tokens
+/// and credentials never leave this node.
+pub async fn post_login_probe(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(req): Json<LoginProbeRequest>,
+) -> Response {
+    if let Some(resp) = check_internal_auth(&state, &headers) {
+        return resp;
+    }
+    let region: ServerRegion = match req.server.parse() {
+        Ok(r) => r,
+        Err(_) => {
+            return envelope_response(&error_envelope(&AppError::InvalidServerRegion(
+                req.server.clone(),
+            )));
+        }
+    };
+    let Some(client) = state.clients.get(&region) else {
+        return envelope_response(&error_envelope(&AppError::NoClientAvailable));
+    };
+    let Some(session) = client.get_session() else {
+        return envelope_response(&error_envelope(&AppError::NoAccountError));
+    };
+    // Mirror the master updater's own login recovery: a 426 means the version
+    // file moved on, so refresh it and retry once.
+    let login = match client.login(&session).await {
+        Ok(r) => Ok(r),
+        Err(AppError::UpgradeRequired) => match client.refresh_version().await {
+            Ok(()) => client.login(&session).await,
+            Err(e) => Err(e),
+        },
+        Err(e) => Err(e),
+    };
+    let probe = match login {
+        Ok(login) => LoginProbeResponse {
+            ok: true,
+            kind: None,
+            message: None,
+            data_version: login.data_version,
+            asset_version: login.asset_version,
+            asset_hash: login.asset_hash,
+            cdn_version: login.cdn_version,
+            suite_master_split_path: login.suite_master_split_path,
+        },
+        Err(e) => LoginProbeResponse {
+            ok: false,
+            kind: Some(e.kind().to_string()),
+            message: Some(e.to_string()),
+            data_version: String::new(),
+            asset_version: String::new(),
+            asset_hash: String::new(),
+            cdn_version: 0,
+            suite_master_split_path: Vec::new(),
+        },
+    };
+    match serde_json::to_string(&probe) {
+        Ok(json) => (StatusCode::OK, [("content-type", "application/json")], json).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("probe serialization failed: {e}"),
+        )
+            .into_response(),
+    }
+}
+
+/// POST /internal/game-stream — execute an authenticated game GET with this
+/// node's accounts and relay the response body back UNTOUCHED (still
+/// AES-encrypted), streamed chunk by chunk so this node never buffers or
+/// decodes it. Success is an octet stream; errors come back as a 200 JSON
+/// envelope (content type disambiguates), keeping the "non-200 transport
+/// status = node fault" convention.
+pub async fn post_game_stream(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(req): Json<GameStreamRequest>,
+) -> Response {
+    if let Some(resp) = check_internal_auth(&state, &headers) {
+        return resp;
+    }
+    let region: ServerRegion = match req.server.parse() {
+        Ok(r) => r,
+        Err(_) => {
+            return envelope_response(&error_envelope(&AppError::InvalidServerRegion(
+                req.server.clone(),
+            )));
+        }
+    };
+    let Some(client) = state.clients.get(&region) else {
+        return envelope_response(&error_envelope(&AppError::NoClientAvailable));
+    };
+    match client
+        .get_game_api_raw(
+            &req.path,
+            std::time::Duration::from_secs(GAME_STREAM_TIMEOUT_SECS),
+        )
+        .await
+    {
+        Ok(resp) => {
+            let game_status = resp.status().as_u16();
+            let stream = resp.bytes_stream();
+            (
+                StatusCode::OK,
+                [
+                    ("content-type", "application/octet-stream".to_string()),
+                    ("x-haruki-game-status", game_status.to_string()),
+                ],
+                axum::body::Body::from_stream(stream),
+            )
+                .into_response()
+        }
         Err(e) => envelope_response(&error_envelope(&e)),
     }
 }

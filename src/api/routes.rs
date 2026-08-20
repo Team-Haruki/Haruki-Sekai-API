@@ -110,6 +110,8 @@ pub fn create_router(state: Arc<MainAppState>) -> Router {
     let internal_routes = Router::new()
         .route("/internal/sekai-api", post(internal::post_sekai_api))
         .route("/internal/sekai-image", post(internal::post_sekai_image))
+        .route("/internal/login-probe", post(internal::post_login_probe))
+        .route("/internal/game-stream", post(internal::post_game_stream))
         .route(
             "/internal/master/{server}/version",
             get(internal::get_master_version),

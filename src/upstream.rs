@@ -64,6 +64,46 @@ pub struct InternalApiResponse {
     pub message: Option<String>,
 }
 
+/// Request for a peer node's `POST /internal/login-probe`: run a login with the
+/// executing node's own accounts and report the version metadata it yields.
+/// Credentials and session tokens never leave the account node.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct LoginProbeRequest {
+    pub server: String,
+}
+
+/// Version metadata from a peer's login, mirroring the fields of a
+/// LoginResponse that master production needs.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LoginProbeResponse {
+    pub ok: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    #[serde(default)]
+    pub data_version: String,
+    #[serde(default)]
+    pub asset_version: String,
+    #[serde(default)]
+    pub asset_hash: String,
+    #[serde(default)]
+    pub cdn_version: i32,
+    #[serde(default)]
+    pub suite_master_split_path: Vec<String>,
+}
+
+/// Request for a peer node's `POST /internal/game-stream`: execute an
+/// authenticated game GET and relay the response body back untouched (still
+/// encrypted) as an octet stream. The relay node's memory cost is O(chunk);
+/// the caller owns decryption and decoding.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct GameStreamRequest {
+    pub server: String,
+    pub path: String,
+}
+
 /// Image fetch kinds proxied through the router. Mirrors the SekaiClient image
 /// methods; CP kinds combine `param1/param2` into one path, Nuverse takes
 /// (user_id, index).
@@ -518,6 +558,19 @@ pub fn build_internal_http_client() -> Result<reqwest::Client, AppError> {
         .no_proxy()
         .connect_timeout(std::time::Duration::from_secs(5))
         .timeout(std::time::Duration::from_secs(75))
+        .tcp_keepalive(std::time::Duration::from_secs(60))
+        .build()
+        .map_err(|e| AppError::NetworkError(e.to_string()))
+}
+
+/// Internal client for bulk node-to-node transfers (master bundles, relayed
+/// master splits): no overall timeout — bodies can be large over WAN — but a
+/// stall detector via read timeout, so a dead peer still fails promptly.
+pub fn build_bulk_internal_http_client() -> Result<reqwest::Client, AppError> {
+    reqwest::Client::builder()
+        .no_proxy()
+        .connect_timeout(std::time::Duration::from_secs(5))
+        .read_timeout(std::time::Duration::from_secs(120))
         .tcp_keepalive(std::time::Duration::from_secs(60))
         .build()
         .map_err(|e| AppError::NetworkError(e.to_string()))

@@ -955,6 +955,115 @@ impl SekaiClient {
         .await
     }
 
+    /// Authenticated game GET that returns the raw [`Response`] with its
+    /// encrypted body untouched, for relaying to a peer node as a byte stream.
+    /// Runs a status-code-only version of `drive_game_api`'s recovery (relogin
+    /// on 403, cookie refresh on XML-403, version refresh + relogin on 426) —
+    /// the body is never read on the success path, so classification that
+    /// requires decoding is out of scope; game-level statuses that the decode
+    /// path accepts (200/400/404/409 octet-stream) are returned as-is.
+    pub async fn get_game_api_raw(
+        &self,
+        path: &str,
+        timeout: Duration,
+    ) -> Result<Response, AppError> {
+        let session = self.get_session().ok_or(AppError::NoClientAvailable)?;
+        let max_retries = 4;
+        let mut retry_count = 0;
+        while retry_count < max_retries {
+            let resp = self
+                .call_api_with_timeout::<()>(
+                    &session,
+                    reqwest::Method::GET,
+                    path,
+                    None,
+                    None,
+                    Some(timeout),
+                )
+                .await?;
+            let status = resp.status().as_u16();
+            let content_type = resp
+                .headers()
+                .get("content-type")
+                .and_then(|h| h.to_str().ok())
+                .unwrap_or("")
+                .to_lowercase();
+            let is_octet = content_type.contains("octet-stream") || content_type.contains("binary");
+            let recoverable = if is_octet {
+                match SekaiHttpStatus::from_code(status)? {
+                    SekaiHttpStatus::Ok
+                    | SekaiHttpStatus::ClientError
+                    | SekaiHttpStatus::NotFound
+                    | SekaiHttpStatus::Conflict => return Ok(resp),
+                    SekaiHttpStatus::SessionError => AppError::SessionError,
+                    SekaiHttpStatus::GameUpgrade => AppError::UpgradeRequired,
+                    SekaiHttpStatus::UnderMaintenance => return Err(AppError::UnderMaintenance),
+                    _ => {
+                        return Err(AppError::Unknown {
+                            status,
+                            body: String::new(),
+                        })
+                    }
+                }
+            } else if status == 403 && content_type.contains("xml") {
+                AppError::CookieExpired
+            } else if status == 503 {
+                return Err(AppError::UnderMaintenance);
+            } else {
+                let body = resp.bytes().await.unwrap_or_default();
+                return Err(AppError::Unknown {
+                    status,
+                    body: String::from_utf8_lossy(&body).to_string(),
+                });
+            };
+            match recoverable {
+                AppError::SessionError | AppError::UpgradeRequired => {
+                    warn!(
+                        "{} Raw game GET hit {} — recovering session...",
+                        self.region.as_str().to_uppercase(),
+                        status
+                    );
+                    // Same single-flight relogin as drive_game_api: only the
+                    // caller that still sees the old token re-logs-in.
+                    let token_before = session.get_session_token();
+                    let guard = session.lock_login().await;
+                    if session.get_session_token() == token_before {
+                        if matches!(recoverable, AppError::UpgradeRequired) {
+                            self.refresh_version().await?;
+                        }
+                        if let Err(e) = self.login(&session).await {
+                            error!(
+                                "{} Re-login during raw GET failed: {}",
+                                self.region.as_str().to_uppercase(),
+                                e
+                            );
+                            return Err(recoverable);
+                        }
+                    }
+                    drop(guard);
+                }
+                AppError::CookieExpired => {
+                    if !self.config.require_cookies {
+                        return Err(AppError::CookieExpired);
+                    }
+                    let cookie_before = self.headers.lock().get("Cookie").cloned();
+                    let guard = self.cookie_lock.lock().await;
+                    if self.headers.lock().get("Cookie").cloned() == cookie_before {
+                        self.refresh_cookies().await?;
+                    }
+                    drop(guard);
+                }
+                other => return Err(other),
+            }
+            retry_count += 1;
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+        Err(AppError::Internal(format!(
+            "Raw game GET gave up after {} recovery attempts",
+            max_retries
+        )))
+    }
+
     async fn get_cp_image(&self, relative_path: &str) -> Result<Vec<u8>, AppError> {
         let session = self.get_session().ok_or(AppError::NoClientAvailable)?;
         let path_clean = relative_path.trim_start_matches('/');

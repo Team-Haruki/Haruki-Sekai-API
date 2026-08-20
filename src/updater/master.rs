@@ -10,7 +10,11 @@ use tracing::{error, info, warn};
 use super::git::GitHelper;
 use crate::client::helper::{compare_version, effective_app_version, VersionInfo};
 use crate::client::{LoginResponse, SekaiClient};
-use crate::config::{AssetUpdaterInfo, GitConfig, ServerRegion};
+use crate::config::{AssetUpdaterInfo, GitConfig, MasterRemoteSourceConfig, ServerRegion};
+use crate::error::AppError;
+use crate::upstream::{
+    GameStreamRequest, InternalApiResponse, LoginProbeRequest, LoginProbeResponse,
+};
 
 const ASSET_UPDATER_CONFLICT_RETRY_DELAY_SECS: u64 = 60;
 const ASSET_UPDATER_MAX_CONFLICT_RETRIES: u8 = 10;
@@ -26,9 +30,122 @@ struct AssetUpdaterPayload {
     dry_run: bool,
 }
 
+/// A peer node lending its game accounts to this node's master production.
+/// The peer only ever executes a login (returning version metadata) or relays
+/// an authenticated GET as an untouched encrypted byte stream; every
+/// memory-heavy step (decrypt, decode, unpack, ingest) runs on this node.
+pub struct RemoteMasterSource {
+    region: ServerRegion,
+    base_url: String,
+    token: String,
+    http: reqwest::Client,
+}
+
+impl RemoteMasterSource {
+    pub fn new(
+        region: ServerRegion,
+        config: &MasterRemoteSourceConfig,
+        http: reqwest::Client,
+    ) -> Self {
+        Self {
+            region,
+            base_url: config.url.trim_end_matches('/').to_string(),
+            token: config.token.clone(),
+            http,
+        }
+    }
+
+    /// Login on the account node; returns the version metadata as a
+    /// LoginResponse (session token intentionally absent).
+    async fn probe(&self) -> Result<LoginResponse, AppError> {
+        let resp = self
+            .http
+            .post(format!("{}/internal/login-probe", self.base_url))
+            .bearer_auth(&self.token)
+            .json(&LoginProbeRequest {
+                server: self.region.as_str().to_string(),
+            })
+            .send()
+            .await
+            .map_err(|e| AppError::NetworkError(format!("login probe: {}", e)))?;
+        if !resp.status().is_success() {
+            return Err(AppError::NetworkError(format!(
+                "login probe returned {}",
+                resp.status()
+            )));
+        }
+        let probe: LoginProbeResponse = resp
+            .json()
+            .await
+            .map_err(|e| AppError::NetworkError(format!("login probe: {}", e)))?;
+        if !probe.ok {
+            return Err(AppError::from_kind(
+                probe.kind.as_deref().unwrap_or(""),
+                None,
+                probe.message.unwrap_or_default(),
+            ));
+        }
+        Ok(LoginResponse {
+            session_token: String::new(),
+            data_version: probe.data_version,
+            asset_version: probe.asset_version,
+            asset_hash: probe.asset_hash,
+            suite_master_split_path: probe.suite_master_split_path,
+            cdn_version: probe.cdn_version,
+            user_registration: None,
+        })
+    }
+
+    /// Fetch one CP master split as the raw encrypted bytes relayed by the
+    /// account node. The full split buffers here (the decoding node), never on
+    /// the relay.
+    async fn fetch_split_bytes(&self, api_path: &str) -> Result<Vec<u8>, AppError> {
+        let resp = self
+            .http
+            .post(format!("{}/internal/game-stream", self.base_url))
+            .bearer_auth(&self.token)
+            .json(&GameStreamRequest {
+                server: self.region.as_str().to_string(),
+                path: api_path.to_string(),
+            })
+            .send()
+            .await
+            .map_err(|e| AppError::NetworkError(format!("game stream: {}", e)))?;
+        let status = resp.status();
+        let is_json = resp
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| v.starts_with("application/json"));
+        let bytes = resp
+            .bytes()
+            .await
+            .map_err(|e| AppError::NetworkError(format!("game stream: {}", e)))?;
+        if !status.is_success() {
+            return Err(AppError::NetworkError(format!(
+                "game stream returned {}",
+                status
+            )));
+        }
+        if is_json {
+            let envelope: InternalApiResponse = serde_json::from_slice(&bytes)
+                .map_err(|e| AppError::NetworkError(format!("game stream envelope: {}", e)))?;
+            return Err(AppError::from_kind(
+                envelope.kind.as_deref().unwrap_or(""),
+                envelope.status,
+                envelope.message.unwrap_or_default(),
+            ));
+        }
+        Ok(bytes.to_vec())
+    }
+}
+
 pub struct MasterUpdater {
     pub region: ServerRegion,
     pub client: Arc<SekaiClient>,
+    /// When set, master production borrows a peer's accounts (login probe +
+    /// relayed split bytes) instead of this node's own sessions.
+    remote_source: Option<RemoteMasterSource>,
     pub git_helper: Option<GitHelper>,
     pub asset_updater_servers: Vec<AssetUpdaterInfo>,
     http_client: reqwest::Client,
@@ -53,6 +170,7 @@ impl MasterUpdater {
         asset_updater_servers: Vec<AssetUpdaterInfo>,
         db: Option<sea_orm::DatabaseConnection>,
         version_lock: Arc<tokio::sync::Mutex<()>>,
+        remote_source: Option<RemoteMasterSource>,
     ) -> Self {
         let git_helper = git_config
             .filter(|c| c.enabled)
@@ -66,6 +184,7 @@ impl MasterUpdater {
         Self {
             region,
             client,
+            remote_source,
             git_helper,
             asset_updater_servers,
             http_client,
@@ -102,51 +221,66 @@ impl MasterUpdater {
                 return;
             }
         };
-        let session = match self.client.get_session() {
-            Some(c) => c,
-            None => {
-                error!(
-                    "{} No session available",
-                    self.region.as_str().to_uppercase()
-                );
-                return;
-            }
-        };
-        let login_response = match self.client.login(&session).await {
-            Ok(r) => r,
-            Err(crate::error::AppError::UpgradeRequired) => {
-                warn!(
-                    "{} Server upgrade required during check_update login, refreshing version...",
-                    self.region.as_str().to_uppercase()
-                );
-                if let Err(e) = self.client.refresh_version().await {
+        let (session, login_response) = if let Some(ref remote) = self.remote_source {
+            match remote.probe().await {
+                Ok(r) => (None, r),
+                Err(e) => {
                     error!(
-                        "{} Failed to refresh version: {}",
+                        "{} Remote login probe failed: {}",
                         self.region.as_str().to_uppercase(),
                         e
                     );
                     return;
                 }
-                match self.client.login(&session).await {
-                    Ok(r) => r,
-                    Err(e) => {
+            }
+        } else {
+            let session = match self.client.get_session() {
+                Some(c) => c,
+                None => {
+                    error!(
+                        "{} No session available",
+                        self.region.as_str().to_uppercase()
+                    );
+                    return;
+                }
+            };
+            let login_response = match self.client.login(&session).await {
+                Ok(r) => r,
+                Err(crate::error::AppError::UpgradeRequired) => {
+                    warn!(
+                        "{} Server upgrade required during check_update login, refreshing version...",
+                        self.region.as_str().to_uppercase()
+                    );
+                    if let Err(e) = self.client.refresh_version().await {
                         error!(
-                            "{} Failed to login after version refresh: {}",
+                            "{} Failed to refresh version: {}",
                             self.region.as_str().to_uppercase(),
                             e
                         );
                         return;
                     }
+                    match self.client.login(&session).await {
+                        Ok(r) => r,
+                        Err(e) => {
+                            error!(
+                                "{} Failed to login after version refresh: {}",
+                                self.region.as_str().to_uppercase(),
+                                e
+                            );
+                            return;
+                        }
+                    }
                 }
-            }
-            Err(e) => {
-                error!(
-                    "{} Failed to login: {}",
-                    self.region.as_str().to_uppercase(),
-                    e
-                );
-                return;
-            }
+                Err(e) => {
+                    error!(
+                        "{} Failed to login: {}",
+                        self.region.as_str().to_uppercase(),
+                        e
+                    );
+                    return;
+                }
+            };
+            (Some(session), login_response)
         };
         let (need_master_update, need_asset_update, need_version_save) = if self
             .region
@@ -199,7 +333,10 @@ impl MasterUpdater {
                     login_response.cdn_version
                 );
             }
-            if let Err(e) = self.update_master_data(&session, &login_response).await {
+            if let Err(e) = self
+                .update_master_data(session.as_deref(), &login_response)
+                .await
+            {
                 error!(
                     "{} Failed to update master data: {}",
                     self.region.as_str().to_uppercase(),
@@ -393,7 +530,7 @@ treating difference as an update",
 
     async fn update_master_data(
         &self,
-        session: &crate::client::AccountSession,
+        session: Option<&crate::client::AccountSession>,
         login: &crate::client::LoginResponse,
     ) -> Result<(), crate::error::AppError> {
         info!(
@@ -416,7 +553,15 @@ treating difference as an update",
                 })
                 .collect();
             for api_path in paths {
-                let data = self.download_cp_master_split(session, &api_path).await?;
+                let data = if let Some(ref remote) = self.remote_source {
+                    self.download_cp_master_split_remote(remote, &api_path)
+                        .await?
+                } else {
+                    let session = session.ok_or_else(|| {
+                        AppError::Internal("no session for local master download".to_string())
+                    })?;
+                    self.download_cp_master_split(session, &api_path).await?
+                };
                 self.save_master_files(&data, master_dir).await?;
             }
         } else {
@@ -520,6 +665,39 @@ retry on the next cron tick): {e:#}",
                 warn!(
                     "{} Nuverse master download attempt {}/{} failed: {}; retrying...",
                     region, attempt, CP_MASTER_SPLIT_MAX_RETRIES, last_err
+                );
+                tokio::time::sleep(Duration::from_secs(CP_MASTER_SPLIT_RETRY_DELAY_SECS)).await;
+            }
+        }
+        Err(last_err)
+    }
+
+    /// Fetch and decode one CP master split via the remote account node: the
+    /// relay hands back the untouched encrypted bytes and decoding happens
+    /// here with this node's own cryptor (same region keys).
+    async fn download_cp_master_split_remote(
+        &self,
+        remote: &RemoteMasterSource,
+        api_path: &str,
+    ) -> Result<IndexMap<String, JsonValue>, crate::error::AppError> {
+        let mut last_err =
+            AppError::NetworkError("remote master split download failed".to_string());
+        for attempt in 1..=CP_MASTER_SPLIT_MAX_RETRIES {
+            match remote.fetch_split_bytes(api_path).await {
+                Ok(bytes) => match self.client.cryptor.unpack_ordered(&bytes) {
+                    Ok(map) => return Ok(map),
+                    Err(e) => last_err = e,
+                },
+                Err(e) => last_err = e,
+            }
+            if attempt < CP_MASTER_SPLIT_MAX_RETRIES {
+                warn!(
+                    "{} Remote master split {} attempt {}/{} failed: {}; retrying...",
+                    self.region.as_str().to_uppercase(),
+                    api_path,
+                    attempt,
+                    CP_MASTER_SPLIT_MAX_RETRIES,
+                    last_err
                 );
                 tokio::time::sleep(Duration::from_secs(CP_MASTER_SPLIT_RETRY_DELAY_SECS)).await;
             }

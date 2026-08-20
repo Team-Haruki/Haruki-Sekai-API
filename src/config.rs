@@ -187,6 +187,23 @@ pub struct MasterSyncPeer {
     pub token: String,
 }
 
+/// Remote account source for master production: this node runs the region's
+/// master updater itself (download, unpack, ingest, git push all local) but
+/// borrows a peer node's game accounts for the two steps that need them — the
+/// login-derived version probe and (CP servers) the authenticated master-split
+/// fetch, which the peer relays as an untouched encrypted byte stream so it
+/// never pays the decode memory cost.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct MasterRemoteSourceConfig {
+    /// Base URL of the account node, e.g. `http://100.76.159.97:9999`. Empty
+    /// disables remote-source mode.
+    #[serde(default)]
+    pub url: String,
+    /// Bearer token matching the account node's `backend.internal_token`.
+    #[serde(default)]
+    pub token: String,
+}
+
 /// Master-data synchronization between nodes. Each region has one "owner" node
 /// (the one running the master updater with its own accounts); peer nodes pull
 /// that region's master data from the owner over the internal network instead
@@ -252,6 +269,8 @@ pub struct ServerConfig {
     pub local_priority: i32,
     #[serde(default)]
     pub master_sync: MasterSyncConfig,
+    #[serde(default)]
+    pub master_remote_source: MasterRemoteSourceConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]

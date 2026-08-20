@@ -94,6 +94,7 @@ pub async fn start_scheduler(
                 config.asset_updater_servers.clone(),
                 db.clone(),
                 version_lock.clone(),
+                None,
             ));
             match Job::new_async(cron_expr.as_str(), move |_uuid, _lock| {
                 let updater = updater.clone();
@@ -153,6 +154,125 @@ pub async fn start_scheduler(
             }
         }
     }
+    // Remote-source master production: regions whose game accounts live on a
+    // peer node but whose master pipeline (download, decode, ingest, git push)
+    // runs here on a headless client — the peer only serves the login probe
+    // and relays encrypted split bytes. Applies only to regions without a
+    // local client; a region with its own accounts uses the classic updater.
+    let mut headless_http: Option<reqwest::Client> = None;
+    for (region, server_config) in &config.servers {
+        let remote_cfg = &server_config.master_remote_source;
+        if remote_cfg.url.is_empty()
+            || !server_config.enable_master_updater
+            || server_config.master_updater_cron.is_empty()
+            || clients.contains_key(region)
+        {
+            continue;
+        }
+        let region_name = region.as_str().to_uppercase();
+        let http = match &headless_http {
+            Some(h) => h.clone(),
+            None => match SekaiClient::build_http_client(proxy.as_deref()) {
+                Ok(h) => {
+                    headless_http = Some(h.clone());
+                    h
+                }
+                Err(e) => {
+                    error!(
+                        "{} Failed to build headless http client: {}",
+                        region_name, e
+                    );
+                    continue;
+                }
+            },
+        };
+        let nuverse_store = if !region.is_cp_server()
+            && !server_config.nuverse_schema_bundle_path.is_empty()
+        {
+            match SekaiClient::load_nuverse_schema_store(&server_config.nuverse_schema_bundle_path)
+            {
+                Ok(store) => Some(Arc::new(store)),
+                Err(e) => {
+                    error!("{} Failed to load schema bundle: {}", region_name, e);
+                    continue;
+                }
+            }
+        } else {
+            None
+        };
+        let client = match SekaiClient::new(
+            *region,
+            server_config.clone(),
+            proxy.clone(),
+            None,
+            http,
+            nuverse_store,
+        )
+        .await
+        {
+            Ok(c) => Arc::new(c),
+            Err(e) => {
+                error!("{} Failed to build headless client: {}", region_name, e);
+                continue;
+            }
+        };
+        let bulk_http = match crate::upstream::build_bulk_internal_http_client() {
+            Ok(h) => h,
+            Err(e) => {
+                error!("{} Failed to build bulk http client: {}", region_name, e);
+                continue;
+            }
+        };
+        let remote = super::master::RemoteMasterSource::new(*region, remote_cfg, bulk_http);
+        let version_lock = version_locks
+            .get(region)
+            .cloned()
+            .unwrap_or_else(|| Arc::new(tokio::sync::Mutex::new(())));
+        let git_cfg = if git_config.enabled {
+            Some(git_config)
+        } else {
+            None
+        };
+        let cron_expr = server_config.master_updater_cron.clone();
+        info!(
+            "{} Master updater (remote accounts via {}) scheduled: {}",
+            region_name, remote_cfg.url, cron_expr
+        );
+        let updater = Arc::new(MasterUpdater::new(
+            *region,
+            client,
+            git_cfg,
+            proxy.clone(),
+            config.asset_updater_servers.clone(),
+            db.clone(),
+            version_lock,
+            Some(remote),
+        ));
+        match Job::new_async(cron_expr.as_str(), move |_uuid, _lock| {
+            let updater = updater.clone();
+            Box::pin(async move {
+                updater.check_update().await;
+            })
+        }) {
+            Ok(job) => {
+                if let Err(e) = sched.add(job).await {
+                    error!(
+                        "{} Failed to add remote master updater job: {}",
+                        region_name, e
+                    );
+                }
+            }
+            Err(e) => {
+                error!(
+                    "{} Invalid cron expression '{}': {}",
+                    region.as_str().to_uppercase(),
+                    cron_expr,
+                    e
+                );
+            }
+        }
+    }
+
     // Fallback master-sync polling: webhook from the owner is the fast path;
     // this poll catches missed webhooks and nodes that were down at the time.
     for (region, syncer) in syncers {
