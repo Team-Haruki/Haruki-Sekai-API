@@ -115,42 +115,56 @@ pub async fn start_scheduler(
                 }
             }
         }
-        if server_config.enable_app_hash_updater && !server_config.app_hash_updater_cron.is_empty()
+    }
+
+    // App-hash updaters never touch a client (they only read apphash sources
+    // and rewrite the version file), so schedule them from config alone: a
+    // node that produces master data with remote accounts (no local client)
+    // must still keep its version files' appVersion/appHash fresh.
+    for (region, server_config) in &config.servers {
+        if !server_config.enable_app_hash_updater
+            || server_config.app_hash_updater_cron.is_empty()
+            || server_config.version_path.is_empty()
         {
-            let region_name = region.as_str().to_uppercase();
-            let cron_expr = server_config.app_hash_updater_cron.clone();
-            if config.apphash_sources.is_empty() {
-                info!(
-                    "{} AppHash updater disabled: no sources configured",
-                    region_name
-                );
-                continue;
+            continue;
+        }
+        let region_name = region.as_str().to_uppercase();
+        let cron_expr = server_config.app_hash_updater_cron.clone();
+        if config.apphash_sources.is_empty() {
+            info!(
+                "{} AppHash updater disabled: no sources configured",
+                region_name
+            );
+            continue;
+        }
+        let version_lock = version_locks
+            .get(region)
+            .cloned()
+            .unwrap_or_else(|| Arc::new(tokio::sync::Mutex::new(())));
+        info!("{} AppHash updater scheduled: {}", region_name, cron_expr);
+        let updater = Arc::new(AppHashUpdater::new(
+            *region,
+            config.apphash_sources.clone(),
+            server_config.version_path.clone(),
+            proxy.clone(),
+            version_lock,
+        ));
+        match Job::new_async(cron_expr.as_str(), move |_uuid, _lock| {
+            let updater = updater.clone();
+            Box::pin(async move {
+                updater.check_update().await;
+            })
+        }) {
+            Ok(job) => {
+                if let Err(e) = sched.add(job).await {
+                    error!("{} Failed to add apphash updater job: {}", region_name, e);
+                }
             }
-            info!("{} AppHash updater scheduled: {}", region_name, cron_expr);
-            let updater = Arc::new(AppHashUpdater::new(
-                *region,
-                config.apphash_sources.clone(),
-                server_config.version_path.clone(),
-                proxy.clone(),
-                version_lock.clone(),
-            ));
-            match Job::new_async(cron_expr.as_str(), move |_uuid, _lock| {
-                let updater = updater.clone();
-                Box::pin(async move {
-                    updater.check_update().await;
-                })
-            }) {
-                Ok(job) => {
-                    if let Err(e) = sched.add(job).await {
-                        error!("{} Failed to add apphash updater job: {}", region_name, e);
-                    }
-                }
-                Err(e) => {
-                    error!(
-                        "{} Invalid cron expression '{}': {}",
-                        region_name, server_config.app_hash_updater_cron, e
-                    );
-                }
+            Err(e) => {
+                error!(
+                    "{} Invalid cron expression '{}': {}",
+                    region_name, server_config.app_hash_updater_cron, e
+                );
             }
         }
     }
