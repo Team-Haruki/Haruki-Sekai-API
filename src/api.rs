@@ -1,5 +1,6 @@
 mod apis;
 mod image;
+mod internal;
 mod middleware;
 mod routes;
 

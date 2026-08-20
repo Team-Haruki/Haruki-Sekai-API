@@ -46,6 +46,8 @@ async fn main() -> anyhow::Result<()> {
         &state.clients,
         &state.config,
         state.master_db.clone(),
+        &state.version_locks,
+        &state.syncers,
     )
     .await
     {
@@ -165,6 +167,27 @@ async fn init_app_state(config: Config) -> anyhow::Result<AppState> {
             }
         }
     }
+    // Per-region routers: the local client (when this node runs accounts for
+    // the region) plus configured remote upstream nodes. A region with
+    // upstreams but no local client is served remote-only, so failed local
+    // init degrades to forwarding instead of dropping the region.
+    let internal_http = haruki_sekai_api::upstream::build_internal_http_client()?;
+    let mut routers = HashMap::new();
+    for (region, server_config) in &config.servers {
+        let local = clients
+            .get(region)
+            .cloned()
+            .map(|c| (c, server_config.local_priority));
+        if let Some(router) = haruki_sekai_api::upstream::RegionRouter::new(
+            *region,
+            local,
+            &server_config.upstreams,
+            internal_http.clone(),
+        ) {
+            routers.insert(*region, Arc::new(router));
+        }
+    }
+
     let db = if config.database.enabled {
         Some(db::init_db(&config.database).await?)
     } else {
@@ -185,9 +208,25 @@ async fn init_app_state(config: Config) -> anyhow::Result<AppState> {
     } else {
         Some(config.backend.sekai_user_jwt_signing_key.clone())
     };
+    // One version lock per configured region, shared by the master/app-hash
+    // updaters and the master syncer so version-file writes stay serialized.
+    let version_locks: HashMap<_, _> = config
+        .servers
+        .keys()
+        .map(|region| (*region, Arc::new(tokio::sync::Mutex::new(()))))
+        .collect();
+    let syncers = haruki_sekai_api::updater::sync::build_syncers(
+        &config,
+        &clients,
+        master_db.clone(),
+        &version_locks,
+    );
     Ok(AppState {
         config,
         clients,
+        routers,
+        syncers,
+        version_locks,
         db,
         master_db,
         redis,

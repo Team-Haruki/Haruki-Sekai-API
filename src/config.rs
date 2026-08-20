@@ -72,6 +72,11 @@ pub struct BackendConfig {
     pub log_level: String,
     #[serde(default)]
     pub sekai_user_jwt_signing_key: String,
+    /// Shared secret required (as `Authorization: Bearer <token>`) on this
+    /// node's `/internal/*` endpoints. Empty disables those endpoints entirely,
+    /// so a node never exposes internal forwarding unless explicitly configured.
+    #[serde(default)]
+    pub internal_token: String,
 }
 
 fn default_host() -> String {
@@ -147,6 +152,64 @@ pub struct GitConfig {
     pub signing_program: String,
 }
 
+/// A remote Haruki Sekai API node that can serve this region's game API calls
+/// (reached over the internal network, e.g. a Tailscale IP). Targets are tried
+/// in ascending `priority` order; the local client participates with the
+/// region's `local_priority` (default 0), so with all defaults local is
+/// preferred and remotes (default 10) are fallbacks. Set an upstream's
+/// priority below `local_priority` to prefer it (geo/QPS routing).
+#[derive(Debug, Clone, Deserialize)]
+pub struct UpstreamConfig {
+    /// Base URL of the remote node, e.g. `http://100.64.0.2:9999`.
+    pub url: String,
+    /// Bearer token matching the remote node's `backend.internal_token`.
+    #[serde(default)]
+    pub token: String,
+    #[serde(default = "default_upstream_priority")]
+    pub priority: i32,
+    /// Optional display name for logs; defaults to the URL.
+    #[serde(default)]
+    pub name: String,
+}
+
+fn default_upstream_priority() -> i32 {
+    10
+}
+
+/// A peer node to notify (webhook) after this node updates a region's master
+/// data locally.
+#[derive(Debug, Clone, Deserialize)]
+pub struct MasterSyncPeer {
+    /// Base URL of the peer node, e.g. `http://100.64.0.1:9999`.
+    pub url: String,
+    /// Bearer token matching the peer's `backend.internal_token`.
+    #[serde(default)]
+    pub token: String,
+}
+
+/// Master-data synchronization between nodes. Each region has one "owner" node
+/// (the one running the master updater with its own accounts); peer nodes pull
+/// that region's master data from the owner over the internal network instead
+/// of downloading it from the game/CDN themselves.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct MasterSyncConfig {
+    /// Owner node to pull this region's master data from (base URL). Empty
+    /// disables pulling on this node.
+    #[serde(default)]
+    pub source_url: String,
+    /// Bearer token matching the owner's `backend.internal_token`.
+    #[serde(default)]
+    pub source_token: String,
+    /// Cron for fallback version polling against the owner (6-field). Empty
+    /// disables polling; the owner's webhook then is the only trigger.
+    #[serde(default)]
+    pub poll_cron: String,
+    /// Peers this node notifies after it updates the region's master data
+    /// itself (i.e. when this node is the owner).
+    #[serde(default)]
+    pub notify: Vec<MasterSyncPeer>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct ServerConfig {
     #[serde(default)]
@@ -179,6 +242,16 @@ pub struct ServerConfig {
     pub enable_app_hash_updater: bool,
     #[serde(default)]
     pub app_hash_updater_cron: String,
+    /// Remote nodes that can serve this region's game API calls. A region with
+    /// upstreams but `enabled: false` (no local accounts) is served remote-only.
+    #[serde(default)]
+    pub upstreams: Vec<UpstreamConfig>,
+    /// Priority of the local client among this region's targets (lower = tried
+    /// first). Only meaningful when `upstreams` is non-empty.
+    #[serde(default)]
+    pub local_priority: i32,
+    #[serde(default)]
+    pub master_sync: MasterSyncConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]

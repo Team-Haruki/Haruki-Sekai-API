@@ -69,6 +69,68 @@ pub enum AppError {
 }
 
 impl AppError {
+    /// Stable machine-readable tag for this error, used by the internal
+    /// upstream-forwarding envelope so a remote node's failure class survives
+    /// the HTTP hop and the primary can classify it (failover vs terminal).
+    pub fn kind(&self) -> &'static str {
+        match self {
+            AppError::SessionError => "session_error",
+            AppError::CookieExpired => "cookie_expired",
+            AppError::UpgradeRequired => "upgrade_required",
+            AppError::UnderMaintenance => "under_maintenance",
+            AppError::SignatureError => "signature_error",
+            AppError::NoAccountError => "no_account",
+            AppError::NoClientAvailable => "no_client",
+            AppError::InvalidServerRegion(_) => "invalid_server_region",
+            AppError::InvalidHttpStatus(_) => "invalid_http_status",
+            AppError::CryptoError(_) => "crypto",
+            AppError::ParseError(_) => "parse",
+            AppError::UpstreamData(_) => "upstream_data",
+            AppError::NetworkError(_) => "network",
+            AppError::DatabaseError(_) => "database",
+            AppError::RedisError(_) => "redis",
+            AppError::IoError(_) => "io",
+            AppError::AuthError(_) => "auth",
+            AppError::NotFound(_) => "not_found",
+            AppError::Forbidden(_) => "forbidden",
+            AppError::Internal(_) => "internal",
+            AppError::Unknown { .. } => "unknown",
+        }
+    }
+
+    /// Reconstruct an error from an envelope `(kind, status, message)` triple.
+    /// Inverse of `kind()` up to message contents; an unrecognized kind (e.g.
+    /// from a newer remote node) degrades to `Internal` rather than failing.
+    pub fn from_kind(kind: &str, status: Option<u16>, message: String) -> Self {
+        match kind {
+            "session_error" => AppError::SessionError,
+            "cookie_expired" => AppError::CookieExpired,
+            "upgrade_required" => AppError::UpgradeRequired,
+            "under_maintenance" => AppError::UnderMaintenance,
+            "signature_error" => AppError::SignatureError,
+            "no_account" => AppError::NoAccountError,
+            "no_client" => AppError::NoClientAvailable,
+            "invalid_server_region" => AppError::InvalidServerRegion(message),
+            "invalid_http_status" => AppError::InvalidHttpStatus(status.unwrap_or(0)),
+            "crypto" => AppError::CryptoError(message),
+            "parse" => AppError::ParseError(message),
+            "upstream_data" => AppError::UpstreamData(message),
+            "network" => AppError::NetworkError(message),
+            "database" => AppError::DatabaseError(message),
+            "redis" => AppError::RedisError(message),
+            "io" => AppError::IoError(message),
+            "auth" => AppError::AuthError(message),
+            "not_found" => AppError::NotFound(message),
+            "forbidden" => AppError::Forbidden(message),
+            "internal" => AppError::Internal(message),
+            "unknown" => AppError::Unknown {
+                status: status.unwrap_or(0),
+                body: message,
+            },
+            other => AppError::Internal(format!("unrecognized error kind '{other}': {message}")),
+        }
+    }
+
     pub fn status_code(&self) -> StatusCode {
         match self {
             AppError::SessionError | AppError::CookieExpired => StatusCode::FORBIDDEN,

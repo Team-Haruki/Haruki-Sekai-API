@@ -231,6 +231,7 @@ impl MasterUpdater {
                 }
             };
             let data_version = merged_version.data_version.clone();
+            let notify_data_version = data_version.clone();
             self.client.version_helper.update(merged_version);
             if let Some(ref git_helper) = self.git_helper {
                 // git shells out via std::process and the push is a network call;
@@ -248,6 +249,9 @@ impl MasterUpdater {
                     Ok(Err(e)) => error!("{} Git push failed: {}", region_upper, e),
                     Err(e) => error!("{} Git push task failed: {}", region_upper, e),
                 }
+            }
+            if need_master_update {
+                self.notify_sync_peers(&notify_data_version).await;
             }
         }
         info!(
@@ -696,34 +700,88 @@ retry on the next cron tick): {e:#}",
         &self,
         version: &VersionInfo,
     ) -> Result<VersionInfo, crate::error::AppError> {
-        let path = &self.client.config.version_path;
         // Serialize with the AppHashUpdater so neither clobbers the other's fields.
         let _guard = self.version_lock.lock().await;
-        let mut existing: serde_json::Map<String, serde_json::Value> = if Path::new(path).exists() {
-            let data = tokio::fs::read(path).await?;
-            sonic_rs::from_slice(&data).unwrap_or_default()
-        } else {
-            serde_json::Map::new()
-        };
-        let merged_version = merge_version_state(self.region, &mut existing, version);
-        let json = sonic_rs::to_string_pretty(&existing)
-            .map_err(|e| crate::error::AppError::ParseError(e.to_string()))?;
-        crate::client::helper::write_file_atomic(Path::new(path), json.as_bytes()).await?;
-        // The versioned snapshot filename embeds a server-supplied string; refuse
-        // anything that could escape the version directory.
-        if is_safe_path_component(&merged_version.data_version) {
-            let dir = Path::new(path).parent().unwrap_or(Path::new("."));
-            let versioned_path = dir.join(format!("{}.json", merged_version.data_version));
-            crate::client::helper::write_file_atomic(&versioned_path, json.as_bytes()).await?;
-        } else {
-            warn!(
-                "{} Skipping versioned snapshot: dataVersion {:?} is not a safe filename",
-                self.region.as_str().to_uppercase(),
-                merged_version.data_version
-            );
-        }
-        Ok(merged_version)
+        persist_version_file(self.region, &self.client.config.version_path, version).await
     }
+
+    /// Webhook peer nodes that pull this region's master data from us, so they
+    /// sync immediately instead of waiting for their fallback poll. Best-effort:
+    /// failures are logged and covered by the peers' polling.
+    async fn notify_sync_peers(&self, data_version: &str) {
+        let peers = &self.client.config.master_sync.notify;
+        if peers.is_empty() {
+            return;
+        }
+        let payload = serde_json::json!({
+            "server": self.region.as_str(),
+            "dataVersion": data_version,
+        });
+        for peer in peers {
+            let endpoint = format!("{}/internal/master-updated", peer.url.trim_end_matches('/'));
+            let mut req = self.http_client.post(&endpoint).json(&payload);
+            if !peer.token.is_empty() {
+                req = req.bearer_auth(&peer.token);
+            }
+            match req.send().await {
+                Ok(resp) if resp.status().is_success() => info!(
+                    "{} Notified sync peer {}",
+                    self.region.as_str().to_uppercase(),
+                    peer.url
+                ),
+                Ok(resp) => warn!(
+                    "{} Sync peer {} returned {}",
+                    self.region.as_str().to_uppercase(),
+                    peer.url,
+                    resp.status()
+                ),
+                Err(e) => warn!(
+                    "{} Failed to notify sync peer {}: {}",
+                    self.region.as_str().to_uppercase(),
+                    peer.url,
+                    e
+                ),
+            }
+        }
+    }
+}
+
+/// Merge `version` into the on-disk version file at `path` and write it
+/// atomically, plus a `<dataVersion>.json` snapshot next to it. Callers must
+/// hold the region's version lock. Shared by the master updater (own download)
+/// and the master syncer (pulled from a peer node).
+pub(crate) async fn persist_version_file(
+    region: ServerRegion,
+    path: &str,
+    version: &VersionInfo,
+) -> Result<VersionInfo, crate::error::AppError> {
+    if let Some(parent) = Path::new(path).parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    let mut existing: serde_json::Map<String, serde_json::Value> = if Path::new(path).exists() {
+        let data = tokio::fs::read(path).await?;
+        sonic_rs::from_slice(&data).unwrap_or_default()
+    } else {
+        serde_json::Map::new()
+    };
+    let merged_version = merge_version_state(region, &mut existing, version);
+    let json = sonic_rs::to_string_pretty(&existing)
+        .map_err(|e| crate::error::AppError::ParseError(e.to_string()))?;
+    crate::client::helper::write_file_atomic(Path::new(path), json.as_bytes()).await?;
+    // The versioned snapshot filename embeds a server-supplied string; refuse
+    // anything that could escape the version directory.
+    if is_safe_path_component(&merged_version.data_version) {
+        let dir = Path::new(path).parent().unwrap_or(Path::new("."));
+        let versioned_path = dir.join(format!("{}.json", merged_version.data_version));
+        crate::client::helper::write_file_atomic(&versioned_path, json.as_bytes()).await?;
+    } else {
+        warn!(
+            "{} Skipping versioned snapshot: dataVersion {:?} is not a safe filename",
+            region.as_str().to_uppercase(),
+            merged_version.data_version
+        );
+    }
+    Ok(merged_version)
 }
 
 fn check_nuverse_versions(login: &LoginResponse, current: &VersionInfo) -> (bool, bool, bool) {
@@ -839,7 +897,7 @@ fn merge_version_state(
 
 /// True if `s` can be safely embedded in a filename within the intended
 /// directory: non-empty, no path separators, and not a dot-relative component.
-fn is_safe_path_component(s: &str) -> bool {
+pub(crate) fn is_safe_path_component(s: &str) -> bool {
     !s.is_empty()
         && s != "."
         && s != ".."

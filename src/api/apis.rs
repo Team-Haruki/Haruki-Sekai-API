@@ -39,13 +39,16 @@ impl IntoResponse for ApiResponse {
     }
 }
 
-fn get_client(state: &AppState, server: &str) -> Result<Arc<crate::client::SekaiClient>, AppError> {
+fn get_router(
+    state: &AppState,
+    server: &str,
+) -> Result<Arc<crate::upstream::RegionRouter>, AppError> {
     let region: ServerRegion = server
         .parse()
         .map_err(|_| AppError::InvalidServerRegion(server.to_string()))?;
 
     state
-        .clients
+        .routers
         .get(&region)
         .cloned()
         .ok_or(AppError::NoClientAvailable)
@@ -56,8 +59,8 @@ async fn proxy_game_api(
     server: &str,
     path: &str,
 ) -> Result<ApiResponse, AppError> {
-    let client = get_client(state, server)?;
-    let (data, status) = client.get_game_api(path, None).await?;
+    let router = get_router(state, server)?;
+    let (data, status) = router.get_game_api(path, None).await?;
 
     Ok(ApiResponse {
         status: StatusCode::from_u16(status).unwrap_or(StatusCode::OK),
@@ -71,8 +74,8 @@ async fn proxy_game_api_with_params(
     path: &str,
     params: &HashMap<String, String>,
 ) -> Result<ApiResponse, AppError> {
-    let client = get_client(state, server)?;
-    let (data, status) = client.get_game_api(path, Some(params)).await?;
+    let router = get_router(state, server)?;
+    let (data, status) = router.get_game_api(path, Some(params)).await?;
 
     Ok(ApiResponse {
         status: StatusCode::from_u16(status).unwrap_or(StatusCode::OK),
@@ -158,8 +161,8 @@ async fn proxy_post_game_api_body<T: serde::Serialize>(
     path: &str,
     body: &T,
 ) -> Result<ApiResponse, AppError> {
-    let client = get_client(state, server)?;
-    let (data, status) = client.post_game_api_body(path, body, None).await?;
+    let router = get_router(state, server)?;
+    let (data, status) = router.post_game_api_body(path, body, None).await?;
 
     Ok(ApiResponse {
         status: StatusCode::from_u16(status).unwrap_or(StatusCode::OK),

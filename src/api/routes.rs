@@ -7,12 +7,14 @@ use axum::{
     Json, Router,
 };
 use serde::Serialize;
+use tower_http::compression::CompressionLayer;
 use tower_http::trace::TraceLayer;
 
 use crate::AppState as MainAppState;
 
 use super::apis;
 use super::image;
+use super::internal;
 use super::middleware::auth_middleware;
 
 static START_TIME: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
@@ -103,10 +105,32 @@ pub fn create_router(state: Arc<MainAppState>) -> Router {
             auth_middleware,
         ));
 
+    // Node-to-node endpoints; guarded inside the handlers by
+    // backend.internal_token (404 when unconfigured), not by user auth.
+    let internal_routes = Router::new()
+        .route("/internal/sekai-api", post(internal::post_sekai_api))
+        .route(
+            "/internal/master/{server}/version",
+            get(internal::get_master_version),
+        )
+        .route(
+            "/internal/master/{server}/bundle",
+            get(internal::get_master_bundle),
+        )
+        .route(
+            "/internal/master-updated",
+            post(internal::post_master_updated),
+        );
+
     Router::new()
         .merge(public_routes)
         .merge(authed_image_routes)
+        .merge(internal_routes)
         .nest("/api", api_routes)
+        // Compress responses when the client sends Accept-Encoding — both end
+        // users and peer nodes forwarding over WAN links benefit; the default
+        // predicate already skips small and incompressible (image) bodies.
+        .layer(CompressionLayer::new())
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }

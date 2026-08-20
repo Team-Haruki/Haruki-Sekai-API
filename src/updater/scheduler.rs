@@ -14,6 +14,8 @@ pub async fn start_scheduler(
     clients: &std::collections::HashMap<ServerRegion, Arc<SekaiClient>>,
     config: &Config,
     db: Option<sea_orm::DatabaseConnection>,
+    version_locks: &std::collections::HashMap<ServerRegion, Arc<tokio::sync::Mutex<()>>>,
+    syncers: &std::collections::HashMap<ServerRegion, Arc<super::sync::MasterSyncer>>,
 ) -> Result<JobScheduler, JobSchedulerError> {
     let sched = JobScheduler::new().await?;
     let git_config = &config.git;
@@ -69,9 +71,12 @@ pub async fn start_scheduler(
 
     for (region, client) in clients {
         let server_config = &client.config;
-        // One lock per region, shared by the master and apphash updaters so their
+        // One lock per region (shared with the master syncer via AppState), so
         // version-file read-modify-writes never clobber each other.
-        let version_lock = Arc::new(tokio::sync::Mutex::new(()));
+        let version_lock = version_locks
+            .get(region)
+            .cloned()
+            .unwrap_or_else(|| Arc::new(tokio::sync::Mutex::new(())));
         if server_config.enable_master_updater && !server_config.master_updater_cron.is_empty() {
             let region_name = region.as_str().to_uppercase();
             let cron_expr = server_config.master_updater_cron.clone();
@@ -148,6 +153,49 @@ pub async fn start_scheduler(
             }
         }
     }
+    // Fallback master-sync polling: webhook from the owner is the fast path;
+    // this poll catches missed webhooks and nodes that were down at the time.
+    for (region, syncer) in syncers {
+        let cron_expr = config
+            .servers
+            .get(region)
+            .map(|c| c.master_sync.poll_cron.clone())
+            .unwrap_or_default();
+        if cron_expr.is_empty() {
+            continue;
+        }
+        let region_name = region.as_str().to_uppercase();
+        info!("{} Master sync poll scheduled: {}", region_name, cron_expr);
+        let syncer = syncer.clone();
+        match Job::new_async(cron_expr.as_str(), move |_uuid, _lock| {
+            let syncer = syncer.clone();
+            let region_name = region_name.clone();
+            Box::pin(async move {
+                if let Err(e) = syncer.sync_once().await {
+                    error!("{} Master sync poll failed: {}", region_name, e);
+                }
+            })
+        }) {
+            Ok(job) => {
+                if let Err(e) = sched.add(job).await {
+                    error!(
+                        "{} Failed to add master sync poll job: {}",
+                        region.as_str().to_uppercase(),
+                        e
+                    );
+                }
+            }
+            Err(e) => {
+                error!(
+                    "{} Invalid cron expression '{}': {}",
+                    region.as_str().to_uppercase(),
+                    cron_expr,
+                    e
+                );
+            }
+        }
+    }
+
     sched.start().await?;
     info!("Scheduler started");
     Ok(sched)

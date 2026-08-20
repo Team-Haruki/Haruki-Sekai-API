@@ -7,6 +7,7 @@ pub mod error;
 pub mod ingest_engine;
 pub mod models;
 pub mod updater;
+pub mod upstream;
 pub mod utils;
 
 use crate::client::SekaiClient;
@@ -91,7 +92,18 @@ impl RequestCoalescer {
 #[derive(Clone)]
 pub struct AppState {
     pub config: Config,
+    /// Local per-region clients (this node's own accounts). Used by the
+    /// updater, image routes, and the internal forwarding endpoint.
     pub clients: HashMap<crate::config::ServerRegion, Arc<SekaiClient>>,
+    /// Per-region multi-upstream routers (local client + remote nodes) that
+    /// the game API proxy handlers dispatch through.
+    pub routers: HashMap<crate::config::ServerRegion, Arc<crate::upstream::RegionRouter>>,
+    /// Per-region master-data syncers (regions with master_sync.source_url),
+    /// triggered by the owner's webhook and the fallback poll.
+    pub syncers: HashMap<crate::config::ServerRegion, Arc<crate::updater::sync::MasterSyncer>>,
+    /// Per-region locks serializing version-file writers (master updater,
+    /// app-hash updater, master syncer). Shared with the scheduler.
+    pub version_locks: HashMap<crate::config::ServerRegion, Arc<tokio::sync::Mutex<()>>>,
     pub db: Option<DatabaseConnection>,
     pub master_db: Option<DatabaseConnection>,
     pub redis: Option<redis::aio::ConnectionManager>,

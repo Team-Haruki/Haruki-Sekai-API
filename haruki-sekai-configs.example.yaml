@@ -28,6 +28,9 @@ backend:
   access_log: "${time} ${ip} ${status} ${method} ${path}\n"
   access_log_path: "./access.log" # output to console if empty
   sekai_user_jwt_signing_key: ""
+  # Shared secret other Haruki nodes must present (Authorization: Bearer ...)
+  # to call this node's /internal/* endpoints. Empty disables them entirely.
+  internal_token: ""
   enable_trust_proxy: true
   trusted_proxies:
     - "127.0.0.0/8"
@@ -140,6 +143,33 @@ servers:
   cn:
     enabled: false
     api_url: ""
+    # Remote Haruki nodes that can serve this region's game API calls (reached
+    # over the internal network, e.g. Tailscale IPs). Targets are tried in
+    # ascending priority order; the local client joins with local_priority
+    # (default 0) and remotes default to 10, so by default local is preferred
+    # and remotes are fallbacks. Give an upstream a lower priority than
+    # local_priority to prefer it (e.g. route to the node nearest the game
+    # server). A region with upstreams but enabled: false is served remote-only.
+    # upstreams:
+    #   - url: "http://100.64.0.2:9999"
+    #     token: "" # must match that node's backend.internal_token
+    #     priority: -1
+    #     name: "shanghai"
+    # local_priority: 0
+    #
+    # Master-data sync between nodes. Each region has one owner node (running
+    # the master updater with its own accounts); other nodes pull from it.
+    # On a pulling node: set source_url/source_token to the owner, and
+    # poll_cron as the fallback check (the owner's webhook is the fast path).
+    # On the owner node: list the pulling peers under notify so they are
+    # webhooked immediately after each master update.
+    # master_sync:
+    #   source_url: "http://100.64.0.2:9999"
+    #   source_token: "" # owner's backend.internal_token
+    #   poll_cron: "0 */5 * * * *"
+    #   notify:
+    #     - url: "http://100.64.0.1:9999"
+    #       token: "" # that peer's backend.internal_token
     require_cookies: false
     headers:
       Host: ""
