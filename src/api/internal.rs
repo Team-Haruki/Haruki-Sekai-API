@@ -153,6 +153,11 @@ pub async fn post_login_probe(
     let Some(session) = client.get_session() else {
         return envelope_response(&error_envelope(&AppError::NoAccountError));
     };
+    // Hold the account's api lock for the whole login: the probe rotates the
+    // one-time session token, so racing an in-flight serving request on the
+    // same account would invalidate that request's token mid-call and force a
+    // relogin retry. Serializing here keeps probe ticks invisible to serving.
+    let _api_guard = session.lock_api().await;
     // Mirror the master updater's own login recovery: a 426 means the version
     // file moved on, so refresh it and retry once.
     let login = match client.login(&session).await {
