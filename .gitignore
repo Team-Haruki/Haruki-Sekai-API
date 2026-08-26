@@ -22,6 +22,14 @@ target
 sshkey
 sshkey.pub
 
+# macOS
+.DS_Store
+
+# .NET build output (tools/nuverse_schema_generator)
+**/obj/
+**/bin/[Dd]ebug/
+**/bin/[Rr]elease/
+
 # Self tested
 test.rs
 test.py
