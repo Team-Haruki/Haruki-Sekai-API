@@ -19,7 +19,7 @@ cd tools/ent_generator && cargo run  # Regenerate schema_info and EntGo schemas
 
 ## Architecture
 
-Haruki Sekai API is a Rust service that proxies encrypted API calls to five regional servers of "Project Sekai: Colorful Stage" for HarukiBot. It handles AES-128-CBC encrypted communication (MessagePack serialization), master data management, and user authentication.
+Haruki Sekai API is a Rust service that proxies encrypted API calls to five regional servers of "Project Sekai: Colorful Stage" for HarukiBot. It handles AES-128-CBC encrypted communication (MessagePack serialization), master data management, and user authentication. Multiple Haruki nodes can form a cluster: game API calls fail over across per-region upstream nodes, and master data syncs from a per-region owner node to its peers (all node-to-node traffic goes through `/internal/*` gated by `backend.internal_token`).
 
 ### Two Server Protocols
 
@@ -30,17 +30,18 @@ Branch on protocol with `ServerRegion::is_cp_server()`.
 
 ### Data Flow (Game API Call)
 
-Request body -> MessagePack -> AES-128-CBC encrypt -> HTTP -> AES decrypt -> MessagePack -> ordered JSON response
+`RegionRouter` picks a target by priority (local client or remote node via `POST /internal/sekai-api`, with circuit breakers) -> Request body -> MessagePack -> AES-128-CBC encrypt -> HTTP -> AES decrypt -> MessagePack -> ordered JSON response
 
 ### Key Modules
 
-- `src/api/` - Axum HTTP layer: routes, handlers (game API proxies), JWT auth middleware, Redis caching
-- `src/client/` - Game server communication: login, encrypted API calls, session management with per-account locking, Nuverse array->dict restoration
+- `src/api/` - Axum HTTP layer: routes, handlers (game API proxies), JWT auth middleware, Redis caching, node-to-node `/internal/*` API (`internal.rs`)
+- `src/client/` - Game server communication: login, encrypted API calls, session management with per-account locking, Nuverse array->dict restoration (`nuverse_schema.rs`, driven by `Data/structures/nuverse_schema_bundle.json`)
+- `src/upstream.rs` - `RegionRouter`: priority-ordered failover across local client and remote Haruki nodes, per-target circuit breakers
 - `src/crypto/` - AES-128-CBC encrypt/decrypt with MessagePack
 - `src/db/` - SeaORM entities, two databases: user DB (`database`) and master data DB (`master_database`)
-- `src/updater/` - Cron jobs for master data version check/download, git push, app hash polling
+- `src/updater/` - Cron jobs for master data version check/download (with local or remote-borrowed accounts), git push, app hash polling; `sync.rs` pulls master bundles from a region's owner node
 - `src/ingest_engine.rs` - Bulk JSON->DB ingestion using `schema_info.json` for column mapping
-- `src/models/` - ~84 auto-generated game data models (do NOT manually edit; regenerate from source data)
+- `src/models/` - ~92 auto-generated game data models (do NOT manually edit; regenerate from source data)
 
 ### Schema System
 
@@ -104,7 +105,7 @@ Rules:
 - No trailing period.
 - Keep the subject at or below roughly 70 characters.
 - **Agent attribution uses the standard Git `Co-authored-by:` trailer in the commit body, not a free-form `Agent:` line.** This makes GitHub render the co-author avatar on the commit page. The trailer must be on its own line, separated from the subject by a blank line, in the form `Co-authored-by: <Display Name> <email>`. Suggested values per agent:
-  - Claude (any 4.x): `Co-authored-by: Claude Opus 4.7 <noreply@anthropic.com>` (substitute the actual model, e.g. `Claude Sonnet 4.6`, `Claude Haiku 4.5`)
+  - Claude: `Co-authored-by: Claude Fable 5 <noreply@anthropic.com>` (substitute the actual model, e.g. `Claude Opus 4.7`, `Claude Sonnet 4.6`, `Claude Haiku 4.5`)
   - Codex: `Co-authored-by: Codex <noreply@openai.com>`
   - Copilot: `Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>`
 
@@ -129,7 +130,7 @@ Use the standardized workflow layout in `.github/workflows`:
 Workflow maintenance rules:
 
 - Keep workflow filenames and top-level names aligned: `CI`, `Release`, `Docker`, and optional package-specific names.
-- Use `actions/checkout@v6`, `actions/setup-go@v6`, `actions/upload-artifact@v7`, `actions/download-artifact@v8`, `softprops/action-gh-release@v3`, and current Docker actions (`setup-buildx@v4`, `login@v4`, `metadata@v6`, `build-push@v7`).
+- Use `actions/checkout@v7`, `actions/upload-artifact@v7`, `actions/download-artifact@v8`, `softprops/action-gh-release@v3`, and current Docker actions (`setup-buildx@v4`, `login@v4`, `metadata@v6`, `build-push@v7`).
 - Keep `permissions` minimal: `contents: read` for CI/Docker build-only work, `contents: write` for release publishing, and `packages: write` only when pushing container images.
 - Use workflow `concurrency` keyed by workflow name and ref, with release jobs using `release-${{ github.ref_name }}` and `cancel-in-progress: false`.
 - Do not reintroduce legacy workflow names such as `rust-ci.yml`, `build.yml`, `release-build.yml`, `docker-build.yml`, or `docker-release.yml` unless a package-specific workflow already exists and is intentionally preserved.

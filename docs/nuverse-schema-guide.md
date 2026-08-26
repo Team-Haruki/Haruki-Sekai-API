@@ -21,11 +21,18 @@ The bundle drives both:
 
 ## Source Of Truth
 
-Schema generation, AVSC format details, and Go/Python/Rust consumption examples are maintained in StructTool:
+The runtime bundle has an in-repo generator: [`tools/nuverse_schema_generator`](../tools/nuverse_schema_generator) (C#, Mono.Cecil). It reads `Assembly-CSharp.dll` from an Il2Cpp DummyDll dump and writes `Data/structures/nuverse_schema_bundle.json`:
+
+```bash
+cd tools/nuverse_schema_generator
+dotnet run -- /path/to/DummyDll ../../Data/structures/nuverse_schema_bundle.json
+```
+
+AVSC format details and Go/Python/Rust consumption examples are maintained in StructTool:
 
 [Team-Haruki/Haruki-Nuverse-StructTool](https://github.com/Team-Haruki/Haruki-Nuverse-StructTool)
 
-Use StructTool `main` for the current generator and parser examples. This repository only keeps the generated runtime assets and the Rust restore integration.
+Use StructTool `main` for the AVSC generator and parser examples. Besides the Rust restore integration, this repository keeps the generated runtime assets and the bundle generator above.
 
 ## Field Naming
 

@@ -8,42 +8,58 @@ Haruki Sekai API is a Rust service that proxies encrypted API calls to regional 
 
 ```
 src/
-  main.rs                  – App bootstrap (tracing, config, server, graceful shutdown)
-  lib.rs                   – Public modules, AppState struct
+  main.rs                  – App bootstrap (config, server, graceful shutdown)
+  logging.rs               – Tracing setup, custom console formatter (main-only module)
+  lib.rs                   – Public modules, AppState struct, RequestCoalescer (single-flight)
   config.rs                – YAML config structs with serde defaults
   error.rs                 – AppError enum (thiserror), HTTP status mapping, IntoResponse
   utils.rs                 – retry_async(), CachedResource<T>
   ingest_engine.rs         – Bulk JSON→DB ingestion using schema_info.json
+  upstream.rs              – RegionRouter: multi-upstream routing with priority-ordered
+                             targets (local client + remote Haruki nodes), circuit breakers
   api/
-    routes.rs              – Axum router (health, image, protected API routes)
+    routes.rs              – Axum router (health, image, protected API, internal routes)
     apis.rs                – Handler functions (profile, system, ranking proxies)
     middleware.rs           – JWT auth middleware with Redis caching
-    image.rs               – MySekai image proxy (CP binary / Nuverse base64)
+    image.rs               – Image/blob proxies (MySekai, housing/profile-card
+                             thumbnails, custom music score) via RegionRouter
+    internal.rs            – Node-to-node /internal/* API (sekai-api relay, login probe,
+                             game byte stream, master version/bundle, update webhook);
+                             gated by backend.internal_token
   client/
     sekai_client.rs        – Core game client (login, encrypted API calls, retry)
     account.rs             – CP and Nuverse account types, SekaiAccount trait
     session.rs             – AccountSession with per-account API locking
     helper.rs              – CookieHelper, VersionHelper, version comparison
     token_utils.rs         – JWT / Nuverse token user ID extraction
-    nuverse.rs             – Array→dict response restoration for Nuverse servers
+    nuverse_schema.rs      – Schema-bundle-driven array→dict restoration for Nuverse servers
   crypto/
     sekai_cryptor.rs       – AES-128-CBC encryption with MessagePack serialization
   db/
     mod.rs                 – init_db, init_master_db, init_redis
     entity/                – SeaORM entities: sekai_users, sekai_user_servers
   updater/
-    scheduler.rs           – Cron jobs: cookie refresh, master update, app hash
+    scheduler.rs           – Cron jobs: cookie refresh, master update (local or
+                             remote-account), app hash, master sync poll
     master.rs              – MasterUpdater: version check, download, git push, DB ingest
+    sync.rs                – MasterSyncer: pull master bundles from an owner node
+                             (webhook-triggered, cron fallback)
     git.rs                 – GitHelper: stage, commit, push via git2
     apphash.rs             – AppHashUpdater: poll file/URL sources for new app hashes
-  models/                  – ~84 auto-generated game data model files
+  models/                  – ~92 auto-generated game data model files
   bin/
     run_ingest.rs          – Standalone CLI for master data ingestion
+    bench_profile.rs       – Per-stage latency benchmark for the profile proxy path
 tools/
   ent_generator/           – Rust tool that reads src/models/ and generates:
                              - schema_info_generated.json (table→column mapping)
                              - ent_schemas/generated/*.go (EntGo schemas with table name annotations)
+  nuverse_schema_generator/ – C# (Mono.Cecil) tool that reads Assembly-CSharp.dll from an
+                             Il2Cpp DummyDll dump and emits Data/structures/nuverse_schema_bundle.json
+docs/
+  nuverse-schema-guide.md  – Nuverse schema assets: layout, field naming, update workflow
 Data/master/               – Regional master data JSON files (jp, en, tw, kr, cn)
+Data/structures/           – Committed Nuverse schema assets (nuverse_schema_bundle.json, *.avsc)
 schema_info.json           – Authoritative DB schema used by ingest engine
 haruki-sekai-configs.example.yaml – Configuration template
 ```
@@ -56,11 +72,30 @@ haruki-sekai-configs.example.yaml – Configuration template
 - Branch with `ServerRegion::is_cp_server()`
 
 ### Data Flow (Game API Call)
-1. Select account session (round-robin)
-2. Serialize request body → MessagePack → AES-128-CBC encrypt
-3. Send HTTP request with session token + configured headers
+1. `RegionRouter` picks a target in ascending priority order (local client at
+   `local_priority`, remote upstreams from `upstreams`), skipping targets with
+   an open circuit breaker
+2. Local target: select account session (round-robin), serialize request body →
+   MessagePack → AES-128-CBC encrypt, send HTTP with session token + headers
+3. Remote target: forward via the peer's `POST /internal/sekai-api` (the peer
+   executes on its local client only, so forwarding cannot loop)
 4. Receive encrypted response → AES decrypt → MessagePack → JSON
 5. Return ordered JSON to API caller
+
+### Multi-Node Topology
+- `backend.internal_token` gates all `/internal/*` node-to-node endpoints
+  (Bearer auth; endpoints answer 404 when the token is unset)
+- Game API failover: per-region `upstreams` list of remote Haruki nodes; a
+  region with upstreams but `enabled: false` (no local accounts) is served
+  remote-only
+- Master sync: each region has one owner node running the master updater; peer
+  nodes configured with `master_sync.source_url` pull the owner's master bundle
+  (`MasterSyncer`), triggered by the owner's `/internal/master-updated` webhook
+  with `poll_cron` as fallback
+- Remote-account master production: a node with `master_remote_source.url` runs
+  the region's master pipeline locally but borrows a peer's accounts for the
+  login probe and (CP) the encrypted master-split fetch, relayed as untouched
+  bytes via `/internal/game-stream`
 
 ### Master Data Pipeline
 1. `MasterUpdater` checks game server for new data version
@@ -195,7 +230,7 @@ Rules:
 - No trailing period.
 - Keep the subject at or below roughly 70 characters.
 - **Agent attribution uses the standard Git `Co-authored-by:` trailer in the commit body, not a free-form `Agent:` line.** This makes GitHub render the co-author avatar on the commit page. The trailer must be on its own line, separated from the subject by a blank line, in the form `Co-authored-by: <Display Name> <email>`. Suggested values per agent:
-  - Claude (any 4.x): `Co-authored-by: Claude Opus 4.7 <noreply@anthropic.com>` (substitute the actual model, e.g. `Claude Sonnet 4.6`, `Claude Haiku 4.5`)
+  - Claude: `Co-authored-by: Claude Fable 5 <noreply@anthropic.com>` (substitute the actual model, e.g. `Claude Opus 4.7`, `Claude Sonnet 4.6`, `Claude Haiku 4.5`)
   - Codex: `Co-authored-by: Codex <noreply@openai.com>`
   - Copilot: `Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>`
 
@@ -220,7 +255,7 @@ Use the standardized workflow layout in `.github/workflows`:
 Workflow maintenance rules:
 
 - Keep workflow filenames and top-level names aligned: `CI`, `Release`, `Docker`, and optional package-specific names.
-- Use `actions/checkout@v6`, `actions/setup-go@v6`, `actions/upload-artifact@v7`, `actions/download-artifact@v8`, `softprops/action-gh-release@v3`, and current Docker actions (`setup-buildx@v4`, `login@v4`, `metadata@v6`, `build-push@v7`).
+- Use `actions/checkout@v7`, `actions/upload-artifact@v7`, `actions/download-artifact@v8`, `softprops/action-gh-release@v3`, and current Docker actions (`setup-buildx@v4`, `login@v4`, `metadata@v6`, `build-push@v7`).
 - Keep `permissions` minimal: `contents: read` for CI/Docker build-only work, `contents: write` for release publishing, and `packages: write` only when pushing container images.
 - Use workflow `concurrency` keyed by workflow name and ref, with release jobs using `release-${{ github.ref_name }}` and `cancel-in-progress: false`.
 - Do not reintroduce legacy workflow names such as `rust-ci.yml`, `build.yml`, `release-build.yml`, `docker-build.yml`, or `docker-release.yml` unless a package-specific workflow already exists and is intentionally preserved.

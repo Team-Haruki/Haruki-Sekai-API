@@ -170,6 +170,17 @@ servers:
     #   notify:
     #     - url: "http://100.64.0.1:9999"
     #       token: "" # that peer's backend.internal_token
+    #
+    # Remote-account master production: run this region's master updater on
+    # this node (download, unpack, ingest, git push all local) while borrowing
+    # a peer node's game accounts for the two steps that need them — the
+    # login-derived version probe and (CP servers) the authenticated
+    # master-split fetch, which the peer relays as an untouched encrypted byte
+    # stream. Use together with enable_master_updater/master_updater_cron on a
+    # node that has no local accounts for this region. Empty url disables it.
+    # master_remote_source:
+    #   url: "http://100.64.0.2:9999"
+    #   token: "" # that node's backend.internal_token
     require_cookies: false
     headers:
       Host: ""
