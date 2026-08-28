@@ -8,7 +8,7 @@ RUN if [ "$VERSION" != "dev" ]; then \
     sed -i "s/^version = \".*\"/version = \"${CLEAN_VERSION}\"/" Cargo.toml; \
     echo "Building version: ${CLEAN_VERSION}"; \
     fi
-RUN cargo build --release
+RUN cargo build --release --locked
 
 FROM alpine:3.24
 RUN apk --no-cache add \
