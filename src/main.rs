@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -7,14 +8,17 @@ use tracing::{error, info, warn};
 use haruki_sekai_api::api::create_router;
 use haruki_sekai_api::client::nuverse_schema::NuverseSchemaStore;
 use haruki_sekai_api::client::SekaiClient;
-use haruki_sekai_api::config::Config;
+use haruki_sekai_api::config::{Config, ServerRegion};
 use haruki_sekai_api::db;
 use haruki_sekai_api::error::AppError;
 use haruki_sekai_api::updater;
+use haruki_sekai_api::upstream::RegionRouter;
 
 use haruki_sekai_api::AppState;
 
 mod logging;
+
+type ClientInitTask = tokio::task::JoinHandle<Result<(ServerRegion, Arc<SekaiClient>), AppError>>;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -73,22 +77,65 @@ async fn main() -> anyhow::Result<()> {
 }
 
 async fn init_app_state(config: Config) -> anyhow::Result<AppState> {
-    use std::collections::HashMap;
-    let mut clients = HashMap::new();
-    let jp_cookie_url = if config.jp_sekai_cookie_url.is_empty() {
-        None
-    } else {
-        Some(config.jp_sekai_cookie_url.clone())
-    };
-    // Resources shared across all regions, built once and handed into each client:
-    // one reqwest client (only the global proxy varies) and one NuverseSchemaStore
-    // per distinct bundle path (Tw/Kr/Cn share the same file, so parse it once).
-    let proxy_opt = if config.proxy.is_empty() {
-        None
-    } else {
-        Some(config.proxy.clone())
-    };
+    let jp_cookie_url = nonempty_string(&config.jp_sekai_cookie_url);
+    let proxy_opt = nonempty_string(&config.proxy);
     let http_client = SekaiClient::build_http_client(proxy_opt.as_deref())?;
+    let schema_cache = load_schema_cache(&config);
+    let clients = initialize_clients(
+        &config,
+        proxy_opt.clone(),
+        jp_cookie_url,
+        http_client,
+        &schema_cache,
+    )
+    .await;
+    let routers = build_routers(&config, &clients)?;
+    let db = if config.database.enabled {
+        Some(db::init_db(&config.database).await?)
+    } else {
+        None
+    };
+    let redis = if config.redis.enabled {
+        Some(db::init_redis(&config.redis).await?)
+    } else {
+        None
+    };
+    let master_db = if config.master_database.enabled {
+        Some(db::init_master_db(&config.master_database).await?)
+    } else {
+        None
+    };
+    let jwt_secret = nonempty_string(&config.backend.sekai_user_jwt_signing_key);
+    let version_locks: HashMap<_, _> = config
+        .servers
+        .keys()
+        .map(|region| (*region, Arc::new(tokio::sync::Mutex::new(()))))
+        .collect();
+    let syncers = haruki_sekai_api::updater::sync::build_syncers(
+        &config,
+        &clients,
+        master_db.clone(),
+        &version_locks,
+    );
+    Ok(AppState {
+        config,
+        clients,
+        routers,
+        syncers,
+        version_locks,
+        db,
+        master_db,
+        redis,
+        jwt_secret,
+        coalescer: Arc::new(haruki_sekai_api::RequestCoalescer::default()),
+    })
+}
+
+fn nonempty_string(value: &str) -> Option<String> {
+    (!value.is_empty()).then(|| value.to_string())
+}
+
+fn load_schema_cache(config: &Config) -> HashMap<String, Arc<NuverseSchemaStore>> {
     let mut schema_cache: HashMap<String, Arc<NuverseSchemaStore>> = HashMap::new();
     for (region, server_config) in &config.servers {
         let path = &server_config.nuverse_schema_bundle_path;
@@ -105,13 +152,22 @@ async fn init_app_state(config: Config) -> anyhow::Result<AppState> {
             }
         }
     }
+    schema_cache
+}
 
+async fn initialize_clients(
+    config: &Config,
+    proxy: Option<String>,
+    jp_cookie_url: Option<String>,
+    http_client: reqwest::Client,
+    schema_cache: &HashMap<String, Arc<NuverseSchemaStore>>,
+) -> HashMap<ServerRegion, Arc<SekaiClient>> {
     let mut init_tasks = Vec::new();
     for (region, server_config) in &config.servers {
         if server_config.enabled {
             let region = *region;
             let server_config = server_config.clone();
-            let proxy = proxy_opt.clone();
+            let proxy = proxy.clone();
             let jp_cookie_url = jp_cookie_url.clone();
             let http_client = http_client.clone();
             let needs_store =
@@ -146,6 +202,13 @@ async fn init_app_state(config: Config) -> anyhow::Result<AppState> {
             }));
         }
     }
+    collect_initialized_clients(init_tasks).await
+}
+
+async fn collect_initialized_clients(
+    init_tasks: Vec<ClientInitTask>,
+) -> HashMap<ServerRegion, Arc<SekaiClient>> {
+    let mut clients = HashMap::new();
     let results = futures::future::join_all(init_tasks).await;
     for result in results {
         match result {
@@ -167,10 +230,13 @@ async fn init_app_state(config: Config) -> anyhow::Result<AppState> {
             }
         }
     }
-    // Per-region routers: the local client (when this node runs accounts for
-    // the region) plus configured remote upstream nodes. A region with
-    // upstreams but no local client is served remote-only, so failed local
-    // init degrades to forwarding instead of dropping the region.
+    clients
+}
+
+fn build_routers(
+    config: &Config,
+    clients: &HashMap<ServerRegion, Arc<SekaiClient>>,
+) -> Result<HashMap<ServerRegion, Arc<RegionRouter>>, AppError> {
     let internal_http = haruki_sekai_api::upstream::build_internal_http_client()?;
     let mut routers = HashMap::new();
     for (region, server_config) in &config.servers {
@@ -187,52 +253,7 @@ async fn init_app_state(config: Config) -> anyhow::Result<AppState> {
             routers.insert(*region, Arc::new(router));
         }
     }
-
-    let db = if config.database.enabled {
-        Some(db::init_db(&config.database).await?)
-    } else {
-        None
-    };
-    let redis = if config.redis.enabled {
-        Some(db::init_redis(&config.redis).await?)
-    } else {
-        None
-    };
-    let master_db = if config.master_database.enabled {
-        Some(db::init_master_db(&config.master_database).await?)
-    } else {
-        None
-    };
-    let jwt_secret = if config.backend.sekai_user_jwt_signing_key.is_empty() {
-        None
-    } else {
-        Some(config.backend.sekai_user_jwt_signing_key.clone())
-    };
-    // One version lock per configured region, shared by the master/app-hash
-    // updaters and the master syncer so version-file writes stay serialized.
-    let version_locks: HashMap<_, _> = config
-        .servers
-        .keys()
-        .map(|region| (*region, Arc::new(tokio::sync::Mutex::new(()))))
-        .collect();
-    let syncers = haruki_sekai_api::updater::sync::build_syncers(
-        &config,
-        &clients,
-        master_db.clone(),
-        &version_locks,
-    );
-    Ok(AppState {
-        config,
-        clients,
-        routers,
-        syncers,
-        version_locks,
-        db,
-        master_db,
-        redis,
-        jwt_secret,
-        coalescer: Arc::new(haruki_sekai_api::RequestCoalescer::default()),
-    })
+    Ok(routers)
 }
 
 async fn shutdown_signal() {

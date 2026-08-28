@@ -168,6 +168,158 @@ fn apply_header_overrides(client: &SekaiClient) {
     }
 }
 
+async fn build_client(region: ServerRegion, region_key: &str) -> anyhow::Result<SekaiClient> {
+    let config = Config::load().context("failed to load config")?;
+    let server_config = config
+        .servers
+        .get(&region)
+        .with_context(|| format!("region '{region_key}' not present in config.servers"))?
+        .clone();
+    let proxy = match std::env::var("BENCH_PROXY") {
+        Ok(proxy) if proxy.is_empty() => None,
+        Ok(proxy) => Some(proxy),
+        Err(_) => (!config.proxy.is_empty()).then(|| config.proxy.clone()),
+    };
+    let jp_cookie_url =
+        (!config.jp_sekai_cookie_url.is_empty()).then(|| config.jp_sekai_cookie_url.clone());
+    println!(
+        "proxy={} api_url={}",
+        proxy.as_deref().unwrap_or("(direct)"),
+        server_config.api_url
+    );
+    let http_client =
+        SekaiClient::build_http_client(proxy.as_deref()).context("build http client")?;
+    let nuverse_store = load_nuverse_store(region, &server_config.nuverse_schema_bundle_path)?;
+    let client = SekaiClient::new(
+        region,
+        server_config,
+        proxy,
+        jp_cookie_url,
+        http_client,
+        nuverse_store,
+    )
+    .await
+    .context("SekaiClient::new failed")?;
+    println!("logging in (init)...");
+    client.init().await.context("client.init() failed")?;
+    if client.get_session().is_none() {
+        return Err(anyhow!(
+            "no usable session after init (login failed?). Check account dir / proxy / version file."
+        ));
+    }
+    Ok(client)
+}
+
+fn load_nuverse_store(
+    region: ServerRegion,
+    path: &str,
+) -> anyhow::Result<
+    Option<std::sync::Arc<haruki_sekai_api::client::nuverse_schema::NuverseSchemaStore>>,
+> {
+    if region.is_cp_server() || path.is_empty() {
+        return Ok(None);
+    }
+    SekaiClient::load_nuverse_schema_store(path)
+        .map(|store| Some(std::sync::Arc::new(store)))
+        .context("load nuverse schema bundle")
+}
+
+async fn backfill_version_headers(client: &SekaiClient) -> anyhow::Result<()> {
+    let session = client.get_session().context("no session")?;
+    let login = match client.login(&session).await {
+        Ok(login) => login,
+        Err(e) => {
+            eprintln!("warning: explicit login for version backfill failed: {e}");
+            return Ok(());
+        }
+    };
+    let uid = login.user_registration.as_ref().map_or_else(
+        || session.user_id().to_string(),
+        |registration| registration.user_id.clone(),
+    );
+    println!(
+        "login ok: bot_uid={} cdnVersion={} dataVersion={} assetVersion={}",
+        redact_uid(&uid),
+        login.cdn_version,
+        login.data_version,
+        login.asset_version
+    );
+    let mut headers = client.headers.lock();
+    if std::env::var("BENCH_DATA_VERSION").is_err() && !login.data_version.is_empty() {
+        headers.insert("X-Data-Version".to_string(), login.data_version);
+    }
+    if std::env::var("BENCH_ASSET_VERSION").is_err() && !login.asset_version.is_empty() {
+        headers.insert("X-Asset-Version".to_string(), login.asset_version);
+    }
+    Ok(())
+}
+
+async fn run_e2e_benchmark(
+    client: &SekaiClient,
+    path: &str,
+    iterations: usize,
+    warmup: usize,
+    delay: Duration,
+) -> anyhow::Result<(Vec<StageRow>, usize)> {
+    let mut network = Vec::new();
+    let mut body_download = Vec::new();
+    let mut cpu = Vec::new();
+    let mut total = Vec::new();
+    let mut errors = 0usize;
+    for iteration in 0..iterations {
+        if iteration > 0 {
+            tokio::time::sleep(delay).await;
+        }
+        let Some(session) = client.get_session() else {
+            break;
+        };
+        let started = Instant::now();
+        let response = match client.get(&session, path, None).await {
+            Ok(response) => response,
+            Err(e) => {
+                errors += 1;
+                eprintln!("e2e call {iteration} failed (network): {e}");
+                continue;
+            }
+        };
+        let network_elapsed = started.elapsed();
+        let body_started = Instant::now();
+        let body = match response.bytes().await {
+            Ok(body) => body,
+            Err(e) => {
+                errors += 1;
+                eprintln!("e2e call {iteration} body read failed: {e}");
+                continue;
+            }
+        };
+        let body_elapsed = body_started.elapsed();
+        let cpu_started = Instant::now();
+        let value = client.cryptor.unpack_value(&body)?;
+        let value = client.restore_nuverse_api_response(path, value)?;
+        let _json = sonic_rs::to_string(&value)?;
+        let cpu_elapsed = cpu_started.elapsed();
+        let total_elapsed = started.elapsed();
+        if iteration >= warmup {
+            network.push(us(network_elapsed));
+            body_download.push(us(body_elapsed));
+            cpu.push(us(cpu_elapsed));
+            total.push(us(total_elapsed));
+        }
+    }
+    Ok((
+        vec![
+            row(
+                "network TTFB (get -> response headers)",
+                &summarize(network),
+            ),
+            row("body download (resp.bytes)", &summarize(body_download)),
+            row("CPU pipeline (full, once)", &summarize(cpu)),
+            row("end-to-end total", &summarize(total)),
+        ],
+        errors,
+    ))
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -194,55 +346,7 @@ async fn main() -> anyhow::Result<()> {
     let redacted = redact_uid(&target_uid);
     println!("== Profile bench :: region={region_key} target={redacted} ==");
 
-    // --- Build the real client, reusing production construction + init ---
-    let config = Config::load().context("failed to load config")?;
-    let server_config = config
-        .servers
-        .get(&region)
-        .with_context(|| format!("region '{region_key}' not present in config.servers"))?
-        .clone();
-
-    let proxy = match std::env::var("BENCH_PROXY") {
-        Ok(p) if p.is_empty() => None,
-        Ok(p) => Some(p),
-        Err(_) => (!config.proxy.is_empty()).then(|| config.proxy.clone()),
-    };
-    let jp_cookie_url =
-        (!config.jp_sekai_cookie_url.is_empty()).then(|| config.jp_sekai_cookie_url.clone());
-    println!(
-        "proxy={} api_url={}",
-        proxy.as_deref().unwrap_or("(direct)"),
-        server_config.api_url
-    );
-
-    let http_client =
-        SekaiClient::build_http_client(proxy.as_deref()).context("build http client")?;
-    let nuverse_store =
-        if region.is_cp_server() || server_config.nuverse_schema_bundle_path.is_empty() {
-            None
-        } else {
-            Some(std::sync::Arc::new(
-                SekaiClient::load_nuverse_schema_store(&server_config.nuverse_schema_bundle_path)
-                    .context("load nuverse schema bundle")?,
-            ))
-        };
-    let client = SekaiClient::new(
-        region,
-        server_config,
-        proxy,
-        jp_cookie_url,
-        http_client,
-        nuverse_store,
-    )
-    .await
-    .context("SekaiClient::new failed")?;
-    println!("logging in (init)...");
-    client.init().await.context("client.init() failed")?;
-    if client.get_session().is_none() {
-        return Err(anyhow!(
-            "no usable session after init (login failed?). Check account dir / proxy / version file."
-        ));
-    }
+    let client = build_client(region, &region_key).await?;
 
     // Optional header overrides so the operator can supply CURRENT version/hash
     // values (the cluster keeps these fresh via the apphash/master updaters; a
@@ -252,30 +356,7 @@ async fn main() -> anyhow::Result<()> {
     // Mirror production's get_game_api 426 handler: backfill data/asset version
     // from a fresh login response (init() logs in but does NOT apply these).
     // An explicit env override (BENCH_DATA_VERSION / BENCH_ASSET_VERSION) wins.
-    let login_session = client.get_session().context("no session")?;
-    match client.login(&login_session).await {
-        Ok(login) => {
-            let uid = login.user_registration.as_ref().map_or_else(
-                || login_session.user_id().to_string(),
-                |r| r.user_id.clone(),
-            );
-            println!(
-                "login ok: bot_uid={} cdnVersion={} dataVersion={} assetVersion={}",
-                redact_uid(&uid),
-                login.cdn_version,
-                login.data_version,
-                login.asset_version
-            );
-            let mut headers = client.headers.lock();
-            if std::env::var("BENCH_DATA_VERSION").is_err() && !login.data_version.is_empty() {
-                headers.insert("X-Data-Version".to_string(), login.data_version);
-            }
-            if std::env::var("BENCH_ASSET_VERSION").is_err() && !login.asset_version.is_empty() {
-                headers.insert("X-Asset-Version".to_string(), login.asset_version);
-            }
-        }
-        Err(e) => eprintln!("warning: explicit login for version backfill failed: {e}"),
-    }
+    backfill_version_headers(&client).await?;
 
     // The path keeps the literal {userId} placeholder, exactly like the handler:
     // call_api_with_timeout substitutes it for the URL, restore_api matches the pattern.
@@ -415,58 +496,8 @@ BENCH_ASSET_VERSION, or run inside the cluster where the updaters keep them fres
 
     // --- End-to-end real calls (network included) ---
     println!("running end-to-end x{e2e_iters} (warmup {warmup})...");
-    let mut s_net = Vec::new();
-    let mut s_body = Vec::new();
-    let mut s_cpu = Vec::new();
-    let mut s_e2e_total = Vec::new();
-    let mut e2e_errors = 0usize;
-    for i in 0..e2e_iters {
-        if i > 0 {
-            tokio::time::sleep(e2e_delay).await;
-        }
-        let record = i >= warmup;
-        let Some(session) = client.get_session() else {
-            break;
-        };
-        let t0 = Instant::now();
-        let resp = match client.get(&session, &path, None).await {
-            Ok(r) => r,
-            Err(e) => {
-                e2e_errors += 1;
-                eprintln!("e2e call {i} failed (network): {e}");
-                continue;
-            }
-        };
-        let d_net = t0.elapsed();
-        let t1 = Instant::now();
-        let body = match resp.bytes().await {
-            Ok(b) => b,
-            Err(e) => {
-                e2e_errors += 1;
-                eprintln!("e2e call {i} body read failed: {e}");
-                continue;
-            }
-        };
-        let d_body = t1.elapsed();
-
-        let t2 = Instant::now();
-        let value = client.cryptor.unpack_value(&body)?;
-        let value = client.restore_nuverse_api_response(&path, value)?;
-        let _json = sonic_rs::to_string(&value)?;
-        let d_cpu = t2.elapsed();
-        let d_total = t0.elapsed();
-
-        if record {
-            s_net.push(us(d_net));
-            s_body.push(us(d_body));
-            s_cpu.push(us(d_cpu));
-            s_e2e_total.push(us(d_total));
-        }
-    }
-    let st_net = summarize(s_net);
-    let st_body = summarize(s_body);
-    let st_cpu = summarize(s_cpu);
-    let st_e2e_total = summarize(s_e2e_total);
+    let (e2e_stages, e2e_errors) =
+        run_e2e_benchmark(&client, &path, e2e_iters, warmup, e2e_delay).await?;
 
     // --- Assemble report ---
     let cpu_stages = vec![
@@ -494,13 +525,6 @@ BENCH_ASSET_VERSION, or run inside the cluster where the updaters keep them fres
             &st_cpu_old,
         ),
     ];
-    let e2e_stages = vec![
-        row("network TTFB (get -> response headers)", &st_net),
-        row("body download (resp.bytes)", &st_body),
-        row("CPU pipeline (full, once)", &st_cpu),
-        row("end-to-end total", &st_e2e_total),
-    ];
-
     let ts = chrono::Local::now();
     let mut md = String::new();
     md.push_str("# Profile API benchmark\n\n");

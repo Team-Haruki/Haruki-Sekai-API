@@ -383,55 +383,9 @@ impl SchemaBuilder {
             .transpose()?
             .unwrap_or_default();
 
-        let union_dispatch = obj
-            .get("msgpack_unions")
-            .and_then(|v| v.as_array())
-            .map(|items| {
-                items
-                    .iter()
-                    .filter_map(|item| {
-                        let key = item.get("key").and_then(|v| v.as_i64())?;
-                        let ty = item.get("type").and_then(|v| v.as_str())?.to_string();
-                        Some(UnionVariant { key, ty })
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        // Precompute array-position -> field-index for int-keyed fields, so the
-        // array-restore hot path is a direct Vec lookup instead of a per-record
-        // HashMap rebuild. Keys are sparse-safe (sized to max key) and last-write
-        // -wins matches the previous HashMap behavior.
-        let max_int_key = fields
-            .iter()
-            .filter_map(|f| match f.key {
-                MsgpackKey::Int(i) if i >= 0 => Some(i),
-                _ => None,
-            })
-            .max();
-        let int_field_index = match max_int_key {
-            Some(max) => {
-                let mut index = vec![None; (max as usize) + 1];
-                for (field_idx, field) in fields.iter().enumerate() {
-                    if let MsgpackKey::Int(i) = field.key {
-                        if i >= 0 {
-                            index[i as usize] = Some(field_idx);
-                        }
-                    }
-                }
-                index
-            }
-            None => Vec::new(),
-        };
-
-        let mut str_field_index = HashMap::with_capacity(fields.len());
-        for (field_idx, field) in fields.iter().enumerate() {
-            let key = match &field.key {
-                MsgpackKey::String(key) => key.clone(),
-                MsgpackKey::Int(idx) => idx.to_string(),
-            };
-            str_field_index.insert(key, field_idx);
-        }
+        let union_dispatch = parse_union_dispatch(obj);
+        let int_field_index = build_int_field_index(&fields);
+        let str_field_index = build_str_field_index(&fields);
 
         let schema = Arc::new(Schema {
             kind: SchemaKind::Record,
@@ -511,6 +465,53 @@ impl SchemaBuilder {
     }
 }
 
+fn parse_union_dispatch(obj: &JsonMap<String, JsonValue>) -> Vec<UnionVariant> {
+    obj.get("msgpack_unions")
+        .and_then(JsonValue::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|item| {
+            let key = item.get("key").and_then(JsonValue::as_i64)?;
+            let ty = item.get("type").and_then(JsonValue::as_str)?.to_string();
+            Some(UnionVariant { key, ty })
+        })
+        .collect()
+}
+
+fn build_int_field_index(fields: &[Field]) -> Vec<Option<usize>> {
+    let Some(max) = fields.iter().filter_map(nonnegative_int_key).max() else {
+        return Vec::new();
+    };
+    let mut index = vec![None; (max as usize) + 1];
+    for (field_idx, field) in fields.iter().enumerate() {
+        if let Some(key) = nonnegative_int_key(field) {
+            index[key as usize] = Some(field_idx);
+        }
+    }
+    index
+}
+
+fn nonnegative_int_key(field: &Field) -> Option<i64> {
+    match field.key {
+        MsgpackKey::Int(key) if key >= 0 => Some(key),
+        _ => None,
+    }
+}
+
+fn build_str_field_index(fields: &[Field]) -> HashMap<String, usize> {
+    fields
+        .iter()
+        .enumerate()
+        .map(|(field_idx, field)| {
+            let key = match &field.key {
+                MsgpackKey::String(key) => key.clone(),
+                MsgpackKey::Int(idx) => idx.to_string(),
+            };
+            (key, field_idx)
+        })
+        .collect()
+}
+
 fn restore_json(
     schema: &Schema,
     value: JsonValue,
@@ -544,50 +545,57 @@ fn restore_record(
         return restore_union_dispatch(schema, value, registry);
     }
     match value {
-        JsonValue::Array(arr) => {
-            let mut out = JsonMap::new();
-            for (idx, item) in arr.into_iter().enumerate() {
-                if item.is_null() {
-                    continue;
-                }
-                if let Some(Some(field_idx)) = schema.int_field_index.get(idx) {
-                    let field = &schema.fields[*field_idx];
-                    out.insert(field.name.clone(), restore_json(&field.ty, item, registry)?);
-                }
-            }
-            Ok(JsonValue::Object(out))
-        }
-        JsonValue::Object(obj) => {
-            // Single by-value pass: schema fields are emitted first (in schema
-            // order, matching the previous per-field lookup), then unknown keys
-            // in their original order.
-            let mut restored_fields: Vec<Option<JsonValue>> = vec![None; schema.fields.len()];
-            let mut leftovers: Vec<(String, JsonValue)> = Vec::new();
-            for (key, item) in obj {
-                match schema.str_field_index.get(&key) {
-                    Some(&field_idx) => {
-                        if !item.is_null() {
-                            let field = &schema.fields[field_idx];
-                            restored_fields[field_idx] =
-                                Some(restore_json(&field.ty, item, registry)?);
-                        }
-                    }
-                    None => leftovers.push((key, item)),
-                }
-            }
-            let mut out = JsonMap::new();
-            for (field_idx, restored) in restored_fields.into_iter().enumerate() {
-                if let Some(restored) = restored {
-                    out.insert(schema.fields[field_idx].name.clone(), restored);
-                }
-            }
-            for (key, item) in leftovers {
-                out.insert(key, item);
-            }
-            Ok(JsonValue::Object(out))
-        }
+        JsonValue::Array(arr) => restore_record_array(schema, arr, registry),
+        JsonValue::Object(obj) => restore_record_object(schema, obj, registry),
         other => Ok(other),
     }
+}
+
+fn restore_record_array(
+    schema: &Schema,
+    items: Vec<JsonValue>,
+    registry: &Registry,
+) -> Result<JsonValue, AppError> {
+    let mut out = JsonMap::new();
+    for (idx, item) in items
+        .into_iter()
+        .enumerate()
+        .filter(|(_, item)| !item.is_null())
+    {
+        let Some(Some(field_idx)) = schema.int_field_index.get(idx) else {
+            continue;
+        };
+        let field = &schema.fields[*field_idx];
+        out.insert(field.name.clone(), restore_json(&field.ty, item, registry)?);
+    }
+    Ok(JsonValue::Object(out))
+}
+
+fn restore_record_object(
+    schema: &Schema,
+    obj: JsonMap<String, JsonValue>,
+    registry: &Registry,
+) -> Result<JsonValue, AppError> {
+    let mut restored_fields: Vec<Option<JsonValue>> = vec![None; schema.fields.len()];
+    let mut leftovers = Vec::new();
+    for (key, item) in obj {
+        let Some(&field_idx) = schema.str_field_index.get(&key) else {
+            leftovers.push((key, item));
+            continue;
+        };
+        if !item.is_null() {
+            let field = &schema.fields[field_idx];
+            restored_fields[field_idx] = Some(restore_json(&field.ty, item, registry)?);
+        }
+    }
+    let mut out = JsonMap::new();
+    for (field_idx, restored) in restored_fields.into_iter().enumerate() {
+        if let Some(restored) = restored {
+            out.insert(schema.fields[field_idx].name.clone(), restored);
+        }
+    }
+    out.extend(leftovers);
+    Ok(JsonValue::Object(out))
 }
 
 fn restore_array(

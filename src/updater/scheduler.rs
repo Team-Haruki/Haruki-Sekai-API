@@ -1,336 +1,337 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
+use sea_orm::DatabaseConnection;
 use tokio_cron_scheduler::{Job, JobScheduler, JobSchedulerError};
 use tracing::{error, info};
 
 use super::apphash::AppHashUpdater;
-use super::master::MasterUpdater;
+use super::master::{MasterUpdater, RemoteMasterSource};
+use super::sync::MasterSyncer;
 use crate::client::SekaiClient;
 use crate::config::{Config, ServerRegion};
 
 const DEFAULT_COOKIE_REFRESH_CRON: &str = "0 0 */20 * * *";
 
+type ClientMap = HashMap<ServerRegion, Arc<SekaiClient>>;
+type VersionLocks = HashMap<ServerRegion, Arc<tokio::sync::Mutex<()>>>;
+type SyncerMap = HashMap<ServerRegion, Arc<MasterSyncer>>;
+
 pub async fn start_scheduler(
-    clients: &std::collections::HashMap<ServerRegion, Arc<SekaiClient>>,
+    clients: &ClientMap,
     config: &Config,
-    db: Option<sea_orm::DatabaseConnection>,
-    version_locks: &std::collections::HashMap<ServerRegion, Arc<tokio::sync::Mutex<()>>>,
-    syncers: &std::collections::HashMap<ServerRegion, Arc<super::sync::MasterSyncer>>,
+    db: Option<DatabaseConnection>,
+    version_locks: &VersionLocks,
+    syncers: &SyncerMap,
 ) -> Result<JobScheduler, JobSchedulerError> {
-    let sched = JobScheduler::new().await?;
-    let git_config = &config.git;
-    let proxy = if config.proxy.is_empty() {
-        None
-    } else {
-        Some(config.proxy.clone())
-    };
-    for (region, client) in clients {
-        if client.config.require_cookies && client.cookie_helper.is_some() {
-            let region_name = region.as_str().to_uppercase();
-            let client_clone = client.clone();
-            info!(
-                "{} Cookie refresh scheduled: {}",
-                region_name, DEFAULT_COOKIE_REFRESH_CRON
-            );
+    let scheduler = JobScheduler::new().await?;
+    let proxy = (!config.proxy.is_empty()).then(|| config.proxy.clone());
+    schedule_cookie_refreshes(&scheduler, clients).await;
+    schedule_local_master_updates(
+        &scheduler,
+        clients,
+        config,
+        db.clone(),
+        version_locks,
+        &proxy,
+    )
+    .await;
+    schedule_apphash_updates(&scheduler, config, version_locks, &proxy).await;
+    schedule_remote_master_updates(&scheduler, clients, config, db, version_locks, &proxy).await;
+    schedule_master_syncs(&scheduler, config, syncers).await;
+    scheduler.start().await?;
+    info!("Scheduler started");
+    Ok(scheduler)
+}
 
-            match Job::new_async(DEFAULT_COOKIE_REFRESH_CRON, move |_uuid, _lock| {
-                let client = client_clone.clone();
-                let region_str = region_name.clone();
-                Box::pin(async move {
-                    info!("{} Running scheduled cookie refresh...", region_str);
-                    match client.refresh_cookies().await {
-                        Ok(()) => {
-                            info!("{} Cookies refreshed successfully", region_str);
-                        }
-                        Err(e) => {
-                            error!("{} Failed to refresh cookies: {}", region_str, e);
-                        }
-                    }
-                })
-            }) {
-                Ok(job) => {
-                    if let Err(e) = sched.add(job).await {
-                        error!(
-                            "{} Failed to add cookie refresh job: {}",
-                            region.as_str().to_uppercase(),
-                            e
-                        );
-                    }
-                }
-                Err(e) => {
-                    error!(
-                        "{} Invalid cron expression '{}': {}",
-                        region.as_str().to_uppercase(),
-                        DEFAULT_COOKIE_REFRESH_CRON,
-                        e
-                    );
-                }
+async fn add_job(
+    scheduler: &JobScheduler,
+    region: ServerRegion,
+    cron: &str,
+    label: &str,
+    job: Result<Job, JobSchedulerError>,
+) {
+    let region = region.as_str().to_uppercase();
+    match job {
+        Ok(job) => {
+            if let Err(e) = scheduler.add(job).await {
+                error!("{} Failed to add {} job: {}", region, label, e);
             }
         }
+        Err(e) => error!("{} Invalid cron expression '{}': {}", region, cron, e),
     }
+}
 
+async fn schedule_cookie_refreshes(scheduler: &JobScheduler, clients: &ClientMap) {
     for (region, client) in clients {
-        let server_config = &client.config;
-        // One lock per region (shared with the master syncer via AppState), so
-        // version-file read-modify-writes never clobber each other.
-        let version_lock = version_locks
-            .get(region)
-            .cloned()
-            .unwrap_or_else(|| Arc::new(tokio::sync::Mutex::new(())));
-        if server_config.enable_master_updater && !server_config.master_updater_cron.is_empty() {
-            let region_name = region.as_str().to_uppercase();
-            let cron_expr = server_config.master_updater_cron.clone();
-            info!("{} Master updater scheduled: {}", region_name, cron_expr);
-            let git_cfg = if git_config.enabled {
-                Some(git_config)
-            } else {
-                None
-            };
-            let updater = Arc::new(MasterUpdater::new(
-                *region,
-                client.clone(),
-                git_cfg,
-                proxy.clone(),
-                config.asset_updater_servers.clone(),
-                db.clone(),
-                version_lock.clone(),
-                None,
-            ));
-            match Job::new_async(cron_expr.as_str(), move |_uuid, _lock| {
-                let updater = updater.clone();
-                Box::pin(async move {
-                    updater.check_update().await;
-                })
-            }) {
-                Ok(job) => {
-                    if let Err(e) = sched.add(job).await {
-                        error!("{} Failed to add master updater job: {}", region_name, e);
-                    }
-                }
-                Err(e) => {
-                    error!(
-                        "{} Invalid cron expression '{}': {}",
-                        region_name, server_config.master_updater_cron, e
-                    );
-                }
-            }
-        }
-    }
-
-    // App-hash updaters never touch a client (they only read apphash sources
-    // and rewrite the version file), so schedule them from config alone: a
-    // node that produces master data with remote accounts (no local client)
-    // must still keep its version files' appVersion/appHash fresh.
-    for (region, server_config) in &config.servers {
-        if !server_config.enable_app_hash_updater
-            || server_config.app_hash_updater_cron.is_empty()
-            || server_config.version_path.is_empty()
-        {
+        if !client.config.require_cookies || client.cookie_helper.is_none() {
             continue;
         }
         let region_name = region.as_str().to_uppercase();
-        let cron_expr = server_config.app_hash_updater_cron.clone();
+        let client = client.clone();
+        info!(
+            "{} Cookie refresh scheduled: {}",
+            region_name, DEFAULT_COOKIE_REFRESH_CRON
+        );
+        let job = Job::new_async(DEFAULT_COOKIE_REFRESH_CRON, move |_uuid, _lock| {
+            let client = client.clone();
+            let region = region_name.clone();
+            Box::pin(async move {
+                info!("{} Running scheduled cookie refresh...", region);
+                match client.refresh_cookies().await {
+                    Ok(()) => info!("{} Cookies refreshed successfully", region),
+                    Err(e) => error!("{} Failed to refresh cookies: {}", region, e),
+                }
+            })
+        });
+        add_job(
+            scheduler,
+            *region,
+            DEFAULT_COOKIE_REFRESH_CRON,
+            "cookie refresh",
+            job,
+        )
+        .await;
+    }
+}
+
+async fn schedule_local_master_updates(
+    scheduler: &JobScheduler,
+    clients: &ClientMap,
+    config: &Config,
+    db: Option<DatabaseConnection>,
+    version_locks: &VersionLocks,
+    proxy: &Option<String>,
+) {
+    for (region, client) in clients {
+        let server = &client.config;
+        if !server.enable_master_updater || server.master_updater_cron.is_empty() {
+            continue;
+        }
+        let cron = server.master_updater_cron.clone();
+        let updater = Arc::new(MasterUpdater::new(
+            *region,
+            client.clone(),
+            config.git.enabled.then_some(&config.git),
+            proxy.clone(),
+            config.asset_updater_servers.clone(),
+            db.clone(),
+            version_lock(version_locks, *region),
+            None,
+        ));
+        info!(
+            "{} Master updater scheduled: {}",
+            region.as_str().to_uppercase(),
+            cron
+        );
+        let job = Job::new_async(cron.as_str(), move |_uuid, _lock| {
+            let updater = updater.clone();
+            Box::pin(async move { updater.check_update().await })
+        });
+        add_job(scheduler, *region, &cron, "master updater", job).await;
+    }
+}
+
+async fn schedule_apphash_updates(
+    scheduler: &JobScheduler,
+    config: &Config,
+    version_locks: &VersionLocks,
+    proxy: &Option<String>,
+) {
+    for (region, server) in &config.servers {
+        if !apphash_enabled(server) {
+            continue;
+        }
         if config.apphash_sources.is_empty() {
             info!(
                 "{} AppHash updater disabled: no sources configured",
-                region_name
+                region.as_str().to_uppercase()
             );
             continue;
         }
-        let version_lock = version_locks
-            .get(region)
-            .cloned()
-            .unwrap_or_else(|| Arc::new(tokio::sync::Mutex::new(())));
-        info!("{} AppHash updater scheduled: {}", region_name, cron_expr);
+        let cron = server.app_hash_updater_cron.clone();
         let updater = Arc::new(AppHashUpdater::new(
             *region,
             config.apphash_sources.clone(),
-            server_config.version_path.clone(),
+            server.version_path.clone(),
             proxy.clone(),
-            version_lock,
+            version_lock(version_locks, *region),
         ));
-        match Job::new_async(cron_expr.as_str(), move |_uuid, _lock| {
+        info!(
+            "{} AppHash updater scheduled: {}",
+            region.as_str().to_uppercase(),
+            cron
+        );
+        let job = Job::new_async(cron.as_str(), move |_uuid, _lock| {
             let updater = updater.clone();
-            Box::pin(async move {
-                updater.check_update().await;
-            })
-        }) {
-            Ok(job) => {
-                if let Err(e) = sched.add(job).await {
-                    error!("{} Failed to add apphash updater job: {}", region_name, e);
-                }
-            }
-            Err(e) => {
-                error!(
-                    "{} Invalid cron expression '{}': {}",
-                    region_name, server_config.app_hash_updater_cron, e
-                );
-            }
-        }
+            Box::pin(async move { updater.check_update().await })
+        });
+        add_job(scheduler, *region, &cron, "apphash updater", job).await;
     }
-    // Remote-source master production: regions whose game accounts live on a
-    // peer node but whose master pipeline (download, decode, ingest, git push)
-    // runs here on a headless client — the peer only serves the login probe
-    // and relays encrypted split bytes. Applies only to regions without a
-    // local client; a region with its own accounts uses the classic updater.
-    let mut headless_http: Option<reqwest::Client> = None;
-    for (region, server_config) in &config.servers {
-        let remote_cfg = &server_config.master_remote_source;
-        if remote_cfg.url.is_empty()
-            || !server_config.enable_master_updater
-            || server_config.master_updater_cron.is_empty()
-            || clients.contains_key(region)
-        {
+}
+
+fn apphash_enabled(server: &crate::config::ServerConfig) -> bool {
+    server.enable_app_hash_updater
+        && !server.app_hash_updater_cron.is_empty()
+        && !server.version_path.is_empty()
+}
+
+async fn schedule_remote_master_updates(
+    scheduler: &JobScheduler,
+    clients: &ClientMap,
+    config: &Config,
+    db: Option<DatabaseConnection>,
+    version_locks: &VersionLocks,
+    proxy: &Option<String>,
+) {
+    let mut shared_http = None;
+    for (region, server) in &config.servers {
+        if !remote_master_enabled(*region, server, clients) {
             continue;
         }
-        let region_name = region.as_str().to_uppercase();
-        let http = match &headless_http {
-            Some(h) => h.clone(),
-            None => match SekaiClient::build_http_client(proxy.as_deref()) {
-                Ok(h) => {
-                    headless_http = Some(h.clone());
-                    h
-                }
-                Err(e) => {
-                    error!(
-                        "{} Failed to build headless http client: {}",
-                        region_name, e
-                    );
-                    continue;
-                }
-            },
+        let Some(client) = build_headless_client(*region, server, proxy, &mut shared_http).await
+        else {
+            continue;
         };
-        let nuverse_store = if !region.is_cp_server()
-            && !server_config.nuverse_schema_bundle_path.is_empty()
-        {
-            match SekaiClient::load_nuverse_schema_store(&server_config.nuverse_schema_bundle_path)
-            {
-                Ok(store) => Some(Arc::new(store)),
-                Err(e) => {
-                    error!("{} Failed to load schema bundle: {}", region_name, e);
-                    continue;
-                }
-            }
-        } else {
-            None
+        let Some(remote) = build_remote_source(*region, &server.master_remote_source) else {
+            continue;
         };
-        let client = match SekaiClient::new(
-            *region,
-            server_config.clone(),
-            proxy.clone(),
-            None,
-            http,
-            nuverse_store,
-        )
-        .await
-        {
-            Ok(c) => Arc::new(c),
-            Err(e) => {
-                error!("{} Failed to build headless client: {}", region_name, e);
-                continue;
-            }
-        };
-        let bulk_http = match crate::upstream::build_bulk_internal_http_client() {
-            Ok(h) => h,
-            Err(e) => {
-                error!("{} Failed to build bulk http client: {}", region_name, e);
-                continue;
-            }
-        };
-        let remote = super::master::RemoteMasterSource::new(*region, remote_cfg, bulk_http);
-        let version_lock = version_locks
-            .get(region)
-            .cloned()
-            .unwrap_or_else(|| Arc::new(tokio::sync::Mutex::new(())));
-        let git_cfg = if git_config.enabled {
-            Some(git_config)
-        } else {
-            None
-        };
-        let cron_expr = server_config.master_updater_cron.clone();
+        let cron = server.master_updater_cron.clone();
         info!(
             "{} Master updater (remote accounts via {}) scheduled: {}",
-            region_name, remote_cfg.url, cron_expr
+            region.as_str().to_uppercase(),
+            server.master_remote_source.url,
+            cron
         );
         let updater = Arc::new(MasterUpdater::new(
             *region,
             client,
-            git_cfg,
+            config.git.enabled.then_some(&config.git),
             proxy.clone(),
             config.asset_updater_servers.clone(),
             db.clone(),
-            version_lock,
+            version_lock(version_locks, *region),
             Some(remote),
         ));
-        match Job::new_async(cron_expr.as_str(), move |_uuid, _lock| {
+        let job = Job::new_async(cron.as_str(), move |_uuid, _lock| {
             let updater = updater.clone();
-            Box::pin(async move {
-                updater.check_update().await;
-            })
-        }) {
-            Ok(job) => {
-                if let Err(e) = sched.add(job).await {
-                    error!(
-                        "{} Failed to add remote master updater job: {}",
-                        region_name, e
-                    );
-                }
-            }
-            Err(e) => {
-                error!(
-                    "{} Invalid cron expression '{}': {}",
-                    region.as_str().to_uppercase(),
-                    cron_expr,
-                    e
-                );
-            }
-        }
+            Box::pin(async move { updater.check_update().await })
+        });
+        add_job(scheduler, *region, &cron, "remote master updater", job).await;
     }
+}
 
-    // Fallback master-sync polling: webhook from the owner is the fast path;
-    // this poll catches missed webhooks and nodes that were down at the time.
-    for (region, syncer) in syncers {
-        let cron_expr = config
-            .servers
-            .get(region)
-            .map(|c| c.master_sync.poll_cron.clone())
-            .unwrap_or_default();
-        if cron_expr.is_empty() {
-            continue;
-        }
-        let region_name = region.as_str().to_uppercase();
-        info!("{} Master sync poll scheduled: {}", region_name, cron_expr);
-        let syncer = syncer.clone();
-        match Job::new_async(cron_expr.as_str(), move |_uuid, _lock| {
-            let syncer = syncer.clone();
-            let region_name = region_name.clone();
-            Box::pin(async move {
-                if let Err(e) = syncer.sync_once().await {
-                    error!("{} Master sync poll failed: {}", region_name, e);
-                }
-            })
-        }) {
-            Ok(job) => {
-                if let Err(e) = sched.add(job).await {
+fn remote_master_enabled(
+    region: ServerRegion,
+    server: &crate::config::ServerConfig,
+    clients: &ClientMap,
+) -> bool {
+    !server.master_remote_source.url.is_empty()
+        && server.enable_master_updater
+        && !server.master_updater_cron.is_empty()
+        && !clients.contains_key(&region)
+}
+
+async fn build_headless_client(
+    region: ServerRegion,
+    server: &crate::config::ServerConfig,
+    proxy: &Option<String>,
+    shared_http: &mut Option<reqwest::Client>,
+) -> Option<Arc<SekaiClient>> {
+    let http = match shared_http.clone() {
+        Some(http) => http,
+        None => {
+            let http = SekaiClient::build_http_client(proxy.as_deref())
+                .map_err(|e| {
                     error!(
-                        "{} Failed to add master sync poll job: {}",
+                        "{} Failed to build headless http client: {}",
                         region.as_str().to_uppercase(),
                         e
                     );
-                }
-            }
-            Err(e) => {
-                error!(
-                    "{} Invalid cron expression '{}': {}",
-                    region.as_str().to_uppercase(),
-                    cron_expr,
-                    e
-                );
-            }
+                })
+                .ok()?;
+            *shared_http = Some(http.clone());
+            http
         }
-    }
+    };
+    let schema = load_headless_schema(region, server)?;
+    SekaiClient::new(region, server.clone(), proxy.clone(), None, http, schema)
+        .await
+        .map(Arc::new)
+        .map_err(|e| {
+            error!(
+                "{} Failed to build headless client: {}",
+                region.as_str().to_uppercase(),
+                e
+            );
+        })
+        .ok()
+}
 
-    sched.start().await?;
-    info!("Scheduler started");
-    Ok(sched)
+fn load_headless_schema(
+    region: ServerRegion,
+    server: &crate::config::ServerConfig,
+) -> Option<Option<Arc<crate::client::nuverse_schema::NuverseSchemaStore>>> {
+    if region.is_cp_server() || server.nuverse_schema_bundle_path.is_empty() {
+        return Some(None);
+    }
+    SekaiClient::load_nuverse_schema_store(&server.nuverse_schema_bundle_path)
+        .map(|schema| Some(Arc::new(schema)))
+        .map_err(|e| {
+            error!(
+                "{} Failed to load schema bundle: {}",
+                region.as_str().to_uppercase(),
+                e
+            );
+        })
+        .ok()
+}
+
+fn build_remote_source(
+    region: ServerRegion,
+    config: &crate::config::MasterRemoteSourceConfig,
+) -> Option<RemoteMasterSource> {
+    crate::upstream::build_bulk_internal_http_client()
+        .map(|http| RemoteMasterSource::new(region, config, http))
+        .map_err(|e| {
+            error!(
+                "{} Failed to build bulk http client: {}",
+                region.as_str().to_uppercase(),
+                e
+            );
+        })
+        .ok()
+}
+
+async fn schedule_master_syncs(scheduler: &JobScheduler, config: &Config, syncers: &SyncerMap) {
+    for (region, syncer) in syncers {
+        let cron = config
+            .servers
+            .get(region)
+            .map(|server| server.master_sync.poll_cron.clone())
+            .unwrap_or_default();
+        if cron.is_empty() {
+            continue;
+        }
+        let region_name = region.as_str().to_uppercase();
+        let syncer = syncer.clone();
+        info!("{} Master sync poll scheduled: {}", region_name, cron);
+        let job = Job::new_async(cron.as_str(), move |_uuid, _lock| {
+            let syncer = syncer.clone();
+            let region = region_name.clone();
+            Box::pin(async move {
+                if let Err(e) = syncer.sync_once().await {
+                    error!("{} Master sync poll failed: {}", region, e);
+                }
+            })
+        });
+        add_job(scheduler, *region, &cron, "master sync poll", job).await;
+    }
+}
+
+fn version_lock(locks: &VersionLocks, region: ServerRegion) -> Arc<tokio::sync::Mutex<()>> {
+    locks
+        .get(&region)
+        .cloned()
+        .unwrap_or_else(|| Arc::new(tokio::sync::Mutex::new(())))
 }

@@ -294,57 +294,7 @@ impl SekaiClient {
         // runtimes alive for the process lifetime).
         let handle = tokio::runtime::Handle::current();
         std::thread::spawn(move || {
-            let _watcher = watcher;
-            info!(
-                "{} File watcher started for {} (polling mode, 5s interval)",
-                region_str, account_dir
-            );
-            let debounce_duration = Duration::from_secs(2);
-            let is_account_change = |kind: &notify::EventKind| {
-                use notify::EventKind;
-                matches!(
-                    kind,
-                    EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
-                )
-            };
-            // Trailing-edge debounce: when a batch of account files is uploaded,
-            // block for the first relevant change, then keep draining events until
-            // the directory has been quiet for `debounce_duration`, and reload ONCE
-            // for the whole batch instead of once per file.
-            loop {
-                match rx.recv() {
-                    Ok(Ok(event)) if is_account_change(&event.kind) => {
-                        info!(
-                            "{} Account file change detected: {:?}",
-                            region_str, event.paths
-                        );
-                    }
-                    Ok(Ok(_)) => continue,
-                    Ok(Err(e)) => {
-                        error!("{} File watcher error: {}", region_str, e);
-                        continue;
-                    }
-                    Err(_) => break, // watcher dropped, channel closed
-                }
-                // Coalesce the rest of the burst until the directory goes quiet.
-                loop {
-                    match rx.recv_timeout(debounce_duration) {
-                        Ok(_) => continue,
-                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => break,
-                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
-                    }
-                }
-                info!(
-                    "{} Account directory settled, reloading accounts once",
-                    region_str
-                );
-                let client_clone = client.clone();
-                handle.block_on(async {
-                    if let Err(e) = client_clone.reload_accounts().await {
-                        error!("{} Failed to reload accounts: {}", region_str, e);
-                    }
-                });
-            }
+            watch_account_directory(watcher, rx, client, handle, region_str, account_dir);
         });
         Ok(())
     }
@@ -425,50 +375,9 @@ impl SekaiClient {
         };
 
         if self.region.is_cp_server() {
-            let json_str = serde_json::to_string(&value).ok()?;
-            match sonic_rs::from_str::<SekaiAccountCP>(&json_str) {
-                Ok(mut acc) => {
-                    if let Ok(user_id) = token_utils::extract_user_id_from_jwt(&acc.credential) {
-                        debug!("{} Extracted user_id from JWT: {}", log_prefix, user_id);
-                        acc.user_id = user_id;
-                    } else if acc.user_id.is_empty() {
-                        warn!(
-                            "{} Failed to extract user_id from JWT and no fallback",
-                            log_prefix
-                        );
-                    }
-                    Some(AccountType::CP(acc))
-                }
-                Err(e) => {
-                    warn!("{} CP unmarshal error: {}", log_prefix, e);
-                    None
-                }
-            }
+            parse_cp_account(value, &log_prefix)
         } else {
-            let json_str = serde_json::to_string(&value).ok()?;
-            match sonic_rs::from_str::<SekaiAccountNuverse>(&json_str) {
-                Ok(mut acc) => {
-                    if let Ok(user_id) =
-                        token_utils::extract_user_id_from_nuverse_token(&acc.access_token)
-                    {
-                        debug!(
-                            "{} Extracted user_id from Nuverse token: {}",
-                            log_prefix, user_id
-                        );
-                        acc.user_id = user_id;
-                    } else if acc.user_id.is_empty() || acc.user_id == "0" {
-                        warn!(
-                            "{} Failed to extract user_id from Nuverse token and no fallback",
-                            log_prefix
-                        );
-                    }
-                    Some(AccountType::Nuverse(acc))
-                }
-                Err(e) => {
-                    warn!("{} Nuverse unmarshal error: {}", log_prefix, e);
-                    None
-                }
-            }
+            parse_nuverse_account(value, &log_prefix)
         }
     }
 
@@ -568,39 +477,21 @@ impl SekaiClient {
         };
         let mut last_error = None;
         for attempt in 1..=max_attempts {
-            let mut req = self.prepare_request(session, method.clone(), &url);
-            if let Some(timeout) = request_timeout {
-                req = req.timeout(timeout);
-            }
-            if let Some(p) = params {
-                req = req.query(p);
-            }
-            if let Some(body) = &packed {
-                req = req.body(body.clone());
-            }
-            match req.send().await {
+            let request = self.build_api_request(
+                session,
+                method.clone(),
+                &url,
+                params,
+                packed.as_ref(),
+                request_timeout,
+            );
+            match request.send().await {
                 Ok(resp) => {
                     self.update_session_token(session, &resp);
                     return Ok(resp);
                 }
                 Err(e) => {
-                    if e.is_timeout() {
-                        warn!(
-                            "{} Account #{} request timed out (attempt {}/{})",
-                            self.region.as_str().to_uppercase(),
-                            user_id,
-                            attempt,
-                            max_attempts
-                        );
-                    } else {
-                        error!(
-                            "{} Request error (attempt {}/{}): {}",
-                            self.region.as_str().to_uppercase(),
-                            attempt,
-                            max_attempts,
-                            e
-                        );
-                    }
+                    self.log_request_error(&e, &user_id, attempt, max_attempts);
                     last_error = Some(AppError::NetworkError(e.to_string()));
                 }
             }
@@ -611,6 +502,49 @@ impl SekaiClient {
         Err(last_error.unwrap_or(AppError::NetworkError(
             "Request failed after retries".to_string(),
         )))
+    }
+
+    fn build_api_request(
+        &self,
+        session: &AccountSession,
+        method: reqwest::Method,
+        url: &str,
+        params: Option<&HashMap<String, String>>,
+        body: Option<&Vec<u8>>,
+        timeout: Option<Duration>,
+    ) -> reqwest::RequestBuilder {
+        let mut request = self.prepare_request(session, method, url);
+        if let Some(timeout) = timeout {
+            request = request.timeout(timeout);
+        }
+        if let Some(params) = params {
+            request = request.query(params);
+        }
+        if let Some(body) = body {
+            request = request.body(body.clone());
+        }
+        request
+    }
+
+    fn log_request_error(
+        &self,
+        error_value: &reqwest::Error,
+        user_id: &str,
+        attempt: usize,
+        max_attempts: usize,
+    ) {
+        let region = self.region.as_str().to_uppercase();
+        if error_value.is_timeout() {
+            warn!(
+                "{} Account #{} request timed out (attempt {}/{})",
+                region, user_id, attempt, max_attempts
+            );
+        } else {
+            error!(
+                "{} Request error (attempt {}/{}): {}",
+                region, attempt, max_attempts, error_value
+            );
+        }
     }
 
     pub async fn get(
@@ -825,103 +759,9 @@ impl SekaiClient {
                     }
                     return Ok((json_value, upstream_status));
                 }
-                Err(AppError::SessionError) => {
-                    warn!(
-                        "{} Session expired, re-logging in...",
-                        self.region.as_str().to_uppercase()
-                    );
-                    // Single-flight: only the first caller to notice the expired
-                    // token re-logs in; others wait on login_lock, then see the
-                    // refreshed token and skip straight to the retry.
-                    let token_before = session.get_session_token();
-                    let guard = session.lock_login().await;
-                    if session.get_session_token() == token_before {
-                        if let Err(e) = self.login(session).await {
-                            error!(
-                                "{} Re-login failed: {}",
-                                self.region.as_str().to_uppercase(),
-                                e
-                            );
-                            return Err(AppError::SessionError);
-                        }
-                    }
-                    drop(guard);
-                    retry_count += 1;
-                    tokio::time::sleep(Duration::from_secs(1)).await;
-                }
-                Err(AppError::CookieExpired) => {
-                    if self.config.require_cookies {
-                        warn!(
-                            "{} Cookies expired, refreshing...",
-                            self.region.as_str().to_uppercase()
-                        );
-                        // Single-flight: cookies are client-wide state, so only the
-                        // first caller refreshes; the rest wait on cookie_lock and
-                        // skip the refresh once they see the cookie already changed.
-                        let cookie_before = self.headers.lock().get("Cookie").cloned();
-                        let guard = self.cookie_lock.lock().await;
-                        if self.headers.lock().get("Cookie").cloned() == cookie_before {
-                            self.refresh_cookies().await?;
-                        }
-                        drop(guard);
-                        retry_count += 1;
-                        tokio::time::sleep(Duration::from_secs(1)).await;
-                    } else {
-                        return Err(AppError::CookieExpired);
-                    }
-                }
-                Err(AppError::UpgradeRequired) => {
-                    warn!(
-                        "{} Server upgrade required, refreshing version and re-logging in...",
-                        self.region.as_str().to_uppercase()
-                    );
-                    // Single-flight per account, same pattern as SessionError: the
-                    // first caller refreshes version headers and re-logs-in; waiters
-                    // see the rotated token and go straight to the retry.
-                    let token_before = session.get_session_token();
-                    let guard = session.lock_login().await;
-                    if session.get_session_token() == token_before {
-                        // First attempt: refresh version from file and try login
-                        self.refresh_version().await?;
-                        match self.login(session).await {
-                            Ok(login_resp) => {
-                                self.update_version_headers_from_login(&login_resp);
-                            }
-                            Err(AppError::UpgradeRequired) => {
-                                warn!(
-                                    "{} Login returned 426, waiting for app version update...",
-                                    self.region.as_str().to_uppercase()
-                                );
-                                tokio::time::sleep(Duration::from_secs(10)).await;
-                                self.refresh_version().await?;
-                                match self.login(session).await {
-                                    Ok(login_resp) => {
-                                        self.update_version_headers_from_login(&login_resp);
-                                    }
-                                    Err(e) => {
-                                        error!(
-                                            "{} Re-login after waiting for app update failed: {}",
-                                            self.region.as_str().to_uppercase(),
-                                            e
-                                        );
-                                        return Err(AppError::UpgradeRequired);
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                error!(
-                                    "{} Re-login after version refresh failed: {}",
-                                    self.region.as_str().to_uppercase(),
-                                    e
-                                );
-                                return Err(AppError::UpgradeRequired);
-                            }
-                        }
-                    }
-                    drop(guard);
-                    retry_count += 1;
-                    tokio::time::sleep(Duration::from_secs(1)).await;
-                }
+                Err(AppError::SessionError) => self.recover_session(session).await?,
+                Err(AppError::CookieExpired) => self.recover_cookies().await?,
+                Err(AppError::UpgradeRequired) => self.recover_upgrade(session).await?,
                 Err(AppError::UnderMaintenance) => {
                     return Err(AppError::UnderMaintenance);
                 }
@@ -929,11 +769,95 @@ impl SekaiClient {
                     return Err(e);
                 }
             }
+            retry_count += 1;
+            tokio::time::sleep(Duration::from_secs(1)).await;
         }
         Err(AppError::Internal(format!(
             "Game API call gave up after {} session recovery attempts",
             max_retries
         )))
+    }
+
+    async fn recover_session(&self, session: &AccountSession) -> Result<(), AppError> {
+        warn!(
+            "{} Session expired, re-logging in...",
+            self.region.as_str().to_uppercase()
+        );
+        let token_before = session.get_session_token();
+        let _guard = session.lock_login().await;
+        if session.get_session_token() != token_before {
+            return Ok(());
+        }
+        self.login(session).await.map(|_| ()).map_err(|e| {
+            error!(
+                "{} Re-login failed: {}",
+                self.region.as_str().to_uppercase(),
+                e
+            );
+            AppError::SessionError
+        })
+    }
+
+    async fn recover_cookies(&self) -> Result<(), AppError> {
+        if !self.config.require_cookies {
+            return Err(AppError::CookieExpired);
+        }
+        warn!(
+            "{} Cookies expired, refreshing...",
+            self.region.as_str().to_uppercase()
+        );
+        let cookie_before = self.headers.lock().get("Cookie").cloned();
+        let _guard = self.cookie_lock.lock().await;
+        if self.headers.lock().get("Cookie").cloned() == cookie_before {
+            self.refresh_cookies().await?;
+        }
+        Ok(())
+    }
+
+    async fn recover_upgrade(&self, session: &AccountSession) -> Result<(), AppError> {
+        warn!(
+            "{} Server upgrade required, refreshing version and re-logging in...",
+            self.region.as_str().to_uppercase()
+        );
+        let token_before = session.get_session_token();
+        let _guard = session.lock_login().await;
+        if session.get_session_token() != token_before {
+            return Ok(());
+        }
+        self.refresh_version().await?;
+        match self.login(session).await {
+            Ok(login) => self.update_version_headers_from_login(&login),
+            Err(AppError::UpgradeRequired) => self.retry_upgrade_login(session).await?,
+            Err(e) => {
+                error!(
+                    "{} Re-login after version refresh failed: {}",
+                    self.region.as_str().to_uppercase(),
+                    e
+                );
+                return Err(AppError::UpgradeRequired);
+            }
+        }
+        Ok(())
+    }
+
+    async fn retry_upgrade_login(&self, session: &AccountSession) -> Result<(), AppError> {
+        warn!(
+            "{} Login returned 426, waiting for app version update...",
+            self.region.as_str().to_uppercase()
+        );
+        tokio::time::sleep(Duration::from_secs(10)).await;
+        self.refresh_version().await?;
+        self.login(session)
+            .await
+            .map(|login| self.update_version_headers_from_login(&login))
+            .map_err(|e| {
+                error!(
+                    "{} Re-login after waiting for app update failed: {}",
+                    self.region.as_str().to_uppercase(),
+                    e
+                );
+                AppError::UpgradeRequired
+            })
     }
 
     #[tracing::instrument(skip(self, body, params), fields(region = ?self.region))]
@@ -981,79 +905,11 @@ impl SekaiClient {
                     Some(timeout),
                 )
                 .await?;
-            let status = resp.status().as_u16();
-            let content_type = resp
-                .headers()
-                .get("content-type")
-                .and_then(|h| h.to_str().ok())
-                .unwrap_or("")
-                .to_lowercase();
-            let is_octet = content_type.contains("octet-stream") || content_type.contains("binary");
-            let recoverable = if is_octet {
-                match SekaiHttpStatus::from_code(status)? {
-                    SekaiHttpStatus::Ok
-                    | SekaiHttpStatus::ClientError
-                    | SekaiHttpStatus::NotFound
-                    | SekaiHttpStatus::Conflict => return Ok(resp),
-                    SekaiHttpStatus::SessionError => AppError::SessionError,
-                    SekaiHttpStatus::GameUpgrade => AppError::UpgradeRequired,
-                    SekaiHttpStatus::UnderMaintenance => return Err(AppError::UnderMaintenance),
-                    _ => {
-                        return Err(AppError::Unknown {
-                            status,
-                            body: String::new(),
-                        })
-                    }
+            match self.classify_raw_response(resp).await? {
+                RawResponse::Success(resp) => return Ok(resp),
+                RawResponse::Recover { error, status } => {
+                    self.recover_raw_response(&session, error, status).await?;
                 }
-            } else if status == 403 && content_type.contains("xml") {
-                AppError::CookieExpired
-            } else if status == 503 {
-                return Err(AppError::UnderMaintenance);
-            } else {
-                let body = resp.bytes().await.unwrap_or_default();
-                return Err(AppError::Unknown {
-                    status,
-                    body: String::from_utf8_lossy(&body).to_string(),
-                });
-            };
-            match recoverable {
-                AppError::SessionError | AppError::UpgradeRequired => {
-                    warn!(
-                        "{} Raw game GET hit {} — recovering session...",
-                        self.region.as_str().to_uppercase(),
-                        status
-                    );
-                    // Same single-flight relogin as drive_game_api: only the
-                    // caller that still sees the old token re-logs-in.
-                    let token_before = session.get_session_token();
-                    let guard = session.lock_login().await;
-                    if session.get_session_token() == token_before {
-                        if matches!(recoverable, AppError::UpgradeRequired) {
-                            self.refresh_version().await?;
-                        }
-                        if let Err(e) = self.login(&session).await {
-                            error!(
-                                "{} Re-login during raw GET failed: {}",
-                                self.region.as_str().to_uppercase(),
-                                e
-                            );
-                            return Err(recoverable);
-                        }
-                    }
-                    drop(guard);
-                }
-                AppError::CookieExpired => {
-                    if !self.config.require_cookies {
-                        return Err(AppError::CookieExpired);
-                    }
-                    let cookie_before = self.headers.lock().get("Cookie").cloned();
-                    let guard = self.cookie_lock.lock().await;
-                    if self.headers.lock().get("Cookie").cloned() == cookie_before {
-                        self.refresh_cookies().await?;
-                    }
-                    drop(guard);
-                }
-                other => return Err(other),
             }
             retry_count += 1;
             tokio::time::sleep(Duration::from_secs(1)).await;
@@ -1062,6 +918,93 @@ impl SekaiClient {
             "Raw game GET gave up after {} recovery attempts",
             max_retries
         )))
+    }
+
+    async fn classify_raw_response(&self, resp: Response) -> Result<RawResponse, AppError> {
+        let status = resp.status().as_u16();
+        let content_type = resp
+            .headers()
+            .get("content-type")
+            .and_then(|header| header.to_str().ok())
+            .unwrap_or_default()
+            .to_lowercase();
+        if content_type.contains("octet-stream") || content_type.contains("binary") {
+            return match SekaiHttpStatus::from_code(status)? {
+                SekaiHttpStatus::Ok
+                | SekaiHttpStatus::ClientError
+                | SekaiHttpStatus::NotFound
+                | SekaiHttpStatus::Conflict => Ok(RawResponse::Success(resp)),
+                SekaiHttpStatus::SessionError => {
+                    Ok(RawResponse::recover(AppError::SessionError, status))
+                }
+                SekaiHttpStatus::GameUpgrade => {
+                    Ok(RawResponse::recover(AppError::UpgradeRequired, status))
+                }
+                SekaiHttpStatus::UnderMaintenance => Err(AppError::UnderMaintenance),
+                _ => Err(AppError::Unknown {
+                    status,
+                    body: String::new(),
+                }),
+            };
+        }
+        if status == 403 && content_type.contains("xml") {
+            return Ok(RawResponse::recover(AppError::CookieExpired, status));
+        }
+        if status == 503 {
+            return Err(AppError::UnderMaintenance);
+        }
+        let body = resp.bytes().await.unwrap_or_default();
+        Err(AppError::Unknown {
+            status,
+            body: String::from_utf8_lossy(&body).to_string(),
+        })
+    }
+
+    async fn recover_raw_response(
+        &self,
+        session: &AccountSession,
+        error_value: AppError,
+        status: u16,
+    ) -> Result<(), AppError> {
+        match error_value {
+            AppError::SessionError => self.recover_raw_session(session, false, status).await,
+            AppError::UpgradeRequired => self.recover_raw_session(session, true, status).await,
+            AppError::CookieExpired => self.recover_cookies().await,
+            other => Err(other),
+        }
+    }
+
+    async fn recover_raw_session(
+        &self,
+        session: &AccountSession,
+        refresh_version: bool,
+        status: u16,
+    ) -> Result<(), AppError> {
+        warn!(
+            "{} Raw game GET hit {} — recovering session...",
+            self.region.as_str().to_uppercase(),
+            status
+        );
+        let token_before = session.get_session_token();
+        let _guard = session.lock_login().await;
+        if session.get_session_token() != token_before {
+            return Ok(());
+        }
+        if refresh_version {
+            self.refresh_version().await?;
+        }
+        self.login(session).await.map(|_| ()).map_err(|e| {
+            error!(
+                "{} Re-login during raw GET failed: {}",
+                self.region.as_str().to_uppercase(),
+                e
+            );
+            if refresh_version {
+                AppError::UpgradeRequired
+            } else {
+                AppError::SessionError
+            }
+        })
     }
 
     async fn get_cp_image(&self, relative_path: &str) -> Result<Vec<u8>, AppError> {
@@ -1145,6 +1088,129 @@ impl SekaiClient {
             .map_err(|e| AppError::ParseError(format!("failed to decode base64: {}", e)))?;
         Ok(bytes)
     }
+}
+
+enum RawResponse {
+    Success(Response),
+    Recover { error: AppError, status: u16 },
+}
+
+impl RawResponse {
+    fn recover(error: AppError, status: u16) -> Self {
+        Self::Recover { error, status }
+    }
+}
+
+fn watch_account_directory(
+    _watcher: notify::PollWatcher,
+    events: std::sync::mpsc::Receiver<notify::Result<notify::Event>>,
+    client: Arc<SekaiClient>,
+    handle: tokio::runtime::Handle,
+    region: String,
+    account_dir: String,
+) {
+    info!(
+        "{} File watcher started for {} (polling mode, 5s interval)",
+        region, account_dir
+    );
+    while wait_for_account_change(&events, &region) {
+        if !wait_for_quiet_directory(&events, Duration::from_secs(2)) {
+            return;
+        }
+        info!(
+            "{} Account directory settled, reloading accounts once",
+            region
+        );
+        let client = client.clone();
+        handle.block_on(async {
+            if let Err(e) = client.reload_accounts().await {
+                error!("{} Failed to reload accounts: {}", region, e);
+            }
+        });
+    }
+}
+
+fn wait_for_account_change(
+    events: &std::sync::mpsc::Receiver<notify::Result<notify::Event>>,
+    region: &str,
+) -> bool {
+    loop {
+        match events.recv() {
+            Ok(Ok(event)) if is_account_change(&event.kind) => {
+                info!("{} Account file change detected: {:?}", region, event.paths);
+                return true;
+            }
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => error!("{} File watcher error: {}", region, e),
+            Err(_) => return false,
+        }
+    }
+}
+
+fn is_account_change(kind: &notify::EventKind) -> bool {
+    use notify::EventKind;
+    matches!(
+        kind,
+        EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
+    )
+}
+
+fn wait_for_quiet_directory(
+    events: &std::sync::mpsc::Receiver<notify::Result<notify::Event>>,
+    debounce: Duration,
+) -> bool {
+    loop {
+        match events.recv_timeout(debounce) {
+            Ok(_) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => return true,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return false,
+        }
+    }
+}
+
+fn parse_cp_account(value: JsonValue, log_prefix: &str) -> Option<AccountType> {
+    let json = serde_json::to_string(&value).ok()?;
+    let mut account = match sonic_rs::from_str::<SekaiAccountCP>(&json) {
+        Ok(account) => account,
+        Err(e) => {
+            warn!("{} CP unmarshal error: {}", log_prefix, e);
+            return None;
+        }
+    };
+    if let Ok(user_id) = token_utils::extract_user_id_from_jwt(&account.credential) {
+        debug!("{} Extracted user_id from JWT: {}", log_prefix, user_id);
+        account.user_id = user_id;
+    } else if account.user_id.is_empty() {
+        warn!(
+            "{} Failed to extract user_id from JWT and no fallback",
+            log_prefix
+        );
+    }
+    Some(AccountType::CP(account))
+}
+
+fn parse_nuverse_account(value: JsonValue, log_prefix: &str) -> Option<AccountType> {
+    let json = serde_json::to_string(&value).ok()?;
+    let mut account = match sonic_rs::from_str::<SekaiAccountNuverse>(&json) {
+        Ok(account) => account,
+        Err(e) => {
+            warn!("{} Nuverse unmarshal error: {}", log_prefix, e);
+            return None;
+        }
+    };
+    if let Ok(user_id) = token_utils::extract_user_id_from_nuverse_token(&account.access_token) {
+        debug!(
+            "{} Extracted user_id from Nuverse token: {}",
+            log_prefix, user_id
+        );
+        account.user_id = user_id;
+    } else if account.user_id.is_empty() || account.user_id == "0" {
+        warn!(
+            "{} Failed to extract user_id from Nuverse token and no fallback",
+            log_prefix
+        );
+    }
+    Some(AccountType::Nuverse(account))
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]

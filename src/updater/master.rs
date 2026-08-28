@@ -9,7 +9,7 @@ use tracing::{error, info, warn};
 
 use super::git::GitHelper;
 use crate::client::helper::{compare_version, effective_app_version, VersionInfo};
-use crate::client::{LoginResponse, SekaiClient};
+use crate::client::{AccountSession, LoginResponse, SekaiClient};
 use crate::config::{AssetUpdaterInfo, GitConfig, MasterRemoteSourceConfig, ServerRegion};
 use crate::error::AppError;
 use crate::upstream::{
@@ -221,88 +221,11 @@ impl MasterUpdater {
                 return;
             }
         };
-        let (session, login_response) = if let Some(ref remote) = self.remote_source {
-            match remote.probe().await {
-                Ok(r) => (None, r),
-                Err(e) => {
-                    error!(
-                        "{} Remote login probe failed: {}",
-                        self.region.as_str().to_uppercase(),
-                        e
-                    );
-                    return;
-                }
-            }
-        } else {
-            let session = match self.client.get_session() {
-                Some(c) => c,
-                None => {
-                    error!(
-                        "{} No session available",
-                        self.region.as_str().to_uppercase()
-                    );
-                    return;
-                }
-            };
-            let login_response = match self.client.login(&session).await {
-                Ok(r) => r,
-                Err(crate::error::AppError::UpgradeRequired) => {
-                    warn!(
-                        "{} Server upgrade required during check_update login, refreshing version...",
-                        self.region.as_str().to_uppercase()
-                    );
-                    if let Err(e) = self.client.refresh_version().await {
-                        error!(
-                            "{} Failed to refresh version: {}",
-                            self.region.as_str().to_uppercase(),
-                            e
-                        );
-                        return;
-                    }
-                    match self.client.login(&session).await {
-                        Ok(r) => r,
-                        Err(e) => {
-                            error!(
-                                "{} Failed to login after version refresh: {}",
-                                self.region.as_str().to_uppercase(),
-                                e
-                            );
-                            return;
-                        }
-                    }
-                }
-                Err(e) => {
-                    error!(
-                        "{} Failed to login: {}",
-                        self.region.as_str().to_uppercase(),
-                        e
-                    );
-                    return;
-                }
-            };
-            (Some(session), login_response)
+        let Some((session, login_response)) = self.load_login_context().await else {
+            return;
         };
-        let (need_master_update, need_asset_update, need_version_save) = if self
-            .region
-            .is_cp_server()
-        {
-            let (master, asset) = self.check_cp_versions(&login_response, &current_version);
-            (master, asset, master || asset)
-        } else {
-            if login_response.data_version.trim().is_empty()
-                || login_response.asset_version.trim().is_empty()
-                || login_response.cdn_version <= 0
-            {
-                warn!(
-                        "{} Ignoring incomplete Nuverse version metadata: dataVersion_present={}, assetVersion_present={}, cdnVersion={}",
-                        self.region.as_str().to_uppercase(),
-                        !login_response.data_version.trim().is_empty(),
-                        !login_response.asset_version.trim().is_empty(),
-                        login_response.cdn_version
-                    );
-            }
-            check_nuverse_versions(&login_response, &current_version)
-        };
+        let (need_master_update, need_asset_update, need_version_save) =
+            self.required_updates(&login_response, &current_version);
         if need_asset_update {
             self.call_all_asset_updaters(&login_response.asset_version, &login_response.asset_hash)
                 .await;
@@ -318,21 +241,7 @@ impl MasterUpdater {
             );
         }
         if need_master_update || retry_ingest {
-            if !need_master_update {
-                // retry path: version unchanged, just re-download + re-ingest
-            } else if self.region.is_cp_server() {
-                info!(
-                    "{} New master data version: {}",
-                    self.region.as_str().to_uppercase(),
-                    login_response.data_version
-                );
-            } else {
-                info!(
-                    "{} New master data version (cdnVersion: {})",
-                    self.region.as_str().to_uppercase(),
-                    login_response.cdn_version
-                );
-            }
+            self.log_master_update(&login_response, need_master_update);
             if let Err(e) = self
                 .update_master_data(session.as_deref(), &login_response)
                 .await
@@ -346,55 +255,165 @@ impl MasterUpdater {
             }
         }
         if need_version_save {
-            let new_version = VersionInfo {
-                app_version: current_version.app_version,
-                app_hash: current_version.app_hash,
-                data_version: login_response.data_version.clone(),
-                asset_version: login_response.asset_version.clone(),
-                asset_hash: login_response.asset_hash.clone(),
-                cdn_version: login_response.cdn_version,
-            };
-            // save_version returns the merged on-disk state so a concurrent
-            // app-hash update that landed mid-download is preserved in memory too.
-            let merged_version = match self.save_version(&new_version).await {
-                Ok(v) => v,
-                Err(e) => {
-                    error!(
-                        "{} Failed to save version file: {}",
-                        self.region.as_str().to_uppercase(),
-                        e
-                    );
-                    return;
-                }
-            };
-            let data_version = merged_version.data_version.clone();
-            let notify_data_version = data_version.clone();
-            self.client.version_helper.update(merged_version);
-            if let Some(ref git_helper) = self.git_helper {
-                // git shells out via std::process and the push is a network call;
-                // run it on a blocking thread so it never stalls a tokio worker.
-                let git_helper = git_helper.clone();
-                let master_dir = self.client.config.master_dir.clone();
-                let region_upper = self.region.as_str().to_uppercase();
-                let push = tokio::task::spawn_blocking(move || {
-                    git_helper.push_changes(&master_dir, &data_version)
-                })
-                .await;
-                match push {
-                    Ok(Ok(true)) => info!("{} Git pushed changes successfully", region_upper),
-                    Ok(Ok(false)) => {}
-                    Ok(Err(e)) => error!("{} Git push failed: {}", region_upper, e),
-                    Err(e) => error!("{} Git push task failed: {}", region_upper, e),
-                }
-            }
-            if need_master_update {
-                self.notify_sync_peers(&notify_data_version).await;
+            if let Err(e) = self
+                .save_publish_and_notify(current_version, &login_response, need_master_update)
+                .await
+            {
+                error!(
+                    "{} Failed to save version file: {}",
+                    self.region.as_str().to_uppercase(),
+                    e
+                );
+                return;
             }
         }
         info!(
             "{} Master data check complete",
             self.region.as_str().to_uppercase()
         );
+    }
+
+    async fn load_login_context(&self) -> Option<(Option<Arc<AccountSession>>, LoginResponse)> {
+        if let Some(remote) = &self.remote_source {
+            return match remote.probe().await {
+                Ok(response) => Some((None, response)),
+                Err(e) => {
+                    error!(
+                        "{} Remote login probe failed: {}",
+                        self.region.as_str().to_uppercase(),
+                        e
+                    );
+                    None
+                }
+            };
+        }
+        let session = self.client.get_session().or_else(|| {
+            error!(
+                "{} No session available",
+                self.region.as_str().to_uppercase()
+            );
+            None
+        })?;
+        self.login_with_version_refresh(&session)
+            .await
+            .map(|response| (Some(session), response))
+    }
+
+    async fn login_with_version_refresh(&self, session: &AccountSession) -> Option<LoginResponse> {
+        match self.client.login(session).await {
+            Ok(response) => Some(response),
+            Err(AppError::UpgradeRequired) => {
+                warn!(
+                    "{} Server upgrade required during check_update login, refreshing version...",
+                    self.region.as_str().to_uppercase()
+                );
+                if let Err(e) = self.client.refresh_version().await {
+                    error!(
+                        "{} Failed to refresh version: {}",
+                        self.region.as_str().to_uppercase(),
+                        e
+                    );
+                    return None;
+                }
+                self.client
+                    .login(session)
+                    .await
+                    .map_err(|e| {
+                        error!(
+                            "{} Failed to login after version refresh: {}",
+                            self.region.as_str().to_uppercase(),
+                            e
+                        );
+                    })
+                    .ok()
+            }
+            Err(e) => {
+                error!(
+                    "{} Failed to login: {}",
+                    self.region.as_str().to_uppercase(),
+                    e
+                );
+                None
+            }
+        }
+    }
+
+    fn required_updates(&self, login: &LoginResponse, current: &VersionInfo) -> (bool, bool, bool) {
+        if self.region.is_cp_server() {
+            let (master, asset) = self.check_cp_versions(login, current);
+            return (master, asset, master || asset);
+        }
+        if login.data_version.trim().is_empty()
+            || login.asset_version.trim().is_empty()
+            || login.cdn_version <= 0
+        {
+            warn!(
+                "{} Ignoring incomplete Nuverse version metadata: dataVersion_present={}, assetVersion_present={}, cdnVersion={}",
+                self.region.as_str().to_uppercase(),
+                !login.data_version.trim().is_empty(),
+                !login.asset_version.trim().is_empty(),
+                login.cdn_version
+            );
+        }
+        check_nuverse_versions(login, current)
+    }
+
+    fn log_master_update(&self, login: &LoginResponse, is_new_version: bool) {
+        if !is_new_version {
+            return;
+        }
+        let region = self.region.as_str().to_uppercase();
+        if self.region.is_cp_server() {
+            info!("{} New master data version: {}", region, login.data_version);
+        } else {
+            info!(
+                "{} New master data version (cdnVersion: {})",
+                region, login.cdn_version
+            );
+        }
+    }
+
+    async fn save_publish_and_notify(
+        &self,
+        current: VersionInfo,
+        login: &LoginResponse,
+        notify_peers: bool,
+    ) -> Result<(), AppError> {
+        let new_version = VersionInfo {
+            app_version: current.app_version,
+            app_hash: current.app_hash,
+            data_version: login.data_version.clone(),
+            asset_version: login.asset_version.clone(),
+            asset_hash: login.asset_hash.clone(),
+            cdn_version: login.cdn_version,
+        };
+        let merged = self.save_version(&new_version).await?;
+        let data_version = merged.data_version.clone();
+        self.client.version_helper.update(merged);
+        self.push_master_changes(&data_version).await;
+        if notify_peers {
+            self.notify_sync_peers(&data_version).await;
+        }
+        Ok(())
+    }
+
+    async fn push_master_changes(&self, data_version: &str) {
+        let Some(git_helper) = self.git_helper.clone() else {
+            return;
+        };
+        let master_dir = self.client.config.master_dir.clone();
+        let data_version = data_version.to_string();
+        let region = self.region.as_str().to_uppercase();
+        let push = tokio::task::spawn_blocking(move || {
+            git_helper.push_changes(&master_dir, &data_version)
+        })
+        .await;
+        match push {
+            Ok(Ok(true)) => info!("{} Git pushed changes successfully", region),
+            Ok(Ok(false)) => {}
+            Ok(Err(e)) => error!("{} Git push failed: {}", region, e),
+            Err(e) => error!("{} Git push task failed: {}", region, e),
+        }
     }
 
     fn check_cp_versions(
@@ -539,7 +558,22 @@ treating difference as an update",
         );
         let master_dir = &self.client.config.master_dir;
         tokio::fs::create_dir_all(master_dir).await?;
+        self.download_master_files(session, login, master_dir)
+            .await?;
+        self.ingest_master_files(master_dir).await;
+        info!(
+            "{} Master data updated",
+            self.region.as_str().to_uppercase()
+        );
+        Ok(())
+    }
 
+    async fn download_master_files(
+        &self,
+        session: Option<&AccountSession>,
+        login: &LoginResponse,
+        master_dir: &str,
+    ) -> Result<(), AppError> {
         if self.region.is_cp_server() {
             let paths: Vec<String> = login
                 .suite_master_split_path
@@ -572,64 +606,55 @@ treating difference as an update",
             let restored = self.download_nuverse_master(&url).await?;
             self.save_master_files(&restored, master_dir).await?;
         }
-
-        // Master payloads may omit unchanged or optional tables. An absent key
-        // is therefore not a deletion marker: preserve existing files unless a
-        // later payload explicitly overwrites them.
-
-        // Ingest into the DB synchronously (awaited so failures are visible and
-        // engine-init errors are caught; CPU parsing is offloaded via
-        // spawn_blocking inside the engine, so this does not starve the runtime).
-        // It is BEST-EFFORT: a DB/ingest failure is logged loudly but must NOT
-        // block the caller, because the version file and the git master-data
-        // mirror track the downloaded files (already valid on disk) rather than DB
-        // health. Coupling the mirror to ingest health would let one malformed
-        // table freeze the mirror and the version forever (perpetual re-download).
-        if let Some(db) = self.db.clone() {
-            let region_upper = self.region.as_str().to_uppercase();
-            info!(
-                "{} Starting database ingestion for new master data...",
-                region_upper
-            );
-            let ingest_ok = match crate::ingest_engine::IngestionEngine::new(db).await {
-                Ok(engine) => {
-                    let region_str = self.region.as_str().to_lowercase();
-                    match engine.ingest_master_data(master_dir, &region_str).await {
-                        Ok(()) => {
-                            info!(
-                                "{} Master Data successfully ingested into database",
-                                region_upper
-                            );
-                            true
-                        }
-                        Err(e) => {
-                            error!(
-                                "{} Master Data DB ingestion failed (files saved; git mirror and \
-version unaffected; will retry on the next cron tick): {e:#}",
-                                region_upper
-                            );
-                            false
-                        }
-                    }
-                }
-                Err(e) => {
-                    error!(
-                        "{} Failed to initialize ingestion engine (skipping DB ingest; will \
-retry on the next cron tick): {e:#}",
-                        region_upper
-                    );
-                    false
-                }
-            };
-            self.ingest_failed
-                .store(!ingest_ok, std::sync::atomic::Ordering::Relaxed);
-        }
-
-        info!(
-            "{} Master data updated",
-            self.region.as_str().to_uppercase()
-        );
         Ok(())
+    }
+
+    async fn ingest_master_files(&self, master_dir: &str) {
+        let Some(db) = self.db.clone() else {
+            return;
+        };
+        let region = self.region.as_str().to_uppercase();
+        info!(
+            "{} Starting database ingestion for new master data...",
+            region
+        );
+        let ingest_ok = match crate::ingest_engine::IngestionEngine::new(db).await {
+            Ok(engine) => self.run_ingestion(&engine, master_dir, &region).await,
+            Err(e) => {
+                error!(
+                    "{} Failed to initialize ingestion engine (skipping DB ingest; will retry on the next cron tick): {e:#}",
+                    region
+                );
+                false
+            }
+        };
+        self.ingest_failed
+            .store(!ingest_ok, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    async fn run_ingestion(
+        &self,
+        engine: &crate::ingest_engine::IngestionEngine,
+        master_dir: &str,
+        region_upper: &str,
+    ) -> bool {
+        let region = self.region.as_str().to_lowercase();
+        match engine.ingest_master_data(master_dir, &region).await {
+            Ok(()) => {
+                info!(
+                    "{} Master Data successfully ingested into database",
+                    region_upper
+                );
+                true
+            }
+            Err(e) => {
+                error!(
+                    "{} Master Data DB ingestion failed (files saved; git mirror and version unaffected; will retry on the next cron tick): {e:#}",
+                    region_upper
+                );
+                false
+            }
+        }
     }
 
     /// Download and restore the Nuverse master blob with a bounded retry, mirroring

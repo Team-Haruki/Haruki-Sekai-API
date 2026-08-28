@@ -59,46 +59,8 @@ impl AppHashUpdater {
         };
         for source in &self.sources {
             match self.fetch_from_source(source).await {
-                Ok(Some(mut new_info)) => {
-                    let advertised_app_version = new_info.app_version.clone();
-                    new_info.app_version = if new_info.app_version.trim().is_empty() {
-                        effective_app_version(self.region, &current.app_version)
-                    } else {
-                        effective_app_version(self.region, &new_info.app_version)
-                    };
-                    if new_info.app_hash.trim().is_empty() {
-                        new_info.app_hash = current.app_hash.clone();
-                    }
-                    if new_info.app_version != current.app_version
-                        || new_info.app_hash != current.app_hash
-                    {
-                        if advertised_app_version == new_info.app_version {
-                            info!(
-                                "{} Found new app version: {} (hash: {})",
-                                self.region.as_str().to_uppercase(),
-                                new_info.app_version,
-                                // chars(), not byte slicing: the hash is
-                                // network-supplied and panic = "abort" in release.
-                                new_info.app_hash.chars().take(16).collect::<String>()
-                            );
-                        } else {
-                            info!(
-                                "{} Found new app version: {} (effective: {}, hash: {})",
-                                self.region.as_str().to_uppercase(),
-                                advertised_app_version,
-                                new_info.app_version,
-                                new_info.app_hash.chars().take(16).collect::<String>()
-                            );
-                        }
-
-                        if let Err(e) = self.update_version(&new_info).await {
-                            error!(
-                                "{} Failed to update version: {}",
-                                self.region.as_str().to_uppercase(),
-                                e
-                            );
-                        }
-                    }
+                Ok(Some(new_info)) => {
+                    self.apply_candidate(&current, new_info).await;
                     break;
                 }
                 Ok(None) => continue,
@@ -116,6 +78,46 @@ impl AppHashUpdater {
             "{} App hash check complete",
             self.region.as_str().to_uppercase()
         );
+    }
+
+    async fn apply_candidate(&self, current: &AppInfo, mut candidate: AppInfo) {
+        let advertised_app_version = candidate.app_version.clone();
+        let source_version = if candidate.app_version.trim().is_empty() {
+            &current.app_version
+        } else {
+            &candidate.app_version
+        };
+        candidate.app_version = effective_app_version(self.region, source_version);
+        if candidate.app_hash.trim().is_empty() {
+            candidate.app_hash = current.app_hash.clone();
+        }
+        if candidate.app_version == current.app_version && candidate.app_hash == current.app_hash {
+            return;
+        }
+        self.log_candidate(&advertised_app_version, &candidate);
+        if let Err(e) = self.update_version(&candidate).await {
+            error!(
+                "{} Failed to update version: {}",
+                self.region.as_str().to_uppercase(),
+                e
+            );
+        }
+    }
+
+    fn log_candidate(&self, advertised_app_version: &str, candidate: &AppInfo) {
+        let hash_prefix = candidate.app_hash.chars().take(16).collect::<String>();
+        let region = self.region.as_str().to_uppercase();
+        if advertised_app_version == candidate.app_version {
+            info!(
+                "{} Found new app version: {} (hash: {})",
+                region, candidate.app_version, hash_prefix
+            );
+        } else {
+            info!(
+                "{} Found new app version: {} (effective: {}, hash: {})",
+                region, advertised_app_version, candidate.app_version, hash_prefix
+            );
+        }
     }
 
     async fn load_current_version(&self) -> Result<AppInfo, AppError> {
