@@ -236,7 +236,11 @@ fn error_response(status: StatusCode, message: &str) -> Response {
 
 #[cfg(test)]
 mod tests {
-    use super::extract_server_from_path;
+    use axum::body::to_bytes;
+    use axum::http::{HeaderMap, HeaderValue};
+    use jsonwebtoken::{encode, EncodingKey, Header};
+
+    use super::*;
 
     #[test]
     fn extract_server_uses_segment_after_api_prefix() {
@@ -257,5 +261,100 @@ mod tests {
     #[test]
     fn extract_server_uses_segment_after_image_prefix() {
         assert_eq!(extract_server_from_path("/image/tw/mysekai/1/2"), "tw");
+    }
+
+    #[test]
+    fn token_header_is_required_and_must_be_text() {
+        let headers = HeaderMap::new();
+        assert_eq!(
+            extract_token(&headers).unwrap_err(),
+            (StatusCode::UNAUTHORIZED, "Missing token".to_string())
+        );
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-haruki-sekai-token",
+            HeaderValue::from_bytes(&[0xff]).unwrap(),
+        );
+        assert_eq!(
+            extract_token(&headers).unwrap_err(),
+            (StatusCode::UNAUTHORIZED, "Invalid token header".to_string())
+        );
+
+        headers.insert(
+            "x-haruki-sekai-token",
+            HeaderValue::from_static("signed-token"),
+        );
+        assert_eq!(extract_token(&headers).unwrap(), "signed-token");
+    }
+
+    #[test]
+    fn claims_decode_with_matching_secret_and_reject_wrong_secret() {
+        let claims = Claims {
+            uid: "user".to_string(),
+            credential: "credential".to_string(),
+            exp: None,
+        };
+        let token = encode(
+            &Header::default(),
+            &claims,
+            &EncodingKey::from_secret(b"correct-secret"),
+        )
+        .unwrap();
+
+        let decoded = decode_claims(&token, "correct-secret").unwrap();
+        assert_eq!(decoded.uid, "user");
+        assert_eq!(decoded.credential, "credential");
+        let failure = decode_claims(&token, "wrong-secret").unwrap_err();
+        assert_eq!(failure.0, StatusCode::UNAUTHORIZED);
+        assert!(failure.1.starts_with("Invalid token:"));
+    }
+
+    #[tokio::test]
+    async fn no_redis_cache_is_a_clean_miss_and_noop_write() {
+        let claims = Claims {
+            uid: "user".to_string(),
+            credential: "credential".to_string(),
+            exp: None,
+        };
+        assert!(!authorization_is_cached(None, &claims, "jp").await);
+        let user = AuthUser {
+            id: claims.uid.clone(),
+            credential: claims.credential.clone(),
+        };
+        cache_authorization(None, &user, "jp").await;
+        assert_eq!(
+            cache_key(&user.id, "jp", &user.credential),
+            "haruki_sekai_api:user:jp:credential"
+        );
+    }
+
+    #[test]
+    fn inserts_authenticated_user_into_request_extensions() {
+        let claims = Claims {
+            uid: "user".to_string(),
+            credential: "credential".to_string(),
+            exp: None,
+        };
+        let mut request = Request::new(Body::empty());
+        insert_auth_user(&mut request, &claims);
+
+        let user = request
+            .extensions()
+            .get::<Option<AuthUser>>()
+            .and_then(Option::as_ref)
+            .unwrap();
+        assert_eq!(user.id, "user");
+        assert_eq!(user.credential, "credential");
+    }
+
+    #[tokio::test]
+    async fn error_response_has_matching_status_and_json_body() {
+        let response = error_response(StatusCode::FORBIDDEN, "denied");
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = sonic_rs::from_slice(&body).unwrap();
+        assert_eq!(json["status"], 403);
+        assert_eq!(json["message"], "denied");
     }
 }

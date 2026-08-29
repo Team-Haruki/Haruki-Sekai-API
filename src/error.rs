@@ -246,3 +246,164 @@ impl SekaiHttpStatus {
         Self::try_from(code).map_err(|_| AppError::InvalidHttpStatus(code))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use axum::body::to_bytes;
+
+    use super::*;
+
+    #[test]
+    fn error_kinds_round_trip_through_internal_envelope() {
+        let cases = [
+            ("session_error", None),
+            ("cookie_expired", None),
+            ("upgrade_required", None),
+            ("under_maintenance", None),
+            ("signature_error", None),
+            ("no_account", None),
+            ("no_client", None),
+            ("invalid_server_region", None),
+            ("invalid_http_status", Some(418)),
+            ("crypto", None),
+            ("parse", None),
+            ("upstream_data", None),
+            ("network", None),
+            ("database", None),
+            ("redis", None),
+            ("io", None),
+            ("auth", None),
+            ("not_found", None),
+            ("forbidden", None),
+            ("internal", None),
+            ("unknown", Some(520)),
+        ];
+
+        for (kind, status) in cases {
+            let error = AppError::from_kind(kind, status, "detail".to_string());
+            assert_eq!(error.kind(), kind);
+        }
+
+        assert!(matches!(
+            AppError::from_kind("future_kind", None, "detail".to_string()),
+            AppError::Internal(message) if message.contains("future_kind")
+        ));
+    }
+
+    #[test]
+    fn errors_map_to_expected_http_status_classes() {
+        let cases = [
+            (AppError::SessionError, StatusCode::FORBIDDEN),
+            (AppError::CookieExpired, StatusCode::FORBIDDEN),
+            (AppError::UpgradeRequired, StatusCode::UPGRADE_REQUIRED),
+            (AppError::UnderMaintenance, StatusCode::SERVICE_UNAVAILABLE),
+            (
+                AppError::InvalidServerRegion("xx".to_string()),
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                AppError::ParseError("bad".to_string()),
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                AppError::UpstreamData("bad".to_string()),
+                StatusCode::BAD_GATEWAY,
+            ),
+            (
+                AppError::NetworkError("down".to_string()),
+                StatusCode::BAD_GATEWAY,
+            ),
+            (AppError::InvalidHttpStatus(599), StatusCode::BAD_GATEWAY),
+            (
+                AppError::Unknown {
+                    status: 599,
+                    body: "bad".to_string(),
+                },
+                StatusCode::BAD_GATEWAY,
+            ),
+            (
+                AppError::AuthError("bad".to_string()),
+                StatusCode::UNAUTHORIZED,
+            ),
+            (
+                AppError::NotFound("missing".to_string()),
+                StatusCode::NOT_FOUND,
+            ),
+            (AppError::Forbidden("no".to_string()), StatusCode::FORBIDDEN),
+            (AppError::NoClientAvailable, StatusCode::SERVICE_UNAVAILABLE),
+            (AppError::NoAccountError, StatusCode::SERVICE_UNAVAILABLE),
+            (
+                AppError::Internal("boom".to_string()),
+                StatusCode::INTERNAL_SERVER_ERROR,
+            ),
+        ];
+
+        for (error, status) in cases {
+            assert_eq!(error.status_code(), status, "{}", error.kind());
+        }
+    }
+
+    #[tokio::test]
+    async fn into_response_returns_consistent_json_error() {
+        let response = AppError::NotFound("music 42".to_string()).into_response();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(response.headers()["content-type"], "application/json");
+
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = sonic_rs::from_slice(&body).unwrap();
+        assert_eq!(json["result"], "failed");
+        assert_eq!(json["status"], 404);
+        assert_eq!(json["message"], "Not found: music 42");
+    }
+
+    #[test]
+    fn external_errors_preserve_their_failure_class() {
+        let io_error = std::io::Error::new(std::io::ErrorKind::NotFound, "missing");
+        assert!(matches!(AppError::from(io_error), AppError::IoError(_)));
+
+        let db_error = sea_orm::DbErr::Custom("db down".to_string());
+        assert!(matches!(
+            AppError::from(db_error),
+            AppError::DatabaseError(_)
+        ));
+
+        let redis_error =
+            redis::RedisError::from((redis::ErrorKind::InvalidClientConfig, "bad value"));
+        assert!(matches!(
+            AppError::from(redis_error),
+            AppError::RedisError(_)
+        ));
+
+        let json_error = sonic_rs::from_str::<serde_json::Value>("{").unwrap_err();
+        assert!(matches!(
+            AppError::from(json_error),
+            AppError::ParseError(_)
+        ));
+
+        let msgpack_error = rmp_serde::from_slice::<serde_json::Value>(&[0xc1]).unwrap_err();
+        assert!(matches!(
+            AppError::from(msgpack_error),
+            AppError::UpstreamData(_)
+        ));
+    }
+
+    #[test]
+    fn sekai_status_accepts_known_codes_and_rejects_unknown_ones() {
+        for (code, expected) in [
+            (200, SekaiHttpStatus::Ok),
+            (400, SekaiHttpStatus::ClientError),
+            (403, SekaiHttpStatus::SessionError),
+            (404, SekaiHttpStatus::NotFound),
+            (409, SekaiHttpStatus::Conflict),
+            (426, SekaiHttpStatus::GameUpgrade),
+            (500, SekaiHttpStatus::ServerError),
+            (503, SekaiHttpStatus::UnderMaintenance),
+        ] {
+            assert_eq!(SekaiHttpStatus::from_code(code).unwrap(), expected);
+        }
+        assert!(matches!(
+            SekaiHttpStatus::from_code(418),
+            Err(AppError::InvalidHttpStatus(418))
+        ));
+    }
+}

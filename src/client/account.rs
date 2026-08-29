@@ -208,3 +208,112 @@ impl SekaiAccount for AccountType {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cp_account_deserializes_legacy_values_and_builds_login_payload() {
+        let mut account: SekaiAccountCP =
+            sonic_rs::from_str(r#"{"userId":12345,"deviceId":null,"credential":"secret"}"#)
+                .unwrap();
+        assert_eq!(account.user_id(), "12345");
+        assert_eq!(account.device_id(), "");
+        assert_eq!(account.token(), "secret");
+
+        account.set_user_id("54321".to_string());
+        let payload: serde_json::Value = rmp_serde::from_slice(&account.dump().unwrap()).unwrap();
+        assert_eq!(payload["credential"], "secret");
+        assert_eq!(payload["authTriggerType"], "normal");
+        assert!(payload.get("deviceId").is_none());
+    }
+
+    #[test]
+    fn cp_payload_includes_nonempty_device_id() {
+        let account = SekaiAccountCP {
+            user_id: "1".to_string(),
+            device_id: "device".to_string(),
+            credential: "credential".to_string(),
+        };
+        let payload: serde_json::Value = rmp_serde::from_slice(&account.dump().unwrap()).unwrap();
+        assert_eq!(payload["deviceId"], "device");
+    }
+
+    #[test]
+    fn nuverse_account_supports_aliases_and_numeric_user_ids() {
+        for key in ["user_id", "userId", "userID"] {
+            let json = format!(r#"{{"{key}":42,"deviceId":"phone","accessToken":"token"}}"#);
+            let account: SekaiAccountNuverse = sonic_rs::from_str(&json).unwrap();
+            assert_eq!(account.user_id(), "42");
+            assert_eq!(account.device_id(), "phone");
+            assert_eq!(account.token(), "token");
+
+            let payload: serde_json::Value =
+                rmp_serde::from_slice(&account.dump().unwrap()).unwrap();
+            assert_eq!(payload["userID"], 42);
+            assert_eq!(payload["deviceId"], "phone");
+            assert_eq!(payload["accessToken"], "token");
+        }
+    }
+
+    #[test]
+    fn nuverse_dump_rejects_non_numeric_user_id_and_omits_empty_device() {
+        let invalid = SekaiAccountNuverse {
+            user_id: "not-a-number".to_string(),
+            device_id: String::new(),
+            access_token: "token".to_string(),
+        };
+        assert!(matches!(invalid.dump(), Err(AppError::ParseError(_))));
+
+        let valid = SekaiAccountNuverse {
+            user_id: "7".to_string(),
+            device_id: String::new(),
+            access_token: "token".to_string(),
+        };
+        let payload: serde_json::Value = rmp_serde::from_slice(&valid.dump().unwrap()).unwrap();
+        assert!(payload.get("deviceId").is_none());
+    }
+
+    #[test]
+    fn account_type_delegates_trait_operations() {
+        let mut cp = AccountType::CP(SekaiAccountCP {
+            user_id: "1".to_string(),
+            device_id: "cp-device".to_string(),
+            credential: "cp-token".to_string(),
+        });
+        assert_eq!(cp.user_id(), "1");
+        assert_eq!(cp.device_id(), "cp-device");
+        assert_eq!(cp.token(), "cp-token");
+        cp.set_user_id("2".to_string());
+        assert_eq!(cp.user_id(), "2");
+        assert!(cp.dump().is_ok());
+
+        let mut nuverse = AccountType::Nuverse(SekaiAccountNuverse {
+            user_id: "3".to_string(),
+            device_id: "nv-device".to_string(),
+            access_token: "nv-token".to_string(),
+        });
+        assert_eq!(nuverse.user_id(), "3");
+        assert_eq!(nuverse.device_id(), "nv-device");
+        assert_eq!(nuverse.token(), "nv-token");
+        nuverse.set_user_id("4".to_string());
+        assert_eq!(nuverse.user_id(), "4");
+        assert!(nuverse.dump().is_ok());
+    }
+
+    #[test]
+    fn null_account_fields_deserialize_as_empty_strings() {
+        let cp: SekaiAccountCP =
+            sonic_rs::from_str(r#"{"userId":null,"deviceId":null,"credential":null}"#).unwrap();
+        assert_eq!(cp.user_id, "");
+        assert_eq!(cp.device_id, "");
+        assert_eq!(cp.credential, "");
+
+        let nuverse: SekaiAccountNuverse =
+            sonic_rs::from_str(r#"{"user_id":null,"deviceId":null,"accessToken":null}"#).unwrap();
+        assert_eq!(nuverse.user_id, "");
+        assert_eq!(nuverse.device_id, "");
+        assert_eq!(nuverse.access_token, "");
+    }
+}

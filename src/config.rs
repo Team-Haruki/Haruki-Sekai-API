@@ -352,3 +352,96 @@ impl Config {
         Ok(config)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn server_regions_parse_and_report_protocol_family() {
+        let cases = [
+            ("JP", ServerRegion::Jp, true),
+            ("en", ServerRegion::En, true),
+            ("Tw", ServerRegion::Tw, false),
+            ("kr", ServerRegion::Kr, false),
+            ("CN", ServerRegion::Cn, false),
+        ];
+
+        for (input, expected, is_cp) in cases {
+            let parsed: ServerRegion = input.parse().unwrap();
+            assert_eq!(parsed, expected);
+            assert_eq!(parsed.as_str(), input.to_ascii_lowercase());
+            assert_eq!(parsed.is_cp_server(), is_cp);
+        }
+        assert_eq!(
+            "unknown".parse::<ServerRegion>().unwrap_err(),
+            "Unknown server region: unknown"
+        );
+    }
+
+    #[test]
+    fn partial_yaml_sections_receive_documented_defaults() {
+        let config: Config = serde_yaml::from_str(
+            r#"
+backend: {}
+redis: {}
+database: {}
+git: {}
+servers:
+  jp:
+    upstreams:
+      - url: https://upstream.example
+  cn: {}
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(config.backend.host, "0.0.0.0");
+        assert_eq!(config.backend.port, 9999);
+        assert_eq!(config.backend.log_level, "info");
+        assert_eq!(config.redis.host, "localhost");
+        assert_eq!(config.redis.port, 6379);
+        assert_eq!(config.database.max_connections, 10);
+        assert!(!config.git.enabled);
+        assert_eq!(config.git.signing_format, GitSigningFormat::Gpg);
+
+        let jp = &config.servers[&ServerRegion::Jp];
+        assert_eq!(jp.upstreams[0].priority, 10);
+        assert_eq!(
+            jp.nuverse_schema_bundle_path,
+            "Data/structures/nuverse_schema_bundle.json"
+        );
+        assert_eq!(config.servers[&ServerRegion::Cn].local_priority, 0);
+    }
+
+    #[test]
+    fn absent_optional_sections_use_struct_defaults() {
+        let config: Config = serde_yaml::from_str("backend: {}\n").unwrap();
+
+        assert!(!config.redis.enabled);
+        assert_eq!(config.redis.password, "");
+        assert!(!config.database.enabled);
+        assert_eq!(config.database.dsn, "");
+        assert_eq!(config.master_database.max_connections, 10);
+        assert_eq!(config.git.username, "");
+        assert!(!config.git.sign_commits);
+        assert!(config.servers.is_empty());
+    }
+
+    #[test]
+    fn git_signing_format_accepts_supported_names() {
+        #[derive(Deserialize)]
+        struct Wrapper {
+            format: GitSigningFormat,
+        }
+
+        for (yaml, expected) in [
+            ("format: gpg", GitSigningFormat::Gpg),
+            ("format: openpgp", GitSigningFormat::Gpg),
+            ("format: ssh", GitSigningFormat::Ssh),
+        ] {
+            let parsed: Wrapper = serde_yaml::from_str(yaml).unwrap();
+            assert_eq!(parsed.format, expected);
+        }
+    }
+}

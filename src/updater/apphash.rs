@@ -265,4 +265,106 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    #[tokio::test]
+    async fn file_source_updates_version_and_preserves_unrelated_fields() {
+        let dir = std::env::temp_dir().join(format!(
+            "haruki_apphash_file_{}_{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let source_dir = dir.join("source");
+        std::fs::create_dir_all(&source_dir).unwrap();
+        let version_path = dir.join("current_version.json");
+        std::fs::write(
+            &version_path,
+            br#"{"appVersion":"5.0.0","appHash":"old","dataVersion":"5.1.2"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            source_dir.join("jp.json"),
+            br#"{"appVersion":"6.1.2","appHash":"new"}"#,
+        )
+        .unwrap();
+
+        let updater = AppHashUpdater::new(
+            ServerRegion::Jp,
+            vec![
+                AppHashSource {
+                    source_type: "unknown".to_string(),
+                    dir: String::new(),
+                    url: String::new(),
+                },
+                AppHashSource {
+                    source_type: "file".to_string(),
+                    dir: source_dir.to_string_lossy().into_owned(),
+                    url: String::new(),
+                },
+            ],
+            version_path.to_string_lossy().into_owned(),
+            None,
+            Arc::new(tokio::sync::Mutex::new(())),
+        );
+
+        let current = updater.load_current_version().await.unwrap();
+        assert_eq!(current.app_version, "5.0.0");
+        assert_eq!(current.app_hash, "old");
+        assert!(updater
+            .fetch_from_source(&updater.sources[0])
+            .await
+            .unwrap()
+            .is_none());
+
+        updater.check_update().await;
+        let saved: serde_json::Value =
+            sonic_rs::from_slice(&std::fs::read(&version_path).unwrap()).unwrap();
+        assert_eq!(saved["appVersion"], "6.1.2");
+        assert_eq!(saved["appHash"], "new");
+        assert_eq!(saved["dataVersion"], "5.1.2");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn missing_file_source_and_unchanged_candidate_are_noops() {
+        let dir = std::env::temp_dir().join(format!(
+            "haruki_apphash_noop_{}_{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let version_path = dir.join("current_version.json");
+        std::fs::write(&version_path, br#"{"appVersion":"6.0.0","appHash":"same"}"#).unwrap();
+
+        let updater = AppHashUpdater::new(
+            ServerRegion::Cn,
+            Vec::new(),
+            version_path.to_string_lossy().into_owned(),
+            None,
+            Arc::new(tokio::sync::Mutex::new(())),
+        );
+        let missing = AppHashSource {
+            source_type: "file".to_string(),
+            dir: dir.join("missing").to_string_lossy().into_owned(),
+            url: String::new(),
+        };
+        assert!(updater.fetch_from_file(&missing).await.unwrap().is_none());
+
+        let current = updater.load_current_version().await.unwrap();
+        updater
+            .apply_candidate(
+                &current,
+                AppInfo {
+                    app_version: "6.0.9".to_string(),
+                    app_hash: String::new(),
+                },
+            )
+            .await;
+        let saved: serde_json::Value =
+            sonic_rs::from_slice(&std::fs::read(&version_path).unwrap()).unwrap();
+        assert_eq!(saved["appVersion"], "6.0.0");
+        assert_eq!(saved["appHash"], "same");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

@@ -257,3 +257,92 @@ fn pct_encode(s: &str) -> String {
     }
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn helper(password: &str) -> GitHelper {
+        GitHelper {
+            username: "bot user".to_string(),
+            email: "bot@example.com".to_string(),
+            password: password.to_string(),
+            sign_commits: false,
+            signing_format: GitSigningFormat::Gpg,
+            signing_key: String::new(),
+            signing_program: String::new(),
+            proxy: None,
+        }
+    }
+
+    #[test]
+    fn creates_helper_from_git_config() {
+        let config = GitConfig {
+            enabled: true,
+            username: "bot".to_string(),
+            email: "bot@example.com".to_string(),
+            password: "secret".to_string(),
+            sign_commits: true,
+            signing_format: GitSigningFormat::Ssh,
+            signing_key: "key".to_string(),
+            signing_program: "ssh-keygen".to_string(),
+        };
+        let helper = GitHelper::new(&config, Some("http://proxy".to_string()));
+
+        assert_eq!(helper.username, "bot");
+        assert_eq!(helper.email, "bot@example.com");
+        assert_eq!(helper.password, "secret");
+        assert!(helper.sign_commits);
+        assert_eq!(helper.signing_format, GitSigningFormat::Ssh);
+        assert_eq!(helper.signing_key, "key");
+        assert_eq!(helper.signing_program, "ssh-keygen");
+        assert_eq!(helper.proxy.as_deref(), Some("http://proxy"));
+    }
+
+    #[test]
+    fn percent_encoding_and_credential_injection_handle_reserved_characters() {
+        assert_eq!(pct_encode("safe-._~AZaz09"), "safe-._~AZaz09");
+        assert_eq!(pct_encode("a b@c:/"), "a%20b%40c%3A%2F");
+        assert_eq!(
+            inject_credentials("https://github.com/org/repo.git", "bot user", "p@ss").unwrap(),
+            "https://bot%20user:p%40ss@github.com/org/repo.git"
+        );
+        assert_eq!(
+            inject_credentials(
+                "http://old:credentials@example.com/repo.git",
+                "new",
+                "secret"
+            )
+            .unwrap(),
+            "http://new:secret@example.com/repo.git"
+        );
+        assert!(matches!(
+            inject_credentials("git@github.com:org/repo.git", "bot", "secret"),
+            Err(AppError::NetworkError(_))
+        ));
+    }
+
+    #[test]
+    fn redaction_removes_raw_and_encoded_passwords() {
+        let git = helper("p@ss word");
+        let redacted =
+            git.redact("https://bot:p@ss word@example.test https://bot:p%40ss%20word@example.test");
+        assert!(!redacted.contains("p@ss word"));
+        assert!(!redacted.contains("p%40ss%20word"));
+        assert_eq!(redacted.matches("***").count(), 2);
+        assert_eq!(helper("").redact("unchanged"), "unchanged");
+    }
+
+    #[test]
+    fn push_changes_rejects_missing_repository() {
+        let missing = std::env::temp_dir().join(format!(
+            "haruki_missing_repo_{}_{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        assert!(matches!(
+            helper("").push_changes(&missing.to_string_lossy(), "1"),
+            Err(AppError::ParseError(message)) if message.contains("does not exist")
+        ));
+    }
+}
