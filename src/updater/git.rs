@@ -165,7 +165,9 @@ impl GitHelper {
             }
             cmd.arg("commit").arg("-S");
         } else {
-            cmd.arg("commit");
+            // Do not inherit a machine-wide `commit.gpgsign=true`: this helper's
+            // explicit configuration is authoritative for unattended updates.
+            cmd.args(["-c", "commit.gpgsign=false", "commit"]);
         }
 
         cmd.arg("-m")
@@ -344,5 +346,65 @@ mod tests {
             helper("").push_changes(&missing.to_string_lossy(), "1"),
             Err(AppError::ParseError(message)) if message.contains("does not exist")
         ));
+    }
+
+    fn run_git(args: &[&str]) {
+        let output = Command::new("git").args(args).output().unwrap();
+        assert!(
+            output.status.success(),
+            "git {:?}: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn commits_and_pushes_changes_to_local_bare_remote() {
+        let root = std::env::temp_dir().join(format!("haruki_git_{}", uuid::Uuid::new_v4()));
+        let remote = root.join("remote.git");
+        let work = root.join("work");
+        std::fs::create_dir_all(&root).unwrap();
+        run_git(&["init", "--bare", remote.to_str().unwrap()]);
+        run_git(&["init", "-b", "main", work.to_str().unwrap()]);
+        run_git(&[
+            "-C",
+            work.to_str().unwrap(),
+            "remote",
+            "add",
+            "origin",
+            remote.to_str().unwrap(),
+        ]);
+
+        std::fs::write(work.join("master.json"), "{\"v\":1}").unwrap();
+        let git = helper("");
+        assert!(git.push_changes(work.to_str().unwrap(), "1.0.0").unwrap());
+        assert!(!git.push_changes(work.to_str().unwrap(), "1.0.0").unwrap());
+
+        std::fs::write(work.join("master.json"), "{\"v\":2}").unwrap();
+        assert!(git.push_changes(work.to_str().unwrap(), "1.0.1").unwrap());
+        let log = Command::new("git")
+            .args([
+                "--git-dir",
+                remote.to_str().unwrap(),
+                "log",
+                "--format=%s",
+                "main",
+            ])
+            .output()
+            .unwrap();
+        let log = String::from_utf8(log.stdout).unwrap();
+        assert!(log.contains("Sekai master data version 1.0.1"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn existing_non_repository_surfaces_redacted_git_error() {
+        let root = std::env::temp_dir().join(format!("haruki_not_git_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        assert!(matches!(
+            helper("secret").push_changes(root.to_str().unwrap(), "1"),
+            Err(AppError::NetworkError(message)) if message.contains("git status failed")
+        ));
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

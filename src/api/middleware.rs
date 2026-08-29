@@ -239,6 +239,7 @@ mod tests {
     use axum::body::to_bytes;
     use axum::http::{HeaderMap, HeaderValue};
     use jsonwebtoken::{encode, EncodingKey, Header};
+    use sea_orm::{ConnectionTrait, Database};
 
     use super::*;
 
@@ -356,5 +357,75 @@ mod tests {
         let json: serde_json::Value = sonic_rs::from_slice(&body).unwrap();
         assert_eq!(json["status"], 403);
         assert_eq!(json["message"], "denied");
+    }
+
+    async fn auth_db() -> DatabaseConnection {
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+        db.execute_unprepared(
+            "CREATE TABLE sekai_users (id TEXT PRIMARY KEY, credential TEXT NOT NULL, remark TEXT NOT NULL DEFAULT '')",
+        )
+        .await
+        .unwrap();
+        db.execute_unprepared(
+            "CREATE TABLE sekai_user_servers (user_id TEXT NOT NULL, server TEXT NOT NULL, PRIMARY KEY (user_id, server))",
+        )
+        .await
+        .unwrap();
+        db
+    }
+
+    #[tokio::test]
+    async fn database_authorization_checks_user_credential_and_server_grant() {
+        let db = auth_db().await;
+        let claims = Claims {
+            uid: "user".to_string(),
+            credential: "credential".to_string(),
+            exp: None,
+        };
+        let missing = authorize_user(&db, &claims, "jp").await.unwrap_err();
+        assert_eq!(missing.0, StatusCode::UNAUTHORIZED);
+
+        db.execute_unprepared(
+            "INSERT INTO sekai_users (id, credential, remark) VALUES ('user', 'credential', '')",
+        )
+        .await
+        .unwrap();
+        let mut wrong = Claims {
+            uid: claims.uid.clone(),
+            credential: "wrong".to_string(),
+            exp: None,
+        };
+        assert_eq!(
+            authorize_user(&db, &wrong, "jp").await.unwrap_err().0,
+            StatusCode::UNAUTHORIZED
+        );
+        wrong.credential = claims.credential.clone();
+        assert_eq!(
+            authorize_user(&db, &wrong, "jp").await.unwrap_err().0,
+            StatusCode::FORBIDDEN
+        );
+
+        db.execute_unprepared(
+            "INSERT INTO sekai_user_servers (user_id, server) VALUES ('user', 'jp')",
+        )
+        .await
+        .unwrap();
+        let user = authorize_user(&db, &claims, "jp").await.unwrap();
+        assert_eq!(user.id, "user");
+        assert_eq!(user.credential, "credential");
+    }
+
+    #[tokio::test]
+    async fn database_authorization_maps_query_failures_to_server_error() {
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+        let claims = Claims {
+            uid: "user".to_string(),
+            credential: "credential".to_string(),
+            exp: None,
+        };
+        assert_eq!(
+            authorize_user(&db, &claims, "jp").await.unwrap_err().0,
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
     }
 }

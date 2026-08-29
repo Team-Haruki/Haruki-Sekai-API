@@ -335,3 +335,166 @@ fn version_lock(locks: &VersionLocks, region: ServerRegion) -> Arc<tokio::sync::
         .cloned()
         .unwrap_or_else(|| Arc::new(tokio::sync::Mutex::new(())))
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::config::{AppHashSource, MasterRemoteSourceConfig, MasterSyncConfig, ServerConfig};
+
+    const KEY: &str = "00112233445566778899aabbccddeeff";
+    const IV: &str = "ffeeddccbbaa99887766554433221100";
+
+    fn server_config(root: &std::path::Path) -> ServerConfig {
+        let mut server: ServerConfig = serde_yaml::from_str("{}").unwrap();
+        server.aes_key_hex = KEY.to_string();
+        server.aes_iv_hex = IV.to_string();
+        server.version_path = root.join("version.json").to_string_lossy().into_owned();
+        server.account_dir = root.join("accounts").to_string_lossy().into_owned();
+        server.master_dir = root.join("master").to_string_lossy().into_owned();
+        server
+    }
+
+    async fn client(
+        region: ServerRegion,
+        server: ServerConfig,
+        cookie_url: Option<String>,
+    ) -> Arc<SekaiClient> {
+        Arc::new(
+            SekaiClient::new(
+                region,
+                server,
+                None,
+                cookie_url,
+                SekaiClient::build_http_client(None).unwrap(),
+                None,
+            )
+            .await
+            .unwrap(),
+        )
+    }
+
+    #[test]
+    fn enablement_and_builder_helpers_cover_all_modes() {
+        let root = std::env::temp_dir().join(format!("haruki_scheduler_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut server = server_config(&root);
+        assert!(!apphash_enabled(&server));
+        server.enable_app_hash_updater = true;
+        server.app_hash_updater_cron = "0 0 0 1 1 *".to_string();
+        assert!(apphash_enabled(&server));
+
+        let clients = HashMap::new();
+        assert!(!remote_master_enabled(ServerRegion::Jp, &server, &clients));
+        server.enable_master_updater = true;
+        server.master_updater_cron = "0 0 0 1 1 *".to_string();
+        server.master_remote_source = MasterRemoteSourceConfig {
+            url: "http://127.0.0.1:1/".to_string(),
+            token: "token".to_string(),
+        };
+        assert!(remote_master_enabled(ServerRegion::Jp, &server, &clients));
+        assert!(load_headless_schema(ServerRegion::Jp, &server)
+            .unwrap()
+            .is_none());
+        server.nuverse_schema_bundle_path = "/missing/schema".to_string();
+        assert!(load_headless_schema(ServerRegion::Cn, &server).is_none());
+        assert!(build_remote_source(ServerRegion::Jp, &server.master_remote_source).is_some());
+
+        let locks = HashMap::from([(ServerRegion::Jp, Arc::new(tokio::sync::Mutex::new(())))]);
+        assert!(Arc::ptr_eq(
+            &version_lock(&locks, ServerRegion::Jp),
+            locks.get(&ServerRegion::Jp).unwrap()
+        ));
+        assert!(!Arc::ptr_eq(
+            &version_lock(&locks, ServerRegion::Cn),
+            locks.get(&ServerRegion::Jp).unwrap()
+        ));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn schedules_each_supported_job_without_running_it() {
+        let root =
+            std::env::temp_dir().join(format!("haruki_scheduler_jobs_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("accounts")).unwrap();
+        std::fs::create_dir_all(root.join("master")).unwrap();
+        std::fs::write(
+            root.join("version.json"),
+            r#"{"appVersion":"1","appHash":"h","dataVersion":"d","assetVersion":"a"}"#,
+        )
+        .unwrap();
+
+        let cron = "0 0 0 1 1 *".to_string();
+        let mut local_server = server_config(&root);
+        local_server.require_cookies = true;
+        local_server.enable_master_updater = true;
+        local_server.master_updater_cron = cron.clone();
+        let local = client(
+            ServerRegion::Jp,
+            local_server.clone(),
+            Some("http://127.0.0.1:1/cookie".to_string()),
+        )
+        .await;
+        let clients = HashMap::from([(ServerRegion::Jp, local)]);
+
+        let mut remote_server = server_config(&root);
+        remote_server.enable_master_updater = true;
+        remote_server.master_updater_cron = cron.clone();
+        remote_server.enable_app_hash_updater = true;
+        remote_server.app_hash_updater_cron = cron.clone();
+        remote_server.master_remote_source = MasterRemoteSourceConfig {
+            url: "http://127.0.0.1:1".to_string(),
+            token: String::new(),
+        };
+        remote_server.master_sync = MasterSyncConfig {
+            source_url: "http://127.0.0.1:1".to_string(),
+            source_token: String::new(),
+            poll_cron: cron.clone(),
+            notify: Vec::new(),
+        };
+
+        let mut config: Config = serde_yaml::from_str("backend: {}").unwrap();
+        config.servers.insert(ServerRegion::Jp, local_server);
+        config.servers.insert(ServerRegion::Cn, remote_server);
+        config.apphash_sources.push(AppHashSource {
+            source_type: "file".to_string(),
+            dir: root.to_string_lossy().into_owned(),
+            url: String::new(),
+        });
+        let locks = HashMap::new();
+        let syncers = super::super::sync::build_syncers(&config, &clients, None, &locks);
+        let scheduler = JobScheduler::new().await.unwrap();
+        schedule_cookie_refreshes(&scheduler, &clients).await;
+        schedule_local_master_updates(&scheduler, &clients, &config, None, &locks, &None).await;
+        schedule_apphash_updates(&scheduler, &config, &locks, &None).await;
+        schedule_remote_master_updates(&scheduler, &clients, &config, None, &locks, &None).await;
+        schedule_master_syncs(&scheduler, &config, &syncers).await;
+        add_job(
+            &scheduler,
+            ServerRegion::Jp,
+            "invalid",
+            "invalid",
+            Job::new_async("invalid", |_uuid, _lock| Box::pin(async {})),
+        )
+        .await;
+        drop(scheduler);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn starts_and_stops_empty_scheduler() {
+        let config: Config = serde_yaml::from_str("backend: {}").unwrap();
+        let mut scheduler = start_scheduler(
+            &HashMap::new(),
+            &config,
+            None,
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+        .await
+        .unwrap();
+        scheduler.shutdown().await.unwrap();
+    }
+}

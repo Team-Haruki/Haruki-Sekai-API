@@ -213,6 +213,10 @@ impl AppHashUpdater {
 mod tests {
     use std::sync::Arc;
 
+    use axum::http::StatusCode;
+    use axum::routing::get;
+    use axum::Router;
+
     use super::*;
 
     #[tokio::test]
@@ -366,5 +370,69 @@ mod tests {
         assert_eq!(saved["appHash"], "same");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn url_source_handles_success_http_error_proxy_and_missing_version() {
+        let app = Router::new()
+            .route(
+                "/jp.json",
+                get(|| async { r#"{"appVersion":"7.0.1","appHash":"remote"}"# }),
+            )
+            .route(
+                "/missing.json",
+                get(|| async { (StatusCode::NOT_FOUND, "missing") }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let root =
+            std::env::temp_dir().join(format!("haruki_apphash_url_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let version_path = root.join("version.json");
+        std::fs::write(&version_path, r#"{"appVersion":"6.0.0","appHash":"old"}"#).unwrap();
+        let source = AppHashSource {
+            source_type: "url".to_string(),
+            dir: String::new(),
+            url: format!("http://{address}/{{region}}.json"),
+        };
+        let updater = AppHashUpdater::new(
+            ServerRegion::Jp,
+            vec![source],
+            version_path.to_string_lossy().into_owned(),
+            None,
+            Arc::new(tokio::sync::Mutex::new(())),
+        );
+        let info = updater
+            .fetch_from_source(&updater.sources[0])
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(info.app_version, "7.0.1");
+        updater.check_update().await;
+        let saved: AppInfo = sonic_rs::from_slice(&std::fs::read(&version_path).unwrap()).unwrap();
+        assert_eq!(saved.app_hash, "remote");
+
+        let missing = AppHashSource {
+            source_type: "url".to_string(),
+            dir: String::new(),
+            url: format!("http://{address}/missing.json"),
+        };
+        assert!(updater.fetch_from_url(&missing).await.unwrap().is_none());
+        let invalid_proxy = AppHashUpdater::new(
+            ServerRegion::Jp,
+            vec![missing],
+            "/missing/version.json".to_string(),
+            Some("://bad".to_string()),
+            Arc::new(tokio::sync::Mutex::new(())),
+        );
+        assert!(invalid_proxy
+            .fetch_from_url(&invalid_proxy.sources[0])
+            .await
+            .is_err());
+        invalid_proxy.check_update().await;
+        server.abort();
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

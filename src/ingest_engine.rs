@@ -569,4 +569,179 @@ mod tests {
         assert_eq!(normalize_json_key("assetbundleName"), "assetbundlename");
         assert_eq!(normalize_db_col("assetbundle_name"), "assetbundlename");
     }
+
+    #[test]
+    fn builds_insert_columns_rows_and_region() {
+        let mut columns = HashMap::new();
+        columns.insert("game_id".to_string(), "int64".to_string());
+        columns.insert("display_name".to_string(), "string".to_string());
+        columns.insert("enabled".to_string(), "bool".to_string());
+        columns.insert("server_region".to_string(), "string".to_string());
+
+        let (names, rows) = build_insert_data(
+            r#"[{"id":1,"displayName":"A","enabled":true},{"id":"2","displayName":"B"},null]"#,
+            "items",
+            &columns,
+            "jp",
+            true,
+        )
+        .unwrap();
+
+        assert!(names.contains(&"game_id".to_string()));
+        assert!(names.contains(&"display_name".to_string()));
+        assert!(names.contains(&"enabled".to_string()));
+        assert_eq!(names.last().unwrap(), "server_region");
+        assert_eq!(rows.len(), 2);
+        assert!(build_insert_data("[]", "items", &columns, "jp", true)
+            .unwrap()
+            .0
+            .is_empty());
+        assert!(build_insert_data("invalid", "items", &columns, "jp", true).is_err());
+    }
+
+    #[test]
+    fn collects_unique_keys_and_maps_known_columns() {
+        let data = vec![
+            json!({"id": 1, "displayName": "A"}),
+            json!({"id": 2, "extra": 3}),
+        ];
+        assert_eq!(collect_json_keys(&data), vec!["id", "displayName", "extra"]);
+
+        let mut columns = HashMap::new();
+        columns.insert("game_id".to_string(), "int64".to_string());
+        columns.insert("display_name".to_string(), "string".to_string());
+        let mapped = map_target_columns(&collect_json_keys(&data), &columns);
+        assert_eq!(mapped.len(), 2);
+        assert!(mapped.iter().any(|column| column.db_col == "game_id"));
+        assert!(mapped.iter().any(|column| column.db_col == "display_name"));
+    }
+
+    #[test]
+    fn card_resource_name_validation_and_fallbacks() {
+        assert!(is_card_resource_name("res017_no037"));
+        for invalid in ["", "res_no1", "res1_no", "foo1_no2", "resx_no2", "res1_nox"] {
+            assert!(!is_card_resource_name(invalid), "{invalid}");
+        }
+
+        let valid = json!({"archiveDisplayType": "res001_no002"});
+        assert_eq!(
+            preferred_card_assetbundle_name(valid.as_object().unwrap(), &Value::Null).as_deref(),
+            Some("res001_no002")
+        );
+        let fallback = json!({"archiveDisplayType": "archive"});
+        assert_eq!(
+            preferred_card_assetbundle_name(fallback.as_object().unwrap(), &json!("bundle"))
+                .as_deref(),
+            Some("bundle")
+        );
+        assert_eq!(
+            preferred_card_assetbundle_name(fallback.as_object().unwrap(), &json!("   ")),
+            None
+        );
+    }
+
+    #[test]
+    fn converts_every_supported_column_value_shape() {
+        use sea_orm::sea_query::Value as SeaValue;
+
+        assert!(matches!(
+            json_to_sea_value(&Value::Null, "int32"),
+            SeaValue::BigInt(None)
+        ));
+        assert!(matches!(
+            json_to_sea_value(&Value::Null, "float"),
+            SeaValue::Double(None)
+        ));
+        assert!(matches!(
+            json_to_sea_value(&Value::Null, "bool"),
+            SeaValue::Bool(None)
+        ));
+        assert!(matches!(
+            json_to_sea_value(&Value::Null, "string"),
+            SeaValue::String(None)
+        ));
+        assert!(matches!(
+            json_to_sea_value(&Value::Null, "unknown"),
+            SeaValue::Json(None)
+        ));
+        assert!(matches!(
+            json_to_sea_value(&Value::Null, "json.RawMessage"),
+            SeaValue::Json(None)
+        ));
+        assert!(matches!(
+            json_to_sea_value(&json!({"x": 1}), "json.RawMessage"),
+            SeaValue::Json(Some(_))
+        ));
+
+        assert!(matches!(
+            integer_value(&json!(12)),
+            SeaValue::BigInt(Some(12))
+        ));
+        assert!(matches!(
+            integer_value(&json!(" 13 ")),
+            SeaValue::BigInt(Some(13))
+        ));
+        assert!(matches!(
+            integer_value(&json!(true)),
+            SeaValue::BigInt(None)
+        ));
+        assert!(matches!(float_value(&json!(1.5)), SeaValue::Double(Some(v)) if v == 1.5));
+        assert!(matches!(float_value(&json!(" 2.5 ")), SeaValue::Double(Some(v)) if v == 2.5));
+        assert!(matches!(float_value(&json!([])), SeaValue::Double(None)));
+        assert!(matches!(
+            bool_value(&json!(true)),
+            SeaValue::Bool(Some(true))
+        ));
+        assert!(matches!(
+            bool_value(&json!(" false ")),
+            SeaValue::Bool(Some(false))
+        ));
+        assert!(matches!(bool_value(&json!(0)), SeaValue::Bool(None)));
+
+        assert!(matches!(string_value(&json!("text")), SeaValue::String(Some(v)) if &*v == "text"));
+        assert!(matches!(
+            string_value(&json!([1, 2])),
+            SeaValue::String(Some(_))
+        ));
+        assert!(matches!(
+            inferred_value(&json!(true)),
+            SeaValue::Bool(Some(true))
+        ));
+        assert!(matches!(
+            inferred_value(&json!(7)),
+            SeaValue::BigInt(Some(7))
+        ));
+        assert!(matches!(inferred_value(&json!(1.25)), SeaValue::Double(Some(v)) if v == 1.25));
+        assert!(matches!(
+            inferred_value(&json!("s")),
+            SeaValue::String(Some(_))
+        ));
+        assert!(matches!(
+            inferred_value(&json!({"x": 1})),
+            SeaValue::Json(Some(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn loads_schema_resolves_tables_and_skips_non_ingestable_files() {
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+        let engine = IngestionEngine::new(db).await.unwrap();
+        assert!(engine.resolve_table_name("cards").is_some());
+        assert!(engine.resolve_table_name("card").is_some());
+        assert!(engine.resolve_table_name("definitely_unknown").is_none());
+        assert!(engine
+            .ingest_master_data("/definitely/missing/master", "jp")
+            .await
+            .is_ok());
+
+        let root = std::env::temp_dir().join(format!("haruki_ingest_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("unknown.json"), "[]").unwrap();
+        std::fs::write(root.join("ignored.txt"), "[]").unwrap();
+        assert!(engine
+            .ingest_master_data(root.to_str().unwrap(), "jp")
+            .await
+            .is_ok());
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

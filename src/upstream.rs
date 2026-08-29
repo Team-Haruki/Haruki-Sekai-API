@@ -578,7 +578,63 @@ pub fn build_bulk_internal_http_client() -> Result<reqwest::Client, AppError> {
 
 #[cfg(test)]
 mod tests {
+    use axum::body::Body;
+    use axum::extract::State;
+    use axum::http::Response;
+    use axum::Router;
+
     use super::*;
+
+    #[derive(Clone)]
+    struct MockReply {
+        status: u16,
+        content_type: &'static str,
+        body: Vec<u8>,
+    }
+
+    async fn mock_handler(State(reply): State<MockReply>) -> Response<Body> {
+        Response::builder()
+            .status(reply.status)
+            .header("content-type", reply.content_type)
+            .body(Body::from(reply.body))
+            .unwrap()
+    }
+
+    async fn spawn_mock(reply: MockReply) -> (String, tokio::task::JoinHandle<()>) {
+        let app = Router::new().fallback(mock_handler).with_state(reply);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (format!("http://{address}"), task)
+    }
+
+    fn upstream(url: String) -> RemoteUpstream {
+        RemoteUpstream {
+            name: "mock".to_string(),
+            base_url: url,
+            token: "secret".to_string(),
+            http: build_internal_http_client().unwrap(),
+        }
+    }
+
+    fn api_request() -> InternalApiRequest {
+        InternalApiRequest {
+            server: "jp".to_string(),
+            method: "GET".to_string(),
+            path: "/system".to_string(),
+            params: Some(HashMap::from([("q".to_string(), "v".to_string())])),
+            body: None,
+        }
+    }
+
+    fn image_request() -> InternalImageRequest {
+        InternalImageRequest {
+            server: "jp".to_string(),
+            kind: ImageKind::CpMysekai,
+            param1: "a".to_string(),
+            param2: "b".to_string(),
+        }
+    }
 
     #[test]
     fn breaker_opens_after_threshold_and_resets_on_success() {
@@ -693,5 +749,223 @@ mod tests {
         let router = RegionRouter::new(ServerRegion::Cn, None, &ups, http).unwrap();
         let names: Vec<_> = router.targets.iter().map(|t| t.name.as_str()).collect();
         assert_eq!(names, ["b", "a"]);
+    }
+
+    #[test]
+    fn image_kinds_publish_expected_content_types() {
+        assert_eq!(
+            ImageKind::CpMusicScore.content_type(),
+            "application/octet-stream"
+        );
+        for kind in [
+            ImageKind::CpMysekai,
+            ImageKind::CpProfileCardThumbnail,
+            ImageKind::CpHousingThumbnail,
+            ImageKind::NuverseMysekai,
+        ] {
+            assert_eq!(kind.content_type(), "image/png");
+        }
+        assert!(build_internal_http_client().is_ok());
+        assert!(build_bulk_internal_http_client().is_ok());
+        assert!(RegionRouter::new(ServerRegion::Jp, None, &[], reqwest::Client::new()).is_none());
+        let empty = UpstreamConfig {
+            url: String::new(),
+            token: String::new(),
+            priority: 1,
+            name: String::new(),
+        };
+        assert!(
+            RegionRouter::new(ServerRegion::Jp, None, &[empty], reqwest::Client::new()).is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn remote_upstream_decodes_success_and_error_envelopes() {
+        let success = serde_json::to_vec(&InternalApiResponse {
+            ok: true,
+            status: Some(409),
+            data: Some(serde_json::json!({"result": "ok"})),
+            kind: None,
+            message: None,
+        })
+        .unwrap();
+        let (url, server) = spawn_mock(MockReply {
+            status: 200,
+            content_type: "application/json",
+            body: success,
+        })
+        .await;
+        let (value, status) = upstream(url).call(&api_request()).await.unwrap();
+        assert_eq!(status, 409);
+        assert_eq!(value["result"], "ok");
+        server.abort();
+
+        let error = serde_json::to_vec(&InternalApiResponse {
+            ok: false,
+            status: Some(503),
+            data: None,
+            kind: Some("under_maintenance".to_string()),
+            message: Some("maintenance".to_string()),
+        })
+        .unwrap();
+        let (url, server) = spawn_mock(MockReply {
+            status: 200,
+            content_type: "application/json",
+            body: error,
+        })
+        .await;
+        assert!(matches!(
+            upstream(url).call(&api_request()).await,
+            Err(AppError::UnderMaintenance)
+        ));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn remote_upstream_reports_transport_and_envelope_failures() {
+        for (status, body) in [(502, b"down".to_vec()), (200, b"not-json".to_vec())] {
+            let (url, server) = spawn_mock(MockReply {
+                status,
+                content_type: "application/json",
+                body,
+            })
+            .await;
+            assert!(matches!(
+                upstream(url).call(&api_request()).await,
+                Err(AppError::NetworkError(_))
+            ));
+            server.abort();
+        }
+        assert!(matches!(
+            upstream("http://127.0.0.1:1".to_string())
+                .call(&api_request())
+                .await,
+            Err(AppError::NetworkError(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn remote_image_supports_bytes_and_error_envelopes() {
+        let (url, server) = spawn_mock(MockReply {
+            status: 200,
+            content_type: "image/png",
+            body: vec![1, 2, 3],
+        })
+        .await;
+        assert_eq!(
+            upstream(url).call_image(&image_request()).await.unwrap(),
+            vec![1, 2, 3]
+        );
+        server.abort();
+
+        let body = serde_json::to_vec(&InternalApiResponse {
+            ok: false,
+            status: None,
+            data: None,
+            kind: Some("network".to_string()),
+            message: Some("failed".to_string()),
+        })
+        .unwrap();
+        let (url, server) = spawn_mock(MockReply {
+            status: 200,
+            content_type: "application/json",
+            body,
+        })
+        .await;
+        assert!(matches!(
+            upstream(url).call_image(&image_request()).await,
+            Err(AppError::NetworkError(_))
+        ));
+        server.abort();
+
+        for (status, body) in [(500, b"down".to_vec()), (200, b"bad-json".to_vec())] {
+            let (url, server) = spawn_mock(MockReply {
+                status,
+                content_type: "application/json",
+                body,
+            })
+            .await;
+            assert!(matches!(
+                upstream(url).call_image(&image_request()).await,
+                Err(AppError::NetworkError(_))
+            ));
+            server.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn router_dispatches_get_post_image_and_fails_over() {
+        let api_body = serde_json::to_vec(&InternalApiResponse {
+            ok: true,
+            status: None,
+            data: Some(serde_json::json!({"remote": true})),
+            kind: None,
+            message: None,
+        })
+        .unwrap();
+        let (api_url, api_server) = spawn_mock(MockReply {
+            status: 200,
+            content_type: "application/json",
+            body: api_body,
+        })
+        .await;
+        let configs = [
+            UpstreamConfig {
+                url: "http://127.0.0.1:1".to_string(),
+                token: String::new(),
+                priority: 0,
+                name: "broken".to_string(),
+            },
+            UpstreamConfig {
+                url: format!("{api_url}/"),
+                token: "token".to_string(),
+                priority: 1,
+                name: String::new(),
+            },
+        ];
+        let router = RegionRouter::new(
+            ServerRegion::Jp,
+            None,
+            &configs,
+            build_internal_http_client().unwrap(),
+        )
+        .unwrap();
+        let (value, status) = router.get_game_api("/system", None).await.unwrap();
+        assert_eq!(status, 200);
+        assert_eq!(value["remote"], true);
+        let (value, _) = router
+            .post_game_api_body("/post", &serde_json::json!({"x": 1}), None)
+            .await
+            .unwrap();
+        assert_eq!(value["remote"], true);
+        api_server.abort();
+
+        let (image_url, image_server) = spawn_mock(MockReply {
+            status: 200,
+            content_type: "image/png",
+            body: vec![7, 8],
+        })
+        .await;
+        let config = UpstreamConfig {
+            url: image_url,
+            token: String::new(),
+            priority: 0,
+            name: "image".to_string(),
+        };
+        let router = RegionRouter::new(
+            ServerRegion::Jp,
+            None,
+            &[config],
+            build_internal_http_client().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            router
+                .get_image(ImageKind::CpMysekai, "a", "b")
+                .await
+                .unwrap(),
+            vec![7, 8]
+        );
+        image_server.abort();
     }
 }

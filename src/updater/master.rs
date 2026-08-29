@@ -1111,7 +1111,117 @@ pub(crate) fn is_safe_path_component(s: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use axum::body::Body;
+    use axum::extract::State;
+    use axum::http::Response;
+    use axum::Router;
+
     use super::*;
+
+    const KEY: &str = "00112233445566778899aabbccddeeff";
+    const IV: &str = "ffeeddccbbaa99887766554433221100";
+
+    #[derive(Clone)]
+    struct Reply {
+        status: u16,
+        content_type: &'static str,
+        body: Vec<u8>,
+    }
+
+    async fn handler(State(reply): State<Reply>) -> Response<Body> {
+        Response::builder()
+            .status(reply.status)
+            .header("content-type", reply.content_type)
+            .body(Body::from(reply.body))
+            .unwrap()
+    }
+
+    async fn spawn_server(reply: Reply) -> (String, tokio::task::JoinHandle<()>) {
+        let app = Router::new().fallback(handler).with_state(reply);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (format!("http://{address}"), task)
+    }
+
+    #[derive(Clone)]
+    struct UpdateReply {
+        probe: Vec<u8>,
+        master: Vec<u8>,
+    }
+
+    async fn update_handler(
+        State(reply): State<UpdateReply>,
+        uri: axum::http::Uri,
+    ) -> Response<Body> {
+        if uri.path().ends_with("/internal/login-probe") {
+            Response::builder()
+                .header("content-type", "application/json")
+                .body(Body::from(reply.probe))
+                .unwrap()
+        } else {
+            Response::builder()
+                .header("content-type", "application/octet-stream")
+                .body(Body::from(reply.master))
+                .unwrap()
+        }
+    }
+
+    async fn spawn_update_server(reply: UpdateReply) -> (String, tokio::task::JoinHandle<()>) {
+        let app = Router::new().fallback(update_handler).with_state(reply);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (format!("http://{address}"), task)
+    }
+
+    fn temp_dir() -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!("haruki_master_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    async fn make_updater(
+        region: ServerRegion,
+        api_url: &str,
+        root: &std::path::Path,
+        asset_updaters: Vec<AssetUpdaterInfo>,
+    ) -> MasterUpdater {
+        let mut config: crate::config::ServerConfig = serde_yaml::from_str("{}").unwrap();
+        config.api_url = api_url.to_string();
+        config.nuverse_master_data_url = api_url.to_string();
+        config.aes_key_hex = KEY.to_string();
+        config.aes_iv_hex = IV.to_string();
+        config.master_dir = root.join("master").to_string_lossy().into_owned();
+        config.account_dir = root.join("accounts").to_string_lossy().into_owned();
+        config.version_path = root.join("version.json").to_string_lossy().into_owned();
+        std::fs::create_dir_all(&config.account_dir).unwrap();
+        std::fs::write(
+            &config.version_path,
+            sonic_rs::to_string(&version_info()).unwrap(),
+        )
+        .unwrap();
+        let client = SekaiClient::new(
+            region,
+            config,
+            None,
+            None,
+            SekaiClient::build_http_client(None).unwrap(),
+            None,
+        )
+        .await
+        .unwrap();
+        MasterUpdater::new(
+            region,
+            Arc::new(client),
+            None,
+            None,
+            asset_updaters,
+            None,
+            Arc::new(tokio::sync::Mutex::new(())),
+            None,
+        )
+    }
 
     fn version_info() -> VersionInfo {
         VersionInfo {
@@ -1203,5 +1313,409 @@ mod tests {
         let merged = merge_version_state(ServerRegion::Jp, &mut existing, &incoming);
 
         assert_eq!(merged.asset_hash, "cp-asset-hash");
+    }
+
+    #[test]
+    fn validates_safe_components_and_merge_fallbacks() {
+        assert!(is_safe_path_component("master_001"));
+        for invalid in ["", ".", "..", "a/b", "a\\b", "a\0b"] {
+            assert!(!is_safe_path_component(invalid));
+        }
+
+        let mut existing = serde_json::Map::new();
+        existing.insert("appVersion".to_string(), JsonValue::String(String::new()));
+        existing.insert("cdnVersion".to_string(), JsonValue::from(-1));
+        let merged = merge_version_state(ServerRegion::Jp, &mut existing, &version_info());
+        assert_eq!(merged.app_version, "6.0.2");
+        assert_eq!(merged.cdn_version, 159);
+        assert_eq!(
+            non_empty_or_existing("new", &existing, "dataVersion"),
+            "new"
+        );
+        assert_eq!(
+            existing_or_non_empty(&existing, "missing", "fallback"),
+            "fallback"
+        );
+    }
+
+    #[tokio::test]
+    async fn persists_versions_and_master_files_atomically() {
+        let root = temp_dir();
+        let updater = make_updater(ServerRegion::Jp, "http://127.0.0.1:1", &root, Vec::new()).await;
+        let merged = updater.save_version(&version_info()).await.unwrap();
+        assert_eq!(merged.data_version, "6.0.0.48");
+        assert!(root.join("6.0.0.48.json").exists());
+
+        let master_dir = root.join("master");
+        std::fs::create_dir_all(&master_dir).unwrap();
+        let data = IndexMap::from([
+            ("cards".to_string(), serde_json::json!([{"id": 1}])),
+            ("musics".to_string(), serde_json::json!([])),
+        ]);
+        updater
+            .save_master_files(&data, master_dir.to_str().unwrap())
+            .await
+            .unwrap();
+        assert!(master_dir.join("cards.json").exists());
+        let unsafe_data = IndexMap::from([("../escape".to_string(), serde_json::json!([]))]);
+        assert!(updater
+            .save_master_files(&unsafe_data, master_dir.to_str().unwrap())
+            .await
+            .is_err());
+
+        let mut no_split = login_response();
+        no_split.data_version = "6.0.0.49".to_string();
+        updater.update_master_data(None, &no_split).await.unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn computes_required_updates_and_publishes_version() {
+        let root = temp_dir();
+        let updater = make_updater(ServerRegion::Jp, "http://127.0.0.1:1", &root, Vec::new()).await;
+        let mut login = login_response();
+        login.data_version = "6.0.0.49".to_string();
+        login.asset_version = "broken".to_string();
+        login.asset_hash = "new-hash".to_string();
+        assert_eq!(
+            updater.required_updates(&login, &version_info()),
+            (true, true, true)
+        );
+        updater.log_master_update(&login, false);
+        updater.log_master_update(&login, true);
+        updater
+            .save_publish_and_notify(version_info(), &login, true)
+            .await
+            .unwrap();
+        assert_eq!(updater.client.version_helper.get().data_version, "6.0.0.49");
+        updater.push_master_changes("6.0.0.49").await;
+        updater.notify_sync_peers("6.0.0.49").await;
+        updater.call_all_asset_updaters("asset", "hash").await;
+
+        let nuverse = make_updater(ServerRegion::Cn, "http://127.0.0.1:1", &root, Vec::new()).await;
+        assert_eq!(
+            nuverse.required_updates(&login_response(), &version_info()),
+            (false, false, false)
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn calls_asset_updater_for_success_failure_and_network_error() {
+        for status in [204, 500] {
+            let (url, server) = spawn_server(Reply {
+                status,
+                content_type: "application/json",
+                body: Vec::new(),
+            })
+            .await;
+            let root = temp_dir();
+            let updater = make_updater(
+                ServerRegion::Jp,
+                "http://127.0.0.1:1",
+                &root,
+                vec![AssetUpdaterInfo {
+                    url,
+                    authorization: "token".to_string(),
+                }],
+            )
+            .await;
+            updater.call_all_asset_updaters("asset", "hash").await;
+            server.abort();
+            std::fs::remove_dir_all(root).unwrap();
+        }
+
+        let root = temp_dir();
+        let updater = make_updater(
+            ServerRegion::Jp,
+            "http://127.0.0.1:1",
+            &root,
+            vec![AssetUpdaterInfo {
+                url: "http://127.0.0.1:1".to_string(),
+                authorization: String::new(),
+            }],
+        )
+        .await;
+        updater.call_all_asset_updaters("asset", "hash").await;
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn remote_source_probes_and_fetches_streams() {
+        let probe = LoginProbeResponse {
+            ok: true,
+            kind: None,
+            message: None,
+            data_version: "data".to_string(),
+            asset_version: "asset".to_string(),
+            asset_hash: "hash".to_string(),
+            cdn_version: 7,
+            suite_master_split_path: vec!["split".to_string()],
+        };
+        let (url, server) = spawn_server(Reply {
+            status: 200,
+            content_type: "application/json",
+            body: serde_json::to_vec(&probe).unwrap(),
+        })
+        .await;
+        let source = RemoteMasterSource::new(
+            ServerRegion::Jp,
+            &MasterRemoteSourceConfig {
+                url,
+                token: "token".to_string(),
+            },
+            crate::upstream::build_internal_http_client().unwrap(),
+        );
+        assert_eq!(source.probe().await.unwrap().data_version, "data");
+        server.abort();
+
+        let (url, server) = spawn_server(Reply {
+            status: 200,
+            content_type: "application/octet-stream",
+            body: vec![1, 2, 3],
+        })
+        .await;
+        let source = RemoteMasterSource::new(
+            ServerRegion::Jp,
+            &MasterRemoteSourceConfig {
+                url,
+                token: String::new(),
+            },
+            crate::upstream::build_internal_http_client().unwrap(),
+        );
+        assert_eq!(
+            source.fetch_split_bytes("/split").await.unwrap(),
+            vec![1, 2, 3]
+        );
+        server.abort();
+
+        let envelope = InternalApiResponse {
+            ok: false,
+            status: Some(403),
+            data: None,
+            kind: Some("session_error".to_string()),
+            message: Some("expired".to_string()),
+        };
+        let (url, server) = spawn_server(Reply {
+            status: 200,
+            content_type: "application/json",
+            body: serde_json::to_vec(&envelope).unwrap(),
+        })
+        .await;
+        let source = RemoteMasterSource::new(
+            ServerRegion::Jp,
+            &MasterRemoteSourceConfig {
+                url,
+                token: String::new(),
+            },
+            crate::upstream::build_internal_http_client().unwrap(),
+        );
+        assert!(matches!(
+            source.fetch_split_bytes("/split").await,
+            Err(AppError::SessionError)
+        ));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn downloads_and_restores_nuverse_master() {
+        let cryptor = crate::crypto::SekaiCryptor::from_hex(KEY, IV).unwrap();
+        let body = cryptor
+            .pack(&serde_json::json!({"cards": [{"id": 1}]}))
+            .unwrap();
+        let (url, server) = spawn_server(Reply {
+            status: 200,
+            content_type: "application/octet-stream",
+            body,
+        })
+        .await;
+        let root = temp_dir();
+        let updater = make_updater(ServerRegion::Cn, &url, &root, Vec::new()).await;
+        let restored = updater.download_nuverse_master(&url).await.unwrap();
+        assert_eq!(restored["cards"][0]["id"], 1);
+        let mut login = login_response();
+        login.cdn_version = 1;
+        updater.update_master_data(None, &login).await.unwrap();
+        assert!(root.join("master/cards.json").exists());
+        server.abort();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn downloads_cp_splits_locally_and_through_remote_source() {
+        let cryptor = crate::crypto::SekaiCryptor::from_hex(KEY, IV).unwrap();
+        let encrypted = cryptor
+            .pack(&serde_json::json!({"events": [{"id": 1}]}))
+            .unwrap();
+        let (url, server) = spawn_server(Reply {
+            status: 200,
+            content_type: "application/octet-stream",
+            body: encrypted.clone(),
+        })
+        .await;
+        let root = temp_dir();
+        let updater = make_updater(ServerRegion::Jp, &url, &root, Vec::new()).await;
+        let session = AccountSession::new(crate::client::AccountType::CP(
+            crate::client::SekaiAccountCP {
+                user_id: "1".to_string(),
+                device_id: "device".to_string(),
+                credential: "credential".to_string(),
+            },
+        ));
+        let data = updater
+            .download_cp_master_split(&session, "/split")
+            .await
+            .unwrap();
+        assert_eq!(data["events"][0]["id"], 1);
+        let mut login = login_response();
+        login.suite_master_split_path = vec!["split".to_string(), "/split".to_string()];
+        std::fs::create_dir_all(root.join("master")).unwrap();
+        updater
+            .download_master_files(
+                Some(&session),
+                &login,
+                root.join("master").to_str().unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(root.join("master/events.json").exists());
+        server.abort();
+
+        let (url, server) = spawn_server(Reply {
+            status: 200,
+            content_type: "application/octet-stream",
+            body: encrypted,
+        })
+        .await;
+        let remote = RemoteMasterSource::new(
+            ServerRegion::Jp,
+            &MasterRemoteSourceConfig {
+                url,
+                token: String::new(),
+            },
+            crate::upstream::build_internal_http_client().unwrap(),
+        );
+        let data = updater
+            .download_cp_master_split_remote(&remote, "/split")
+            .await
+            .unwrap();
+        assert_eq!(data["events"][0]["id"], 1);
+        server.abort();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn notifies_successful_and_failing_sync_peers() {
+        for status in [200, 500] {
+            let (url, server) = spawn_server(Reply {
+                status,
+                content_type: "application/json",
+                body: Vec::new(),
+            })
+            .await;
+            let root = temp_dir();
+            let mut updater =
+                make_updater(ServerRegion::Jp, "http://127.0.0.1:1", &root, Vec::new()).await;
+            Arc::get_mut(&mut updater.client)
+                .unwrap()
+                .config
+                .master_sync
+                .notify
+                .push(crate::config::MasterSyncPeer {
+                    url,
+                    token: "secret".to_string(),
+                });
+            updater.notify_sync_peers("data").await;
+            server.abort();
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn remote_source_reports_bad_status_and_error_probe() {
+        for (status, body) in [
+            (500, Vec::new()),
+            (
+                200,
+                serde_json::to_vec(&LoginProbeResponse {
+                    ok: false,
+                    kind: Some("no_account".to_string()),
+                    message: Some("none".to_string()),
+                    data_version: String::new(),
+                    asset_version: String::new(),
+                    asset_hash: String::new(),
+                    cdn_version: 0,
+                    suite_master_split_path: Vec::new(),
+                })
+                .unwrap(),
+            ),
+        ] {
+            let (url, server) = spawn_server(Reply {
+                status,
+                content_type: "application/json",
+                body,
+            })
+            .await;
+            let source = RemoteMasterSource::new(
+                ServerRegion::Jp,
+                &MasterRemoteSourceConfig {
+                    url,
+                    token: String::new(),
+                },
+                crate::upstream::build_internal_http_client().unwrap(),
+            );
+            assert!(source.probe().await.is_err());
+            server.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn check_update_runs_complete_remote_nuverse_pipeline() {
+        let cryptor = crate::crypto::SekaiCryptor::from_hex(KEY, IV).unwrap();
+        let probe = LoginProbeResponse {
+            ok: true,
+            kind: None,
+            message: None,
+            data_version: "6.0.0.49".to_string(),
+            asset_version: "6.0.0.2".to_string(),
+            asset_hash: "new-asset".to_string(),
+            cdn_version: 160,
+            suite_master_split_path: Vec::new(),
+        };
+        let (url, server) = spawn_update_server(UpdateReply {
+            probe: serde_json::to_vec(&probe).unwrap(),
+            master: cryptor
+                .pack(&serde_json::json!({"cards": [{"id": 1}]}))
+                .unwrap(),
+        })
+        .await;
+        let root = temp_dir();
+        let mut updater = make_updater(ServerRegion::Cn, &url, &root, Vec::new()).await;
+        updater.remote_source = Some(RemoteMasterSource::new(
+            ServerRegion::Cn,
+            &MasterRemoteSourceConfig {
+                url,
+                token: "token".to_string(),
+            },
+            crate::upstream::build_internal_http_client().unwrap(),
+        ));
+        updater.check_update().await;
+        assert!(root.join("master/cards.json").exists());
+        let persisted: VersionInfo =
+            sonic_rs::from_slice(&std::fs::read(root.join("version.json")).unwrap()).unwrap();
+        assert_eq!(persisted.data_version, "6.0.0.49");
+        assert_eq!(persisted.cdn_version, 160);
+        server.abort();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn check_update_returns_cleanly_without_session_or_version_file() {
+        let root = temp_dir();
+        let updater = make_updater(ServerRegion::Jp, "http://127.0.0.1:1", &root, Vec::new()).await;
+        updater.check_update().await;
+        std::fs::remove_file(&updater.client.config.version_path).unwrap();
+        updater.check_update().await;
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

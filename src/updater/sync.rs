@@ -401,7 +401,60 @@ pub fn build_syncers(
 
 #[cfg(test)]
 mod tests {
+    use axum::body::Body;
+    use axum::extract::State;
+    use axum::http::{Response, Uri};
+    use axum::Router;
+
     use super::*;
+
+    #[derive(Clone)]
+    struct SyncReply {
+        version: Vec<u8>,
+        bundle: Vec<u8>,
+    }
+
+    async fn sync_handler(State(reply): State<SyncReply>, uri: Uri) -> Response<Body> {
+        let (content_type, body) = if uri.path().ends_with("/version") {
+            ("application/json", reply.version)
+        } else {
+            ("application/x-tar", reply.bundle)
+        };
+        Response::builder()
+            .header("content-type", content_type)
+            .body(Body::from(body))
+            .unwrap()
+    }
+
+    async fn spawn_sync_source(reply: SyncReply) -> (String, tokio::task::JoinHandle<()>) {
+        let app = Router::new().fallback(sync_handler).with_state(reply);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (format!("http://{address}"), task)
+    }
+
+    fn bundle_bytes(root: &Path, version: &VersionInfo) -> Vec<u8> {
+        let source = root.join("bundle-source");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(source.join("cards.json"), "[{\"id\":1}]").unwrap();
+        std::fs::write(
+            source.join(BUNDLE_VERSION_ENTRY),
+            sonic_rs::to_string(version).unwrap(),
+        )
+        .unwrap();
+        let tar_path = root.join("bundle.tar");
+        let file = std::fs::File::create(&tar_path).unwrap();
+        let mut builder = tar::Builder::new(file);
+        builder
+            .append_path_with_name(source.join("cards.json"), "cards.json")
+            .unwrap();
+        builder
+            .append_path_with_name(source.join(BUNDLE_VERSION_ENTRY), BUNDLE_VERSION_ENTRY)
+            .unwrap();
+        builder.finish().unwrap();
+        std::fs::read(tar_path).unwrap()
+    }
 
     fn version(data: &str, cdn: i32) -> VersionInfo {
         VersionInfo {
@@ -485,5 +538,81 @@ mod tests {
         let err = unpack_master_tar(&tar_path, &dir, "TEST").unwrap_err();
         assert!(matches!(err, AppError::UpstreamData(_)));
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn sync_once_downloads_bundle_persists_version_and_skips_when_current() {
+        let root = std::env::temp_dir().join(format!("haruki_sync_e2e_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let remote = VersionInfo {
+            app_version: "6.0.1".to_string(),
+            app_hash: "hash".to_string(),
+            data_version: "2.0.0.1".to_string(),
+            asset_version: "2.0.0.1".to_string(),
+            asset_hash: "asset".to_string(),
+            cdn_version: 2,
+        };
+        let (url, server) = spawn_sync_source(SyncReply {
+            version: sonic_rs::to_string(&remote).unwrap().into_bytes(),
+            bundle: bundle_bytes(&root, &remote),
+        })
+        .await;
+
+        let mut config: Config = serde_yaml::from_str("backend: {}").unwrap();
+        let mut server_config: crate::config::ServerConfig = serde_yaml::from_str("{}").unwrap();
+        server_config.master_dir = root.join("master").to_string_lossy().into_owned();
+        server_config.version_path = root.join("version.json").to_string_lossy().into_owned();
+        server_config.master_sync.source_url = url;
+        server_config.master_sync.source_token = "token".to_string();
+        config.servers.insert(ServerRegion::Cn, server_config);
+        let syncers = build_syncers(&config, &HashMap::new(), None, &HashMap::new());
+        let syncer = syncers.get(&ServerRegion::Cn).unwrap();
+
+        assert!(syncer.sync_once().await.unwrap());
+        assert!(root.join("master/cards.json").exists());
+        let local = syncer.load_local_version().await;
+        assert_eq!(local.data_version, "2.0.0.1");
+        assert_eq!(local.cdn_version, 2);
+        assert!(!syncer.sync_once().await.unwrap());
+
+        let guard = syncer.sync_lock.lock().await;
+        assert!(!syncer.sync_once().await.unwrap());
+        drop(guard);
+        syncer.ingest().await;
+        syncer.git_push("2.0.0.1").await;
+        server.abort();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn syncer_builder_filters_incomplete_configuration() {
+        let root = std::env::temp_dir().join(format!("haruki_sync_build_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut config: Config = serde_yaml::from_str("backend: {}").unwrap();
+        let empty: crate::config::ServerConfig = serde_yaml::from_str("{}").unwrap();
+        config.servers.insert(ServerRegion::Jp, empty);
+        let mut incomplete: crate::config::ServerConfig = serde_yaml::from_str("{}").unwrap();
+        incomplete.master_sync.source_url = "http://127.0.0.1:1".to_string();
+        config.servers.insert(ServerRegion::Tw, incomplete);
+        assert!(build_syncers(&config, &HashMap::new(), None, &HashMap::new()).is_empty());
+
+        let syncer = MasterSyncer {
+            region: ServerRegion::Jp,
+            master_dir: root.join("master").to_string_lossy().into_owned(),
+            version_path: root.join("missing.json").to_string_lossy().into_owned(),
+            source_url: "http://127.0.0.1:1".to_string(),
+            source_token: String::new(),
+            http: reqwest::Client::new(),
+            master_db: None,
+            git_helper: None,
+            version_helper: None,
+            version_lock: Arc::new(tokio::sync::Mutex::new(())),
+            sync_lock: tokio::sync::Mutex::new(()),
+            ingest_failed: AtomicBool::new(false),
+        };
+        assert_eq!(syncer.load_local_version().await.data_version, "");
+        assert!(syncer.fetch_remote_version().await.is_err());
+        assert!(syncer.pull_and_unpack().await.is_err());
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

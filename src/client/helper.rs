@@ -22,11 +22,38 @@ pub async fn write_file_atomic(path: &Path, contents: &[u8]) -> std::io::Result<
 
 #[cfg(test)]
 mod tests {
+    use axum::{http::StatusCode, response::IntoResponse, routing::post, Router};
     use reqwest::header::{HeaderMap, HeaderValue, SET_COOKIE};
+    use serde_json::json;
 
     use crate::config::ServerRegion;
 
-    use super::{effective_app_version, extract_request_cookies, write_file_atomic};
+    use super::{
+        compare_version, effective_app_version, extract_request_cookies, write_file_atomic,
+        CookieHelper, VersionHelper, VersionInfo,
+    };
+
+    async fn spawn_cookie_server(with_cookie: bool) -> (String, tokio::task::JoinHandle<()>) {
+        let app = Router::new().route(
+            "/cookie",
+            post(move || async move {
+                if with_cookie {
+                    (
+                        StatusCode::OK,
+                        [(SET_COOKIE, "session=abc; Path=/; HttpOnly")],
+                        "ok",
+                    )
+                        .into_response()
+                } else {
+                    (StatusCode::OK, "missing").into_response()
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (format!("http://{address}/cookie"), task)
+    }
 
     // Atomic write: target ends with the new contents, overwrite works, and no
     // temp file is left behind in the directory.
@@ -118,6 +145,91 @@ mod tests {
             effective_app_version(ServerRegion::Cn, "invalid"),
             "invalid"
         );
+    }
+
+    #[tokio::test]
+    async fn cookie_helper_fetches_and_caches_cookie() {
+        let (url, server) = spawn_cookie_server(true).await;
+        let helper = CookieHelper::new(&url);
+
+        assert!(helper.cached_cookies().is_empty());
+        assert_eq!(helper.get_cookies(None).await.unwrap(), "session=abc");
+        assert_eq!(helper.cached_cookies(), "session=abc");
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn cookie_helper_rejects_invalid_proxy() {
+        let helper = CookieHelper::new("http://127.0.0.1/unused");
+        let error = helper.get_cookies(Some("://invalid")).await.unwrap_err();
+        assert!(error.to_string().contains("Invalid proxy"));
+    }
+
+    #[tokio::test]
+    async fn version_helper_loads_gets_and_updates() {
+        let dir = std::env::temp_dir().join(format!("haruki_version_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("version.json");
+        std::fs::write(
+            &path,
+            json!({
+                "appVersion": "6.0.1",
+                "appHash": "hash",
+                "dataVersion": "data",
+                "assetVersion": "asset"
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let helper = VersionHelper::new(path.to_str().unwrap());
+        let loaded = helper.load().await.unwrap();
+        assert_eq!(loaded.app_version, "6.0.1");
+        assert_eq!(helper.get().asset_hash, "");
+
+        helper.update(VersionInfo {
+            app_version: "6.1.0".to_string(),
+            cdn_version: 7,
+            ..VersionInfo::default()
+        });
+        assert_eq!(helper.get().app_version, "6.1.0");
+        assert_eq!(helper.get().cdn_version, 7);
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn version_helper_reports_read_and_parse_errors() {
+        let missing = VersionHelper::new("/definitely/missing/version.json");
+        assert!(missing
+            .load()
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("read"));
+
+        let path =
+            std::env::temp_dir().join(format!("haruki_bad_version_{}.json", uuid::Uuid::new_v4()));
+        std::fs::write(&path, "not json").unwrap();
+        let invalid = VersionHelper::new(path.to_str().unwrap());
+        assert!(invalid
+            .load()
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("parse"));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn compares_versions_with_different_lengths() {
+        assert!(compare_version("2.0", "1.9.9").unwrap());
+        assert!(compare_version("1.2.1", "1.2").unwrap());
+        assert!(!compare_version("1.2", "1.2.0").unwrap());
+        assert!(!compare_version("1.1.9", "1.2").unwrap());
+        assert!(compare_version("1.bad", "1.0").is_err());
+        assert!(compare_version("1.0", "bad").is_err());
     }
 }
 

@@ -88,4 +88,28 @@ mod tests {
         drop(guard);
         assert!(session.try_reserve(), "released lock is reservable again");
     }
+
+    #[tokio::test]
+    async fn session_exposes_account_token_and_independent_locks() {
+        let session = dummy_session();
+        assert_eq!(session.user_id(), "1");
+        session.set_user_id("42".to_string());
+        assert_eq!(session.user_id(), "42");
+
+        assert_eq!(session.get_session_token(), None);
+        session.set_session_token(Some("token".to_string()));
+        assert_eq!(session.get_session_token().as_deref(), Some("token"));
+        session.set_session_token(None);
+        assert_eq!(session.get_session_token(), None);
+
+        let api_guard = session.lock_api().await;
+        let login_guard = session.lock_login().await;
+        assert!(!session.try_reserve());
+        drop(login_guard);
+        drop(api_guard);
+
+        let dumped = session.dump_account().unwrap();
+        let restored: serde_json::Value = rmp_serde::from_slice(&dumped).unwrap();
+        assert_eq!(restored["userID"], 42);
+    }
 }

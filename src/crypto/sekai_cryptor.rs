@@ -306,4 +306,73 @@ mod tests {
         assert!(msgpack.len() < packed.len(), "padding must be stripped");
         assert_eq!(decode_msgpack_value(&msgpack).unwrap(), original);
     }
+
+    #[test]
+    fn validates_keys_ciphertext_and_padding() {
+        assert!(SekaiCryptor::from_hex("zz", "00").is_err());
+        assert!(SekaiCryptor::from_hex("00", "zz").is_err());
+        assert!(SekaiCryptor::from_hex("00", "00000000000000000000000000000000").is_err());
+        assert!(SekaiCryptor::from_hex("00000000000000000000000000000000", "00").is_err());
+
+        let cryptor = SekaiCryptor::from_hex(
+            "00112233445566778899aabbccddeeff",
+            "ffeeddccbbaa99887766554433221100",
+        )
+        .unwrap();
+        assert!(cryptor.pack_bytes(&[]).is_err());
+        assert!(cryptor.unpack::<serde_json::Value>(&[]).is_err());
+        assert!(cryptor.unpack::<serde_json::Value>(&[0; 3]).is_err());
+        assert!(cryptor.decrypt_msgpack(&[]).is_err());
+        assert!(cryptor.decrypt_msgpack(&[0; 3]).is_err());
+        assert!(cryptor.unpack_value(&[]).is_err());
+        assert!(cryptor.unpack_value(&[0; 3]).is_err());
+
+        assert!(pkcs7_padding_len(&[]).is_err());
+        assert!(pkcs7_padding_len(&[0]).is_err());
+        assert!(pkcs7_padding_len(&[17]).is_err());
+        assert!(pkcs7_padding_len(&[1, 2, 3]).is_err());
+    }
+
+    #[test]
+    fn pack_bytes_and_value_decoding_cover_all_msgpack_shapes() {
+        use rmpv::Value as RV;
+
+        let cryptor = SekaiCryptor::from_hex(
+            "00112233445566778899aabbccddeeff",
+            "ffeeddccbbaa99887766554433221100",
+        )
+        .unwrap();
+        let value = RV::Map(vec![
+            (RV::from("nil"), RV::Nil),
+            (RV::from("bool"), RV::Boolean(true)),
+            (RV::from("unsigned"), RV::from(u64::MAX)),
+            (RV::from("f32"), RV::F32(1.5)),
+            (RV::from("f64"), RV::F64(2.5)),
+            (RV::from("ext"), RV::Ext(1, vec![1, 2, 3])),
+            (RV::Boolean(false), RV::from("ignored")),
+        ]);
+        let mut msgpack = Vec::new();
+        rmpv::encode::write_value(&mut msgpack, &value).unwrap();
+        let encrypted = cryptor.pack_bytes(&msgpack).unwrap();
+        let decoded = cryptor.unpack_value(&encrypted).unwrap();
+        assert_eq!(decoded["nil"], serde_json::Value::Null);
+        assert_eq!(decoded["bool"], true);
+        assert_eq!(decoded["unsigned"], serde_json::json!(u64::MAX));
+        assert_eq!(decoded["f32"], 1.5);
+        assert_eq!(decoded["f64"], 2.5);
+        assert_eq!(decoded["ext"], "AQID");
+        assert!(decoded.get("false").is_none());
+    }
+
+    #[test]
+    fn ordered_unpack_rejects_non_object_and_invalid_msgpack() {
+        let cryptor = SekaiCryptor::from_hex(
+            "00112233445566778899aabbccddeeff",
+            "ffeeddccbbaa99887766554433221100",
+        )
+        .unwrap();
+        let array = cryptor.pack(&vec![1, 2, 3]).unwrap();
+        assert!(cryptor.unpack_ordered(&array).is_err());
+        assert!(decode_msgpack_value(&[]).is_err());
+    }
 }

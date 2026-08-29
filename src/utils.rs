@@ -136,4 +136,40 @@ mod tests {
         assert!(result.is_err());
         assert_eq!(counter.load(Ordering::SeqCst), 3);
     }
+
+    #[tokio::test]
+    async fn retry_stops_immediately_for_non_retryable_error_and_zero_attempts() {
+        let counter = AtomicU32::new(0);
+        let result = retry_async(3, Duration::ZERO, is_retryable_error, || {
+            counter.fetch_add(1, Ordering::SeqCst);
+            async { Err::<(), _>(AppError::ParseError("bad".to_string())) }
+        })
+        .await;
+        assert!(matches!(result, Err(AppError::ParseError(_))));
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
+        assert!(retry_async(
+            0,
+            Duration::ZERO,
+            |_| true,
+            || async { Ok::<_, AppError>(()) }
+        )
+        .await
+        .is_err());
+    }
+
+    #[test]
+    fn retryable_classification_and_cached_resource_operations() {
+        assert!(is_retryable_error(&AppError::NetworkError("x".to_string())));
+        assert!(is_retryable_error(&AppError::SessionError));
+        assert!(is_retryable_error(&AppError::CookieExpired));
+        assert!(!is_retryable_error(&AppError::ParseError("x".to_string())));
+
+        let cache = CachedResource::new("first".to_string());
+        assert_eq!(cache.get(), "first");
+        cache.set("second".to_string());
+        assert_eq!(cache.replace("third".to_string()), "second");
+        assert_eq!(cache.get(), "third");
+        let default: CachedResource<String> = CachedResource::default();
+        assert!(default.get().is_empty());
+    }
 }

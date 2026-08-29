@@ -499,3 +499,469 @@ pub async fn post_master_updated(
         message: Some("sync triggered".to_string()),
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use axum::body::to_bytes;
+    use axum::extract::{Path, State};
+    use axum::http::{HeaderMap, HeaderValue, StatusCode};
+    use axum::Json;
+    use axum::{http::Uri, Router};
+
+    use super::*;
+    use crate::client::SekaiClient;
+    use crate::config::{Config, ServerConfig};
+    use crate::upstream::{ImageKind, InternalImageRequest};
+    use crate::RequestCoalescer;
+
+    const KEY: &str = "00112233445566778899aabbccddeeff";
+    const IV: &str = "ffeeddccbbaa99887766554433221100";
+
+    fn temp_dir() -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!("haruki_internal_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    fn auth_headers() -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", HeaderValue::from_static("Bearer secret"));
+        headers
+    }
+
+    async fn state(root: &std::path::Path, include_client: bool) -> Arc<AppState> {
+        let mut config: Config =
+            serde_yaml::from_str("backend:\n  internal_token: secret").unwrap();
+        let mut server_config: ServerConfig = serde_yaml::from_str("{}").unwrap();
+        server_config.aes_key_hex = KEY.to_string();
+        server_config.aes_iv_hex = IV.to_string();
+        server_config.account_dir = root.join("accounts").to_string_lossy().into_owned();
+        server_config.version_path = root.join("version.json").to_string_lossy().into_owned();
+        server_config.master_dir = root.join("master").to_string_lossy().into_owned();
+        std::fs::create_dir_all(&server_config.account_dir).unwrap();
+        std::fs::create_dir_all(&server_config.master_dir).unwrap();
+        config
+            .servers
+            .insert(ServerRegion::Jp, server_config.clone());
+
+        let mut clients = HashMap::new();
+        if include_client {
+            let client = SekaiClient::new(
+                ServerRegion::Jp,
+                server_config,
+                None,
+                None,
+                SekaiClient::build_http_client(None).unwrap(),
+                None,
+            )
+            .await
+            .unwrap();
+            clients.insert(ServerRegion::Jp, Arc::new(client));
+        }
+        Arc::new(AppState {
+            config,
+            clients,
+            routers: HashMap::new(),
+            syncers: HashMap::new(),
+            version_locks: HashMap::new(),
+            db: None,
+            master_db: None,
+            redis: None,
+            jwt_secret: None,
+            coalescer: Arc::new(RequestCoalescer::default()),
+        })
+    }
+
+    async fn json_body(response: Response) -> serde_json::Value {
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[derive(Clone)]
+    struct GameReply {
+        login: Vec<u8>,
+        game: Vec<u8>,
+    }
+
+    async fn game_handler(State(reply): State<GameReply>, uri: Uri) -> Response {
+        if uri.path().contains("/auth") {
+            return (
+                StatusCode::OK,
+                [("content-type", "application/octet-stream")],
+                reply.login,
+            )
+                .into_response();
+        }
+        if uri.path().starts_with("/api/") {
+            return (
+                StatusCode::OK,
+                [("content-type", "application/octet-stream")],
+                reply.game,
+            )
+                .into_response();
+        }
+        (
+            StatusCode::OK,
+            [("content-type", "image/png")],
+            vec![1, 2, 3],
+        )
+            .into_response()
+    }
+
+    async fn initialized_state(
+        root: &std::path::Path,
+    ) -> (Arc<AppState>, tokio::task::JoinHandle<()>) {
+        let cryptor = crate::crypto::SekaiCryptor::from_hex(KEY, IV).unwrap();
+        let app = Router::new().fallback(game_handler).with_state(GameReply {
+            login: cryptor
+                .pack(&serde_json::json!({
+                    "sessionToken": "token",
+                    "dataVersion": "data",
+                    "assetVersion": "asset",
+                    "assetHash": "hash"
+                }))
+                .unwrap(),
+            game: cryptor.pack(&serde_json::json!({"ok": true})).unwrap(),
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let mut app_state = (*state(root, false).await).clone();
+        let server_config = app_state.config.servers.get_mut(&ServerRegion::Jp).unwrap();
+        server_config.api_url = format!("http://{address}");
+        std::fs::write(
+            &server_config.version_path,
+            r#"{"appVersion":"1","appHash":"h","dataVersion":"d","assetVersion":"a"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("accounts/account.json"),
+            r#"{"userId":"1","deviceId":"device","credential":"credential"}"#,
+        )
+        .unwrap();
+        let client = Arc::new(
+            SekaiClient::new(
+                ServerRegion::Jp,
+                server_config.clone(),
+                None,
+                None,
+                SekaiClient::build_http_client(None).unwrap(),
+                None,
+            )
+            .await
+            .unwrap(),
+        );
+        client.init().await.unwrap();
+        app_state.clients.insert(ServerRegion::Jp, client);
+        (Arc::new(app_state), server)
+    }
+
+    #[tokio::test]
+    async fn authenticates_internal_endpoints_and_builds_error_envelopes() {
+        let root = temp_dir();
+        let state = state(&root, false).await;
+        assert_eq!(bearer_token(&auth_headers()), Some("secret"));
+        assert!(check_internal_auth(&state, &auth_headers()).is_none());
+        assert_eq!(
+            check_internal_auth(&state, &HeaderMap::new())
+                .unwrap()
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+
+        let mut disabled = (*state).clone();
+        disabled.config.backend.internal_token.clear();
+        assert_eq!(
+            check_internal_auth(&disabled, &HeaderMap::new())
+                .unwrap()
+                .status(),
+            StatusCode::NOT_FOUND
+        );
+
+        for error in [
+            AppError::Unknown {
+                status: 404,
+                body: "missing".to_string(),
+            },
+            AppError::InvalidHttpStatus(418),
+            AppError::NetworkError("down".to_string()),
+        ] {
+            let envelope = error_envelope(&error);
+            assert!(!envelope.ok);
+            let response = envelope_response(&envelope);
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn api_probe_stream_and_image_return_precise_precondition_errors() {
+        let root = temp_dir();
+        let missing = state(&root, false).await;
+        let invalid_req = InternalApiRequest {
+            server: "bad".to_string(),
+            method: "GET".to_string(),
+            path: "/x".to_string(),
+            params: None,
+            body: None,
+        };
+        let body = json_body(
+            post_sekai_api(State(missing.clone()), auth_headers(), Json(invalid_req)).await,
+        )
+        .await;
+        assert_eq!(body["kind"], "invalid_server_region");
+
+        let req = InternalApiRequest {
+            server: "jp".to_string(),
+            method: "GET".to_string(),
+            path: "/x".to_string(),
+            params: None,
+            body: None,
+        };
+        let body =
+            json_body(post_sekai_api(State(missing.clone()), auth_headers(), Json(req)).await)
+                .await;
+        assert_eq!(body["kind"], "no_client");
+
+        let with_client = state(&root, true).await;
+        let unsupported = InternalApiRequest {
+            server: "jp".to_string(),
+            method: "DELETE".to_string(),
+            path: "/x".to_string(),
+            params: None,
+            body: None,
+        };
+        let body = json_body(
+            post_sekai_api(
+                State(with_client.clone()),
+                auth_headers(),
+                Json(unsupported),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(body["kind"], "parse");
+
+        let probe = post_login_probe(
+            State(with_client.clone()),
+            auth_headers(),
+            Json(LoginProbeRequest {
+                server: "jp".to_string(),
+            }),
+        )
+        .await;
+        assert_eq!(json_body(probe).await["kind"], "no_account");
+        let invalid_probe = post_login_probe(
+            State(with_client.clone()),
+            auth_headers(),
+            Json(LoginProbeRequest {
+                server: "bad".to_string(),
+            }),
+        )
+        .await;
+        assert_eq!(
+            json_body(invalid_probe).await["kind"],
+            "invalid_server_region"
+        );
+
+        let stream = post_game_stream(
+            State(with_client.clone()),
+            auth_headers(),
+            Json(GameStreamRequest {
+                server: "jp".to_string(),
+                path: "/x".to_string(),
+            }),
+        )
+        .await;
+        assert_eq!(json_body(stream).await["kind"], "no_client");
+        let image = post_sekai_image(
+            State(with_client),
+            auth_headers(),
+            Json(InternalImageRequest {
+                server: "jp".to_string(),
+                kind: ImageKind::CpMysekai,
+                param1: "a".to_string(),
+                param2: "b".to_string(),
+            }),
+        )
+        .await;
+        assert_eq!(json_body(image).await["kind"], "no_client");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn executes_successful_local_api_probe_stream_and_image_calls() {
+        let root = temp_dir();
+        let (state, server) = initialized_state(&root).await;
+        for (method, body) in [
+            ("GET".to_string(), None),
+            ("POST".to_string(), Some(serde_json::json!({"x": 1}))),
+        ] {
+            let response = post_sekai_api(
+                State(state.clone()),
+                auth_headers(),
+                Json(InternalApiRequest {
+                    server: "jp".to_string(),
+                    method,
+                    path: "/test".to_string(),
+                    params: None,
+                    body,
+                }),
+            )
+            .await;
+            let body = json_body(response).await;
+            assert_eq!(body["ok"], true);
+            assert_eq!(body["data"]["ok"], true);
+        }
+
+        let probe = post_login_probe(
+            State(state.clone()),
+            auth_headers(),
+            Json(LoginProbeRequest {
+                server: "jp".to_string(),
+            }),
+        )
+        .await;
+        let body = json_body(probe).await;
+        assert_eq!(body["ok"], true);
+        assert_eq!(body["dataVersion"], "data");
+
+        let stream = post_game_stream(
+            State(state.clone()),
+            auth_headers(),
+            Json(GameStreamRequest {
+                server: "jp".to_string(),
+                path: "/stream".to_string(),
+            }),
+        )
+        .await;
+        assert_eq!(stream.status(), StatusCode::OK);
+        assert_eq!(stream.headers()["x-haruki-game-status"], "200");
+        assert!(!to_bytes(stream.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .is_empty());
+
+        let image = post_sekai_image(
+            State(state),
+            auth_headers(),
+            Json(InternalImageRequest {
+                server: "jp".to_string(),
+                kind: ImageKind::CpMusicScore,
+                param1: "a".to_string(),
+                param2: "b".to_string(),
+            }),
+        )
+        .await;
+        assert_eq!(image.status(), StatusCode::OK);
+        assert_eq!(image.headers()["content-type"], "application/octet-stream");
+        assert_eq!(
+            to_bytes(image.into_body(), usize::MAX).await.unwrap(),
+            vec![1, 2, 3]
+        );
+        server.abort();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn serves_version_and_reports_version_failures() {
+        let root = temp_dir();
+        let state = state(&root, false).await;
+        let response = get_master_version(
+            State(state.clone()),
+            auth_headers(),
+            Path("bad".to_string()),
+        )
+        .await;
+        assert_eq!(json_body(response).await["kind"], "invalid_server_region");
+        let response =
+            get_master_version(State(state.clone()), auth_headers(), Path("tw".to_string())).await;
+        assert_eq!(json_body(response).await["kind"], "not_found");
+
+        let response =
+            get_master_version(State(state.clone()), auth_headers(), Path("jp".to_string())).await;
+        assert_eq!(json_body(response).await["kind"], "io");
+        std::fs::write(root.join("version.json"), "invalid").unwrap();
+        let response =
+            get_master_version(State(state.clone()), auth_headers(), Path("jp".to_string())).await;
+        assert_eq!(json_body(response).await["kind"], "parse");
+        std::fs::write(
+            root.join("version.json"),
+            r#"{"appVersion":"1","appHash":"h","dataVersion":"d","assetVersion":"a"}"#,
+        )
+        .unwrap();
+        let response =
+            get_master_version(State(state), auth_headers(), Path("jp".to_string())).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(json_body(response).await["appVersion"], "1");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn builds_and_streams_master_tar() {
+        let root = temp_dir();
+        let state = state(&root, false).await;
+        let out = root.join("direct.tar");
+        assert!(matches!(
+            build_master_tar(
+                root.join("master").to_str().unwrap(),
+                root.join("version.json").to_str().unwrap(),
+                &out
+            ),
+            Err(AppError::NotFound(_))
+        ));
+
+        std::fs::write(root.join("master/data.json"), "[]").unwrap();
+        std::fs::write(root.join("master/.hidden.json"), "[]").unwrap();
+        std::fs::write(root.join("master/note.txt"), "ignored").unwrap();
+        std::fs::write(root.join("version.json"), "{}").unwrap();
+        build_master_tar(
+            root.join("master").to_str().unwrap(),
+            root.join("version.json").to_str().unwrap(),
+            &out,
+        )
+        .unwrap();
+        assert!(out.metadata().unwrap().len() > 0);
+
+        let response =
+            get_master_bundle(State(state), auth_headers(), Path("jp".to_string())).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["content-type"], "application/x-tar");
+        assert!(!to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn master_updated_validates_region_and_sync_configuration() {
+        let root = temp_dir();
+        let state = state(&root, false).await;
+        let invalid = post_master_updated(
+            State(state.clone()),
+            auth_headers(),
+            Json(MasterUpdatedNotice {
+                server: "bad".to_string(),
+                data_version: String::new(),
+            }),
+        )
+        .await;
+        assert_eq!(json_body(invalid).await["kind"], "invalid_server_region");
+        let missing = post_master_updated(
+            State(state),
+            auth_headers(),
+            Json(MasterUpdatedNotice {
+                server: "jp".to_string(),
+                data_version: "1".to_string(),
+            }),
+        )
+        .await;
+        assert_eq!(json_body(missing).await["kind"], "not_found");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}

@@ -1241,3 +1241,623 @@ pub struct UserRegistration {
     )]
     pub user_id: String,
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+    use std::path::Path;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use axum::body::Body;
+    use axum::extract::State;
+    use axum::http::{HeaderValue, Response as AxumResponse, StatusCode};
+    use axum::Router;
+    use notify::event::{CreateKind, ModifyKind, RemoveKind};
+    use serde_json::json;
+
+    use super::*;
+
+    const KEY: &str = "00112233445566778899aabbccddeeff";
+    const IV: &str = "ffeeddccbbaa99887766554433221100";
+
+    #[derive(Clone)]
+    struct StaticResponse {
+        status: u16,
+        content_type: &'static str,
+        body: Vec<u8>,
+        session_token: Option<&'static str>,
+    }
+
+    async fn static_handler(State(response): State<StaticResponse>) -> AxumResponse<Body> {
+        let mut builder = AxumResponse::builder()
+            .status(response.status)
+            .header("content-type", response.content_type);
+        if let Some(token) = response.session_token {
+            builder = builder.header("x-session-token", token);
+        }
+        builder.body(Body::from(response.body)).unwrap()
+    }
+
+    async fn spawn_server(response: StaticResponse) -> (String, tokio::task::JoinHandle<()>) {
+        let app = Router::new().fallback(static_handler).with_state(response);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (format!("http://{address}"), task)
+    }
+
+    fn temp_dir(label: &str) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!("haruki_{label}_{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    fn config(api_url: &str, root: &Path) -> ServerConfig {
+        let mut config: ServerConfig = serde_yaml::from_str("{}").unwrap();
+        config.api_url = api_url.to_string();
+        config.account_dir = root.join("accounts").to_string_lossy().into_owned();
+        config.version_path = root.join("version.json").to_string_lossy().into_owned();
+        config.aes_key_hex = KEY.to_string();
+        config.aes_iv_hex = IV.to_string();
+        config
+            .headers
+            .insert("X-Test".to_string(), "yes".to_string());
+        std::fs::create_dir_all(&config.account_dir).unwrap();
+        std::fs::write(
+            &config.version_path,
+            r#"{"appVersion":"6.0.2","appHash":"hash","dataVersion":"data","assetVersion":"asset"}"#,
+        )
+        .unwrap();
+        config
+    }
+
+    async fn make_client(region: ServerRegion, api_url: &str) -> (SekaiClient, std::path::PathBuf) {
+        let root = temp_dir("client");
+        let client = SekaiClient::new(
+            region,
+            config(api_url, &root),
+            None,
+            None,
+            SekaiClient::build_http_client(None).unwrap(),
+            None,
+        )
+        .await
+        .unwrap();
+        (client, root)
+    }
+
+    fn session(region: ServerRegion, user_id: &str) -> Arc<AccountSession> {
+        let account = if region.is_cp_server() {
+            AccountType::CP(SekaiAccountCP {
+                user_id: user_id.to_string(),
+                device_id: "device".to_string(),
+                credential: "credential".to_string(),
+            })
+        } else {
+            AccountType::Nuverse(SekaiAccountNuverse {
+                user_id: user_id.to_string(),
+                device_id: "device".to_string(),
+                access_token: "access".to_string(),
+            })
+        };
+        Arc::new(AccountSession::new(account))
+    }
+
+    fn encrypted(value: serde_json::Value) -> Vec<u8> {
+        SekaiCryptor::from_hex(KEY, IV)
+            .unwrap()
+            .pack(&value)
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn constructs_initializes_and_refreshes_client_state() {
+        assert!(SekaiClient::build_http_client(Some("://bad proxy")).is_err());
+        assert!(SekaiClient::load_nuverse_schema_store("/missing/schema.json").is_err());
+
+        let (client, root) = make_client(ServerRegion::Cn, "http://127.0.0.1:1").await;
+        assert_eq!(client.region, ServerRegion::Cn);
+        assert_eq!(client.headers.lock().get("X-Test").unwrap(), "yes");
+        client.init().await.unwrap();
+        assert_eq!(client.version_helper.get().app_version, "6.0.0");
+        assert_eq!(client.headers.lock().get("X-App-Version").unwrap(), "6.0.0");
+
+        std::fs::write(
+            &client.config.version_path,
+            r#"{"appVersion":"6.1.9","appHash":"h2","dataVersion":"d2","assetVersion":"a2"}"#,
+        )
+        .unwrap();
+        client.refresh_version().await.unwrap();
+        assert_eq!(client.headers.lock().get("X-App-Version").unwrap(), "6.1.0");
+        client.refresh_cookies().await.unwrap();
+        Arc::new(client).start_file_watcher().unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn parses_account_files_and_preserves_pool_on_all_invalid_files() {
+        let (cp, cp_root) = make_client(ServerRegion::En, "http://127.0.0.1:1").await;
+        std::fs::write(
+            cp_root.join("accounts/accounts.json"),
+            r#"[{"userId":"10","credential":"bad"},{"userId":11,"deviceId":"d","credential":"bad"},null]"#,
+        )
+        .unwrap();
+        std::fs::write(cp_root.join("accounts/ignored.txt"), "ignored").unwrap();
+        let (accounts, count) = cp.parse_accounts().unwrap();
+        assert_eq!(count, 1);
+        assert_eq!(accounts.len(), 2);
+        assert!(matches!(accounts[0], AccountType::CP(_)));
+
+        let (nuverse, nuverse_root) = make_client(ServerRegion::Tw, "http://127.0.0.1:1").await;
+        std::fs::write(
+            nuverse_root.join("accounts/account.json"),
+            r#"{"userId":12,"deviceId":null,"accessToken":"bad"}"#,
+        )
+        .unwrap();
+        let (accounts, count) = nuverse.parse_accounts().unwrap();
+        assert_eq!(count, 1);
+        assert_eq!(accounts.len(), 1);
+        assert!(matches!(accounts[0], AccountType::Nuverse(_)));
+
+        let retained = session(ServerRegion::Tw, "99");
+        nuverse.sessions.write().push(retained.clone());
+        std::fs::write(nuverse_root.join("accounts/account.json"), "invalid").unwrap();
+        nuverse.reload_accounts().await.unwrap();
+        assert_eq!(nuverse.get_session().unwrap().user_id(), "99");
+
+        std::fs::remove_dir_all(cp_root).unwrap();
+        std::fs::remove_dir_all(nuverse_root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn routes_sessions_and_builds_authenticated_requests() {
+        let body = encrypted(json!({"ok": true}));
+        let (url, server) = spawn_server(StaticResponse {
+            status: 200,
+            content_type: "application/octet-stream",
+            body,
+            session_token: Some("rotated"),
+        })
+        .await;
+        let (client, root) = make_client(ServerRegion::En, &url).await;
+        assert!(client.get_session().is_none());
+        let first = session(ServerRegion::En, "1");
+        let second = session(ServerRegion::En, "2");
+        first.set_session_token(Some("old".to_string()));
+        client.sessions.write().extend([first.clone(), second]);
+
+        let mut params = HashMap::new();
+        params.insert("q".to_string(), "value".to_string());
+        let response = client
+            .get_with_timeout(
+                &first,
+                "/user/{userId}/profile",
+                Some(&params),
+                Duration::from_secs(2),
+            )
+            .await
+            .unwrap();
+        let value: serde_json::Value = client.handle_response(response).await.unwrap();
+        assert_eq!(value["ok"], true);
+        assert_eq!(first.get_session_token().as_deref(), Some("rotated"));
+
+        let response = client
+            .post(&first, "/post", Some(&json!({"x": 1})), None)
+            .await
+            .unwrap();
+        let (ordered, status) = client.handle_response_ordered(response).await.unwrap();
+        assert_eq!(status, 200);
+        assert_eq!(ordered["ok"], true);
+
+        server.abort();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn classifies_binary_and_text_responses() {
+        let cases = [
+            (403, "application/octet-stream", "session"),
+            (426, "application/octet-stream", "upgrade"),
+            (503, "application/octet-stream", "maintenance"),
+            (500, "application/octet-stream", "unknown"),
+            (403, "application/xml", "cookie"),
+            (503, "text/plain", "maintenance"),
+            (500, "text/plain", "unknown"),
+            (418, "text/plain", "invalid"),
+        ];
+
+        for (status, content_type, expected) in cases {
+            let (url, server) = spawn_server(StaticResponse {
+                status,
+                content_type,
+                body: b"failure".to_vec(),
+                session_token: None,
+            })
+            .await;
+            let (client, root) = make_client(ServerRegion::En, &url).await;
+            let response = client.http_client.get(&url).send().await.unwrap();
+            let error = client
+                .handle_response::<serde_json::Value>(response)
+                .await
+                .unwrap_err();
+            match expected {
+                "session" => assert!(matches!(error, AppError::SessionError)),
+                "upgrade" => assert!(matches!(error, AppError::UpgradeRequired)),
+                "maintenance" => assert!(matches!(error, AppError::UnderMaintenance)),
+                "cookie" => assert!(matches!(error, AppError::CookieExpired)),
+                "invalid" => assert!(matches!(error, AppError::InvalidHttpStatus(418))),
+                _ => assert!(matches!(error, AppError::Unknown { .. })),
+            }
+            server.abort();
+            std::fs::remove_dir_all(root).unwrap();
+        }
+
+        for status in [200, 400, 404, 409] {
+            let (url, server) = spawn_server(StaticResponse {
+                status,
+                content_type: "application/octet-stream",
+                body: encrypted(json!({"status": status})),
+                session_token: None,
+            })
+            .await;
+            let (client, root) = make_client(ServerRegion::En, &url).await;
+            let response = client.http_client.get(&url).send().await.unwrap();
+            let (value, actual) = client.handle_response_value(response).await.unwrap();
+            assert_eq!(actual, status);
+            assert_eq!(value["status"], status);
+            server.abort();
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn logs_in_and_drives_cp_and_nuverse_calls() {
+        let login = json!({
+            "sessionToken": "login-token",
+            "dataVersion": "d2",
+            "assetVersion": "a2",
+            "userRegistration": {"userId": 777}
+        });
+        let (login_url, login_server) = spawn_server(StaticResponse {
+            status: 200,
+            content_type: "application/octet-stream",
+            body: encrypted(login),
+            session_token: Some("header-token"),
+        })
+        .await;
+        let (cp, cp_root) = make_client(ServerRegion::En, &login_url).await;
+        let cp_session = session(ServerRegion::En, "12");
+        let response = cp.login(&cp_session).await.unwrap();
+        assert_eq!(response.data_version, "d2");
+        assert_eq!(cp_session.user_id(), "12");
+        assert_eq!(
+            cp_session.get_session_token().as_deref(),
+            Some("login-token")
+        );
+
+        let (nuverse, nuverse_root) = make_client(ServerRegion::Tw, &login_url).await;
+        let nuverse_session = session(ServerRegion::Tw, "0");
+        nuverse.login(&nuverse_session).await.unwrap();
+        assert_eq!(nuverse_session.user_id(), "777");
+        login_server.abort();
+
+        let (game_url, game_server) = spawn_server(StaticResponse {
+            status: 200,
+            content_type: "application/octet-stream",
+            body: encrypted(json!({"result": "ok"})),
+            session_token: None,
+        })
+        .await;
+        let (game, game_root) = make_client(ServerRegion::En, &game_url).await;
+        game.sessions.write().push(session(ServerRegion::En, "1"));
+        let (value, status) = game.get_game_api("/game", None).await.unwrap();
+        assert_eq!(status, 200);
+        assert_eq!(value["result"], "ok");
+        let (value, status) = game
+            .post_game_api_body("/game", &json!({"request": true}), None)
+            .await
+            .unwrap();
+        assert_eq!(status, 200);
+        assert_eq!(value["result"], "ok");
+        let raw = game
+            .get_game_api_raw("/raw", Duration::from_secs(2))
+            .await
+            .unwrap();
+        assert_eq!(raw.status(), StatusCode::OK);
+        game_server.abort();
+
+        for root in [cp_root, nuverse_root, game_root] {
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn fetches_cp_images_and_nuverse_thumbnail() {
+        let (image_url, image_server) = spawn_server(StaticResponse {
+            status: 200,
+            content_type: "image/png",
+            body: vec![1, 2, 3],
+            session_token: None,
+        })
+        .await;
+        let (client, root) = make_client(ServerRegion::En, &image_url).await;
+        client.sessions.write().push(session(ServerRegion::En, "1"));
+        assert_eq!(
+            client.get_cp_mysekai_image("/a.png").await.unwrap(),
+            vec![1, 2, 3]
+        );
+        assert_eq!(
+            client
+                .get_cp_custom_profile_card_thumbnail("b.png")
+                .await
+                .unwrap(),
+            vec![1, 2, 3]
+        );
+        assert_eq!(
+            client.get_cp_custom_music_score("c").await.unwrap(),
+            vec![1, 2, 3]
+        );
+        assert_eq!(
+            client
+                .get_cp_mysekai_housing_competition_thumbnail("d")
+                .await
+                .unwrap(),
+            vec![1, 2, 3]
+        );
+        image_server.abort();
+
+        let (error_url, error_server) = spawn_server(StaticResponse {
+            status: 404,
+            content_type: "text/plain",
+            body: Vec::new(),
+            session_token: None,
+        })
+        .await;
+        let (error_client, error_root) = make_client(ServerRegion::En, &error_url).await;
+        error_client
+            .sessions
+            .write()
+            .push(session(ServerRegion::En, "1"));
+        assert!(matches!(
+            error_client.get_cp_mysekai_image("x").await,
+            Err(AppError::Unknown { status: 404, .. })
+        ));
+        error_server.abort();
+
+        let (nuverse_url, nuverse_server) = spawn_server(StaticResponse {
+            status: 200,
+            content_type: "application/octet-stream",
+            body: encrypted(json!({"thumbnail": "AQID"})),
+            session_token: None,
+        })
+        .await;
+        let (nuverse, nuverse_root) = make_client(ServerRegion::Tw, &nuverse_url).await;
+        nuverse
+            .sessions
+            .write()
+            .push(session(ServerRegion::Tw, "1"));
+        assert_eq!(
+            nuverse.get_nuverse_mysekai_image("1", "2").await.unwrap(),
+            vec![1, 2, 3]
+        );
+        nuverse_server.abort();
+
+        for root in [root, error_root, nuverse_root] {
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn handles_empty_pools_network_errors_and_restore_fallbacks() {
+        let (client, root) = make_client(ServerRegion::Tw, "http://127.0.0.1:1").await;
+        assert!(matches!(
+            client.get_game_api("/x", None).await,
+            Err(AppError::NoClientAvailable)
+        ));
+        assert!(matches!(
+            client.post_game_api_body("/x", &json!({}), None).await,
+            Err(AppError::NoClientAvailable)
+        ));
+        assert!(matches!(
+            client
+                .get_game_api_raw("/x", Duration::from_millis(1))
+                .await,
+            Err(AppError::NoClientAvailable)
+        ));
+        assert!(matches!(
+            client.get_cp_mysekai_image("x").await,
+            Err(AppError::NoClientAvailable)
+        ));
+        assert!(matches!(
+            client.get_nuverse_mysekai_image("1", "2").await,
+            Err(AppError::NoClientAvailable)
+        ));
+        assert!(matches!(
+            client.recover_cookies().await,
+            Err(AppError::CookieExpired)
+        ));
+
+        let value = json!({"plain": true});
+        assert_eq!(
+            client
+                .restore_nuverse_api_response("/x", value.clone())
+                .unwrap(),
+            value
+        );
+        let packed = client.cryptor.pack(&json!({"master": 1})).unwrap();
+        assert_eq!(client.restore_nuverse_master(&packed).unwrap()["master"], 1);
+
+        let bad_session = session(ServerRegion::Tw, "1");
+        assert!(client
+            .post(&bad_session, "/network", Some(&json!({})), None)
+            .await
+            .is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn recovery_helpers_relogin_refresh_versions_and_map_errors() {
+        let login = json!({
+            "sessionToken": "fresh",
+            "dataVersion": "new-data",
+            "assetVersion": "new-asset"
+        });
+        let (url, server) = spawn_server(StaticResponse {
+            status: 200,
+            content_type: "application/octet-stream",
+            body: encrypted(login),
+            session_token: None,
+        })
+        .await;
+        let (client, root) = make_client(ServerRegion::En, &url).await;
+        let account = session(ServerRegion::En, "1");
+        account.set_session_token(Some("old".to_string()));
+        client.recover_session(&account).await.unwrap();
+        assert_eq!(account.get_session_token().as_deref(), Some("fresh"));
+
+        account.set_session_token(Some("old-2".to_string()));
+        client.recover_upgrade(&account).await.unwrap();
+        assert_eq!(
+            client.headers.lock().get("X-Data-Version").unwrap(),
+            "new-data"
+        );
+        account.set_session_token(Some("old-3".to_string()));
+        client
+            .recover_raw_session(&account, false, 403)
+            .await
+            .unwrap();
+        account.set_session_token(Some("old-4".to_string()));
+        client
+            .recover_raw_session(&account, true, 426)
+            .await
+            .unwrap();
+        assert!(client
+            .recover_raw_response(&account, AppError::ParseError("bad".to_string()), 400)
+            .await
+            .is_err());
+        assert!(client
+            .recover_raw_response(&account, AppError::CookieExpired, 403)
+            .await
+            .is_err());
+        server.abort();
+
+        let (broken, broken_root) = make_client(ServerRegion::En, "http://127.0.0.1:1").await;
+        let broken_session = session(ServerRegion::En, "1");
+        assert!(matches!(
+            broken.recover_session(&broken_session).await,
+            Err(AppError::SessionError)
+        ));
+        assert!(matches!(
+            broken
+                .recover_raw_session(&broken_session, false, 403)
+                .await,
+            Err(AppError::SessionError)
+        ));
+        for path in [root, broken_root] {
+            std::fs::remove_dir_all(path).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn classifies_all_raw_response_statuses() {
+        let cases = [
+            (403, "application/octet-stream", "recover-session"),
+            (426, "application/octet-stream", "recover-upgrade"),
+            (503, "application/octet-stream", "maintenance"),
+            (500, "application/octet-stream", "unknown"),
+            (403, "application/xml", "recover-cookie"),
+            (503, "text/plain", "maintenance"),
+            (500, "text/plain", "unknown"),
+        ];
+        for (status, content_type, expected) in cases {
+            let (url, server) = spawn_server(StaticResponse {
+                status,
+                content_type,
+                body: b"error".to_vec(),
+                session_token: None,
+            })
+            .await;
+            let (client, root) = make_client(ServerRegion::En, &url).await;
+            let response = client.http_client.get(&url).send().await.unwrap();
+            let result = client.classify_raw_response(response).await;
+            match expected {
+                "recover-session" => assert!(matches!(
+                    result,
+                    Ok(RawResponse::Recover {
+                        error: AppError::SessionError,
+                        status: 403
+                    })
+                )),
+                "recover-upgrade" => assert!(matches!(
+                    result,
+                    Ok(RawResponse::Recover {
+                        error: AppError::UpgradeRequired,
+                        status: 426
+                    })
+                )),
+                "recover-cookie" => assert!(matches!(
+                    result,
+                    Ok(RawResponse::Recover {
+                        error: AppError::CookieExpired,
+                        status: 403
+                    })
+                )),
+                "maintenance" => assert!(matches!(result, Err(AppError::UnderMaintenance))),
+                _ => assert!(matches!(result, Err(AppError::Unknown { .. }))),
+            }
+            server.abort();
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn account_watcher_helpers_classify_and_debounce_events() {
+        assert!(is_account_change(&notify::EventKind::Create(
+            CreateKind::File
+        )));
+        assert!(is_account_change(&notify::EventKind::Modify(
+            ModifyKind::Any
+        )));
+        assert!(is_account_change(&notify::EventKind::Remove(
+            RemoveKind::File
+        )));
+        assert!(!is_account_change(&notify::EventKind::Access(
+            notify::event::AccessKind::Any
+        )));
+
+        let (sender, receiver) = std::sync::mpsc::channel();
+        sender
+            .send(Ok(notify::Event::new(notify::EventKind::Access(
+                notify::event::AccessKind::Any,
+            ))))
+            .unwrap();
+        sender
+            .send(Ok(notify::Event::new(notify::EventKind::Modify(
+                ModifyKind::Any,
+            ))))
+            .unwrap();
+        assert!(wait_for_account_change(&receiver, "TEST"));
+        drop(sender);
+        assert!(!wait_for_account_change(&receiver, "TEST"));
+
+        let (sender, receiver) = std::sync::mpsc::channel::<notify::Result<notify::Event>>();
+        assert!(wait_for_quiet_directory(
+            &receiver,
+            Duration::from_millis(1)
+        ));
+        sender
+            .send(Ok(notify::Event::new(notify::EventKind::Any)))
+            .unwrap();
+        drop(sender);
+        assert!(!wait_for_quiet_directory(
+            &receiver,
+            Duration::from_millis(1)
+        ));
+
+        let raw = RawResponse::recover(AppError::SessionError, 403);
+        assert!(matches!(raw, RawResponse::Recover { status: 403, .. }));
+        let header = HeaderValue::from_static("test");
+        assert_eq!(header.to_str().unwrap(), "test");
+    }
+}

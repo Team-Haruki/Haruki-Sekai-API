@@ -368,3 +368,251 @@ pub async fn get_event_ranking_border(
     let path = format!("/event/{}/ranking-border", event_id);
     proxy_game_api_cached(&state, &server, &path, RANKING_BORDER_CACHE_TTL_SECS).await
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use axum::body::{to_bytes, Body};
+    use axum::extract::{Path, Query, State};
+    use axum::http::Response as AxumResponse;
+    use axum::response::IntoResponse;
+    use axum::Router;
+
+    use super::*;
+    use crate::config::{Config, ServerRegion, UpstreamConfig};
+    use crate::upstream::{build_internal_http_client, InternalApiResponse, RegionRouter};
+    use crate::RequestCoalescer;
+
+    async fn response_handler() -> AxumResponse<Body> {
+        let envelope = InternalApiResponse {
+            ok: true,
+            status: Some(200),
+            data: Some(json!({"proxied": true})),
+            kind: None,
+            message: None,
+        };
+        AxumResponse::builder()
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&envelope).unwrap()))
+            .unwrap()
+    }
+
+    async fn state_with_router() -> (Arc<AppState>, tokio::task::JoinHandle<()>) {
+        let app = Router::new().fallback(response_handler);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let upstream = UpstreamConfig {
+            url: format!("http://{address}"),
+            token: "token".to_string(),
+            priority: 0,
+            name: "mock".to_string(),
+        };
+        let router = RegionRouter::new(
+            ServerRegion::Jp,
+            None,
+            &[upstream],
+            build_internal_http_client().unwrap(),
+        )
+        .unwrap();
+        let config: Config = serde_yaml::from_str("backend: {}").unwrap();
+        let state = AppState {
+            config,
+            clients: HashMap::new(),
+            routers: HashMap::from([(ServerRegion::Jp, Arc::new(router))]),
+            syncers: HashMap::new(),
+            version_locks: HashMap::new(),
+            db: None,
+            master_db: None,
+            redis: None,
+            jwt_secret: None,
+            coalescer: Arc::new(RequestCoalescer::default()),
+        };
+        (Arc::new(state), server)
+    }
+
+    #[test]
+    fn parses_booleans_encodes_paths_and_serializes_api_response() {
+        assert!(parse_optional_bool(None, "flag", true).unwrap());
+        assert!(!parse_optional_bool(Some(""), "flag", false).unwrap());
+        assert!(parse_optional_bool(Some("TRUE"), "flag", false).unwrap());
+        assert!(!parse_optional_bool(Some("false"), "flag", true).unwrap());
+        assert!(parse_optional_bool(Some("yes"), "flag", false).is_err());
+        assert_eq!(encode_path_segment("a b/中-._~"), "a%20b%2F%E4%B8%AD-._~");
+
+        let response = ApiResponse {
+            status: StatusCode::CREATED,
+            body: json!({"ok": true}),
+        }
+        .into_response();
+        assert_eq!(response.status(), StatusCode::CREATED);
+    }
+
+    #[tokio::test]
+    async fn validates_router_and_endpoint_identifiers() {
+        let (state, server) = state_with_router().await;
+        assert!(matches!(
+            get_router(&state, "bad"),
+            Err(AppError::InvalidServerRegion(_))
+        ));
+        assert!(matches!(
+            get_router(&state, "tw"),
+            Err(AppError::NoClientAvailable)
+        ));
+
+        assert!(get_user_profile(
+            State(state.clone()),
+            axum::Extension(None),
+            Path(("jp".to_string(), "abc".to_string()))
+        )
+        .await
+        .is_err());
+        assert!(get_mysekai_housing_competition_list(
+            State(state.clone()),
+            Path(("jp".to_string(), "x".to_string())),
+            Query(MySekaiHousingCompetitionListQuery { is_lottery: None })
+        )
+        .await
+        .is_err());
+        assert!(post_mysekai_housing_competition_entry(
+            State(state.clone()),
+            Path(("jp".to_string(), "x".to_string(), "2".to_string())),
+            Query(MySekaiHousingCompetitionEntryQuery {
+                is_back_number: None,
+                mysekai_owner_user_submitted_at: 1,
+            })
+        )
+        .await
+        .is_err());
+        assert!(post_mysekai_housing_competition_entry(
+            State(state.clone()),
+            Path(("jp".to_string(), "1".to_string(), "x".to_string())),
+            Query(MySekaiHousingCompetitionEntryQuery {
+                is_back_number: None,
+                mysekai_owner_user_submitted_at: 1,
+            })
+        )
+        .await
+        .is_err());
+        assert!(get_mysekai_housing_competition_back_number_list(
+            State(state.clone()),
+            Path(("jp".to_string(), "x".to_string()))
+        )
+        .await
+        .is_err());
+        assert!(get_event_ranking_top100(
+            State(state.clone()),
+            Path(("jp".to_string(), "x".to_string()))
+        )
+        .await
+        .is_err());
+        assert!(get_event_ranking_border(
+            State(state.clone()),
+            Path(("jp".to_string(), "x".to_string()))
+        )
+        .await
+        .is_err());
+
+        for (user, score) in [("bad", "score"), ("1", ""), ("1", "."), ("1", "..")] {
+            assert!(get_custom_music_score_published_search(
+                State(state.clone()),
+                Path(("jp".to_string(), user.to_string(), score.to_string()))
+            )
+            .await
+            .is_err());
+        }
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn proxies_all_get_and_post_handlers() {
+        let (state, server) = state_with_router().await;
+        let auth = crate::api::middleware::AuthUser {
+            id: "caller".to_string(),
+            credential: "credential".to_string(),
+        };
+        let profile = get_user_profile(
+            State(state.clone()),
+            axum::Extension(Some(auth)),
+            Path(("jp".to_string(), "123".to_string())),
+        )
+        .await
+        .unwrap();
+        assert_eq!(profile.body["proxied"], true);
+
+        let list = get_mysekai_housing_competition_list(
+            State(state.clone()),
+            Path(("jp".to_string(), "1".to_string())),
+            Query(MySekaiHousingCompetitionListQuery {
+                is_lottery: Some("false".to_string()),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(list.status, StatusCode::OK);
+        let entry = post_mysekai_housing_competition_entry(
+            State(state.clone()),
+            Path(("jp".to_string(), "1".to_string(), "2".to_string())),
+            Query(MySekaiHousingCompetitionEntryQuery {
+                is_back_number: Some("true".to_string()),
+                mysekai_owner_user_submitted_at: 10,
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(entry.body["proxied"], true);
+
+        assert!(get_mysekai_housing_competition_back_number_top_list(
+            State(state.clone()),
+            Path("jp".to_string())
+        )
+        .await
+        .is_ok());
+        assert!(get_mysekai_housing_competition_back_number_list(
+            State(state.clone()),
+            Path(("jp".to_string(), "7".to_string()))
+        )
+        .await
+        .is_ok());
+        for user in ["%user_id", "%25user_id", "{userId}", "123"] {
+            assert!(get_custom_music_score_published_search(
+                State(state.clone()),
+                Path(("jp".to_string(), user.to_string(), "score / id".to_string()))
+            )
+            .await
+            .is_ok());
+        }
+
+        for response in [
+            get_system(State(state.clone()), Path("jp".to_string()))
+                .await
+                .unwrap(),
+            get_information(State(state.clone()), Path("jp".to_string()))
+                .await
+                .unwrap(),
+            get_event_ranking_top100(
+                State(state.clone()),
+                Path(("jp".to_string(), "1".to_string())),
+            )
+            .await
+            .unwrap(),
+            get_event_ranking_border(
+                State(state.clone()),
+                Path(("jp".to_string(), "1".to_string())),
+            )
+            .await
+            .unwrap(),
+        ] {
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            assert_eq!(
+                serde_json::from_slice::<JsonValue>(&body).unwrap()["proxied"],
+                true
+            );
+        }
+        server.abort();
+    }
+}

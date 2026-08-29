@@ -228,3 +228,220 @@ pub async fn get_custom_music_score(
         Err(e) => image_error_response("Fetch custom music score failed", e),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use axum::body::Body;
+    use axum::extract::{Path, State};
+    use axum::http::Response as AxumResponse;
+    use axum::Router;
+
+    use super::*;
+    use crate::config::{Config, UpstreamConfig};
+    use crate::upstream::{build_internal_http_client, InternalApiResponse, RegionRouter};
+    use crate::RequestCoalescer;
+
+    #[derive(Clone)]
+    struct Reply {
+        content_type: &'static str,
+        body: Vec<u8>,
+    }
+
+    async fn handler(State(reply): State<Reply>) -> AxumResponse<Body> {
+        AxumResponse::builder()
+            .header("content-type", reply.content_type)
+            .body(Body::from(reply.body))
+            .unwrap()
+    }
+
+    async fn test_state(
+        reply: Reply,
+        region: ServerRegion,
+    ) -> (Arc<AppState>, tokio::task::JoinHandle<()>) {
+        let app = Router::new().fallback(handler).with_state(reply);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let upstream = UpstreamConfig {
+            url: format!("http://{address}"),
+            token: String::new(),
+            priority: 0,
+            name: "image".to_string(),
+        };
+        let router = RegionRouter::new(
+            region,
+            None,
+            &[upstream],
+            build_internal_http_client().unwrap(),
+        )
+        .unwrap();
+        let config: Config = serde_yaml::from_str("backend: {}").unwrap();
+        let state = AppState {
+            config,
+            clients: HashMap::new(),
+            routers: HashMap::from([(region, Arc::new(router))]),
+            syncers: HashMap::new(),
+            version_locks: HashMap::new(),
+            db: None,
+            master_db: None,
+            redis: None,
+            jwt_secret: None,
+            coalescer: Arc::new(RequestCoalescer::default()),
+        };
+        (Arc::new(state), server)
+    }
+
+    #[tokio::test]
+    async fn validates_regions_paths_and_feature_support() {
+        let (state, server) = test_state(
+            Reply {
+                content_type: "image/png",
+                body: vec![1],
+            },
+            ServerRegion::Jp,
+        )
+        .await;
+        let invalid = get_mysekai_image(
+            State(state.clone()),
+            Path(("bad".to_string(), "a".to_string(), "b".to_string())),
+        )
+        .await;
+        assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+        let missing = get_mysekai_image(
+            State(state.clone()),
+            Path(("en".to_string(), "a".to_string(), "b".to_string())),
+        )
+        .await;
+        assert_eq!(missing.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let malformed = get_mysekai_image(
+            State(state.clone()),
+            Path(("jp".to_string(), "a".to_string(), "b".to_string())),
+        )
+        .await;
+        assert_eq!(malformed.status(), StatusCode::BAD_REQUEST);
+
+        for response in [
+            get_mysekai_housing_thumbnail(
+                State(state.clone()),
+                Path(("tw".to_string(), "a".to_string(), "b".to_string())),
+            )
+            .await,
+            get_custom_profile_card_thumbnail(
+                State(state.clone()),
+                Path(("tw".to_string(), "a".to_string(), "b".to_string())),
+            )
+            .await,
+            get_custom_music_score(
+                State(state.clone()),
+                Path(("tw".to_string(), "a".to_string(), "b".to_string())),
+            )
+            .await,
+        ] {
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        }
+        let malformed_housing = get_mysekai_housing_thumbnail(
+            State(state.clone()),
+            Path(("jp".to_string(), "a".to_string(), "b".to_string())),
+        )
+        .await;
+        assert_eq!(malformed_housing.status(), StatusCode::BAD_REQUEST);
+        let malformed_profile = get_custom_profile_card_thumbnail(
+            State(state.clone()),
+            Path(("jp".to_string(), "a".to_string(), "b".to_string())),
+        )
+        .await;
+        assert_eq!(malformed_profile.status(), StatusCode::BAD_REQUEST);
+        let malformed_score = get_custom_music_score(
+            State(state.clone()),
+            Path(("jp".to_string(), "a".to_string(), "b".to_string())),
+        )
+        .await;
+        assert_eq!(malformed_score.status(), StatusCode::BAD_REQUEST);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn returns_successful_images_for_every_route() {
+        let (state, server) = test_state(
+            Reply {
+                content_type: "image/png",
+                body: vec![1, 2, 3],
+            },
+            ServerRegion::Jp,
+        )
+        .await;
+        let hex = "a".repeat(64);
+        let uuid = "12345678-1234-1234-1234-123456789abc".to_string();
+        for response in [
+            get_mysekai_image(
+                State(state.clone()),
+                Path(("jp".to_string(), hex.clone(), hex.clone())),
+            )
+            .await,
+            get_mysekai_housing_thumbnail(
+                State(state.clone()),
+                Path(("jp".to_string(), hex.clone(), uuid.clone())),
+            )
+            .await,
+            get_custom_profile_card_thumbnail(
+                State(state.clone()),
+                Path(("jp".to_string(), hex.clone(), uuid)),
+            )
+            .await,
+            get_custom_music_score(
+                State(state.clone()),
+                Path(("jp".to_string(), hex.clone(), hex)),
+            )
+            .await,
+        ] {
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+        server.abort();
+
+        let (tw_state, tw_server) = test_state(
+            Reply {
+                content_type: "image/png",
+                body: vec![4],
+            },
+            ServerRegion::Tw,
+        )
+        .await;
+        let response = get_mysekai_image(
+            State(tw_state),
+            Path(("tw".to_string(), "123".to_string(), "4".to_string())),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        tw_server.abort();
+    }
+
+    #[tokio::test]
+    async fn maps_remote_image_errors_to_json_statuses() {
+        let envelope = InternalApiResponse {
+            ok: false,
+            status: Some(404),
+            data: None,
+            kind: Some("unknown".to_string()),
+            message: Some("missing".to_string()),
+        };
+        let (state, server) = test_state(
+            Reply {
+                content_type: "application/json",
+                body: serde_json::to_vec(&envelope).unwrap(),
+            },
+            ServerRegion::Jp,
+        )
+        .await;
+        let hex = "b".repeat(64);
+        let response =
+            get_mysekai_image(State(state), Path(("jp".to_string(), hex.clone(), hex))).await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        server.abort();
+
+        let response = image_error_response("context", AppError::NetworkError("down".to_string()));
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    }
+}

@@ -137,3 +137,37 @@ pub fn create_router(state: Arc<MainAppState>) -> Router {
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::{AppState, RequestCoalescer};
+
+    fn empty_state() -> Arc<AppState> {
+        Arc::new(AppState {
+            config: serde_yaml::from_str("backend: {}").unwrap(),
+            clients: HashMap::new(),
+            routers: HashMap::new(),
+            syncers: HashMap::new(),
+            version_locks: HashMap::new(),
+            db: None,
+            master_db: None,
+            redis: None,
+            jwt_secret: None,
+            coalescer: Arc::new(RequestCoalescer::default()),
+        })
+    }
+
+    #[tokio::test]
+    async fn health_reports_version_and_router_builds_all_layers() {
+        let Json(health) = health_check().await;
+        assert_eq!(health.status, "ok");
+        assert_eq!(health.version, env!("CARGO_PKG_VERSION"));
+        let _router = create_router(empty_state());
+        let Json(second) = health_check().await;
+        assert!(second.uptime_secs >= health.uptime_secs);
+    }
+}
