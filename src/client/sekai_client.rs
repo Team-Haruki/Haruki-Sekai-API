@@ -146,8 +146,22 @@ impl SekaiClient {
             self.region.as_str().to_uppercase()
         );
         if let Some(ref helper) = self.cookie_helper {
-            let cookie = helper.get_cookies(self.proxy.as_deref()).await?;
-            self.headers.lock().insert("Cookie".to_string(), cookie);
+            // A failed initial fetch must not abort init: initialize_clients
+            // drops a client whose init errored for the process lifetime, which
+            // turns a transient cookie-service outage at startup into a
+            // permanent one. Start without cookies instead; requests heal
+            // through the CookieExpired recovery path once the service is
+            // reachable again.
+            match helper.get_cookies(self.proxy.as_deref()).await {
+                Ok(cookie) => {
+                    self.headers.lock().insert("Cookie".to_string(), cookie);
+                }
+                Err(e) => warn!(
+                    "{} Initial cookie fetch failed ({}); continuing without cookies",
+                    self.region.as_str().to_uppercase(),
+                    e
+                ),
+            }
         }
         let mut version = self.version_helper.load().await?;
         self.normalize_app_version(&mut version);
@@ -244,6 +258,22 @@ impl SekaiClient {
                 let session = Arc::new(AccountSession::new(account));
                 match self.login(&session).await {
                     Ok(_) => Some(session),
+                    Err(e) if login_failure_is_transient(&e) => {
+                        // The failure indicts the route to the game server
+                        // (line down, maintenance, stale version/cookies), not
+                        // the account. Keep the session without a token: its
+                        // first request relogins through the SessionError
+                        // recovery path, so the pool heals itself when the
+                        // upstream comes back instead of staying empty until
+                        // the next account-file change or a restart.
+                        warn!(
+                            "{} Account #{} login failed transiently ({}), keeping for lazy relogin",
+                            region,
+                            session.user_id(),
+                            e
+                        );
+                        Some(session)
+                    }
                     Err(e) => {
                         error!("{} Failed to login account: {}", region, e);
                         None
@@ -1101,6 +1131,25 @@ impl RawResponse {
     }
 }
 
+/// Whether a login failure during an account reload indicts the path to the
+/// game server rather than the account itself. Transient failures keep the
+/// account in the session pool for lazy relogin on first use; anything else
+/// (403s, malformed responses) is treated as bad account data and dropped,
+/// since a dead account kept in rotation would fail requests that healthy
+/// accounts could serve.
+fn login_failure_is_transient(e: &AppError) -> bool {
+    matches!(
+        e,
+        AppError::NetworkError(_)
+            | AppError::InvalidHttpStatus(_)
+            | AppError::UnderMaintenance
+            | AppError::UpgradeRequired
+            | AppError::CookieExpired
+            | AppError::IoError(_)
+            | AppError::Internal(_)
+    )
+}
+
 fn watch_account_directory(
     _watcher: notify::PollWatcher,
     events: std::sync::mpsc::Receiver<notify::Result<notify::Event>>,
@@ -1408,6 +1457,96 @@ mod tests {
 
         std::fs::remove_dir_all(cp_root).unwrap();
         std::fs::remove_dir_all(nuverse_root).unwrap();
+    }
+
+    #[test]
+    fn classifies_login_failure_transience() {
+        // Transient: the route to the game server is at fault, keep the account.
+        for e in [
+            AppError::NetworkError("refused".into()),
+            AppError::InvalidHttpStatus(502),
+            AppError::UnderMaintenance,
+            AppError::UpgradeRequired,
+            AppError::CookieExpired,
+        ] {
+            assert!(login_failure_is_transient(&e), "{e:?} should be kept");
+        }
+        // Account-level: likely bad credentials or data, drop as before.
+        for e in [
+            AppError::SessionError,
+            AppError::ParseError("x".into()),
+            AppError::Unknown {
+                status: 400,
+                body: String::new(),
+            },
+        ] {
+            assert!(!login_failure_is_transient(&e), "{e:?} should be dropped");
+        }
+    }
+
+    // A reload while the upstream is unreachable must not empty the session
+    // pool: the account is kept without a token and relogins lazily, so the
+    // node recovers on its own once the line is back instead of serving
+    // NoClientAvailable until the next account-file change or a restart.
+    #[tokio::test]
+    async fn reload_keeps_accounts_when_login_fails_transiently() {
+        let (client, root) = make_client(ServerRegion::Tw, "http://127.0.0.1:1").await;
+        std::fs::write(
+            root.join("accounts/account.json"),
+            r#"{"userId":12,"deviceId":"d","accessToken":"bad"}"#,
+        )
+        .unwrap();
+        client.reload_accounts().await.unwrap();
+        let session = client.get_session().expect("session kept despite outage");
+        assert_eq!(session.user_id(), "12");
+        assert_eq!(session.get_session_token(), None);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    // An account the game itself rejects (403 -> SessionError) is still dropped:
+    // keeping it in rotation would fail requests healthy accounts could serve.
+    #[tokio::test]
+    async fn reload_drops_accounts_rejected_by_the_game() {
+        let (url, server) = spawn_server(StaticResponse {
+            status: 403,
+            content_type: "application/octet-stream",
+            body: vec![0],
+            session_token: None,
+        })
+        .await;
+        let (client, root) = make_client(ServerRegion::En, &url).await;
+        std::fs::write(
+            root.join("accounts/account.json"),
+            r#"{"userId":"10","deviceId":"d","credential":"bad"}"#,
+        )
+        .unwrap();
+        client.reload_accounts().await.unwrap();
+        assert!(client.get_session().is_none());
+        server.abort();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    // A cookie-service outage at startup must not abort init: the client would
+    // be dropped for the process lifetime. Cookies heal lazily instead.
+    #[tokio::test]
+    async fn init_survives_cookie_service_outage() {
+        let root = temp_dir("cookie_outage");
+        let mut server_config = config("http://127.0.0.1:1", &root);
+        server_config.require_cookies = true;
+        let client = SekaiClient::new(
+            ServerRegion::Jp,
+            server_config,
+            None,
+            Some("http://127.0.0.1:1".to_string()),
+            SekaiClient::build_http_client(None).unwrap(),
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(client.cookie_helper.is_some());
+        client.init().await.unwrap();
+        assert!(!client.headers.lock().contains_key("Cookie"));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]
