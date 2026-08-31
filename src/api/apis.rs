@@ -136,12 +136,16 @@ async fn cache_get(state: &AppState, key: &str) -> Option<String> {
         .flatten()
 }
 
-async fn cache_set(state: &AppState, key: &str, json: &str, ttl_secs: u64, max_stale_secs: u64) {
+async fn cache_set(state: &AppState, key: &str, json: &str, ttl_secs: f64, max_stale_secs: f64) {
     if let Some(ref redis) = state.redis {
         let mut conn = redis.clone();
-        let entry = encode_cache_entry(now_ms() + ttl_secs * 1000, json);
+        let entry = encode_cache_entry(now_ms() + (ttl_secs * 1000.0) as u64, json);
+        // Redis eviction only needs second granularity; freshness is decided by
+        // the embedded millisecond deadline. Round up so a sub-second window
+        // still stores the entry.
+        let expiry_secs = ((ttl_secs + max_stale_secs).ceil() as u64).max(1);
         let _: Result<(), redis::RedisError> =
-            redis::AsyncCommands::set_ex(&mut conn, key, entry, ttl_secs + max_stale_secs).await;
+            redis::AsyncCommands::set_ex(&mut conn, key, entry, expiry_secs).await;
     }
 }
 
@@ -154,14 +158,14 @@ async fn fetch_and_cache(
     server: &str,
     path: &str,
     cache_key: &str,
-    ttl_secs: u64,
-    max_stale_secs: u64,
+    ttl_secs: f64,
+    max_stale_secs: f64,
 ) -> Result<(u16, Arc<str>), AppError> {
     let resp = proxy_game_api(state, server, path).await?;
     let status = resp.status.as_u16();
     let json: Arc<str> =
         Arc::from(sonic_rs::to_string(&resp.body).unwrap_or_else(|_| "{}".to_string()));
-    if status == 200 && ttl_secs > 0 {
+    if status == 200 && ttl_secs > 0.0 {
         cache_set(state, cache_key, &json, ttl_secs, max_stale_secs).await;
     }
     Ok((status, json))
@@ -175,8 +179,8 @@ fn spawn_revalidation(
     server: &str,
     path: &str,
     cache_key: &str,
-    ttl_secs: u64,
-    max_stale_secs: u64,
+    ttl_secs: f64,
+    max_stale_secs: f64,
 ) {
     let state = state.clone();
     let server = server.to_string();
@@ -201,8 +205,8 @@ async fn proxy_game_api_cached(
     state: &Arc<AppState>,
     server: &str,
     path: &str,
-    ttl_secs: u64,
-    max_stale_secs: u64,
+    ttl_secs: f64,
+    max_stale_secs: f64,
 ) -> Result<Response, AppError> {
     let cache_key = format!("haruki_sekai_resp:{server}:{path}");
 
@@ -546,25 +550,26 @@ mod tests {
     async fn resolves_cache_ttls_per_region_with_defaults() {
         let (mut state, server) = state_with_router().await;
         let config: Config = serde_yaml::from_str(
-            "backend: {}\nservers:\n  cn:\n    cache_ttls:\n      ranking_top100: 3\n      max_stale: 60\n",
+            "backend: {}\nservers:\n  cn:\n    cache_ttls:\n      ranking_top100: 0.5\n      max_stale: 60\n",
         )
         .unwrap();
         Arc::get_mut(&mut state).unwrap().config = config;
 
-        // Configured region: overridden fields apply, the rest default.
+        // Configured region: overridden fields apply (fractional seconds are
+        // how a 1s poller gets distinct data every poll), the rest default.
         let cn = cache_ttls(&state, "cn");
-        assert_eq!(cn.ranking_top100, 3);
-        assert_eq!(cn.max_stale, 60);
-        assert_eq!(cn.ranking_border, 30);
-        assert_eq!(cn.static_endpoints, 300);
+        assert_eq!(cn.ranking_top100, 0.5);
+        assert_eq!(cn.max_stale, 60.0);
+        assert_eq!(cn.ranking_border, 30.0);
+        assert_eq!(cn.static_endpoints, 300.0);
 
         // Unconfigured region and unparsable server both fall back to defaults.
         for server in ["jp", "bogus"] {
             let ttls = cache_ttls(&state, server);
-            assert_eq!(ttls.ranking_top100, 1);
-            assert_eq!(ttls.ranking_border, 30);
-            assert_eq!(ttls.static_endpoints, 300);
-            assert_eq!(ttls.max_stale, 30);
+            assert_eq!(ttls.ranking_top100, 1.0);
+            assert_eq!(ttls.ranking_border, 30.0);
+            assert_eq!(ttls.static_endpoints, 300.0);
+            assert_eq!(ttls.max_stale, 30.0);
         }
         server.abort();
     }

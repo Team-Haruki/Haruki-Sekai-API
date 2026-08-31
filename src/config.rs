@@ -227,43 +227,47 @@ pub struct MasterSyncConfig {
     pub notify: Vec<MasterSyncPeer>,
 }
 
-/// Freshness/staleness windows (seconds) for the cached global read endpoints
-/// (ranking / system / information). Per-region so a hot region (e.g. one
-/// polled at 1 req/s downstream) can trade a little freshness for fewer
-/// upstream calls without affecting the others.
+/// Freshness/staleness windows (seconds, fractions allowed) for the cached
+/// global read endpoints (ranking / system / information). Per-region so a hot
+/// region can be tuned without affecting the others. Fractional values matter
+/// for a periodic poller: a freshness window at or above the poll interval
+/// makes alternating polls hit a still-fresh entry and read duplicate data,
+/// halving the effective sampling rate — set the window to about half the poll
+/// interval (e.g. `0.5` against a 1 s poller) so every poll serves the previous
+/// refresh and triggers the next one.
 #[derive(Debug, Clone, Deserialize)]
 pub struct CacheTtlConfig {
     /// Freshness window for the event ranking top100 endpoint.
     #[serde(default = "default_ranking_top100_ttl")]
-    pub ranking_top100: u64,
+    pub ranking_top100: f64,
     /// Freshness window for the event ranking-border endpoint.
     #[serde(default = "default_ranking_border_ttl")]
-    pub ranking_border: u64,
+    pub ranking_border: f64,
     /// Freshness window for /system and /information.
     #[serde(rename = "static", default = "default_static_ttl")]
-    pub static_endpoints: u64,
+    pub static_endpoints: f64,
     /// How long past its freshness window a cached response may still be served
     /// while a background revalidation refreshes it (stale-while-revalidate).
     /// Also bounds how long an unreachable upstream is masked by stale data.
     /// 0 disables stale serving.
     #[serde(default = "default_max_stale")]
-    pub max_stale: u64,
+    pub max_stale: f64,
 }
 
-fn default_ranking_top100_ttl() -> u64 {
-    1
+fn default_ranking_top100_ttl() -> f64 {
+    1.0
 }
 
-fn default_ranking_border_ttl() -> u64 {
-    30
+fn default_ranking_border_ttl() -> f64 {
+    30.0
 }
 
-fn default_static_ttl() -> u64 {
-    300
+fn default_static_ttl() -> f64 {
+    300.0
 }
 
-fn default_max_stale() -> u64 {
-    30
+fn default_max_stale() -> f64 {
+    30.0
 }
 
 impl Default for CacheTtlConfig {
