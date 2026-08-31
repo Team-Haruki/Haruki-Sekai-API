@@ -83,23 +83,51 @@ async fn proxy_game_api_with_params(
     })
 }
 
-/// Cache TTLs (seconds) for the global, non-user-specific read endpoints.
-// Cache TTLs bounded by each endpoint's freshness requirement: top100 is near
-// real-time (<=1s), border tolerates 10-30s, system/information change rarely.
-const RANKING_TOP100_CACHE_TTL_SECS: u64 = 1;
-const RANKING_BORDER_CACHE_TTL_SECS: u64 = 30;
-const STATIC_CACHE_TTL_SECS: u64 = 300;
-
 fn json_string_response(status: StatusCode, json: String) -> Response {
     (status, [("content-type", "application/json")], json).into_response()
 }
 
-/// `proxy_game_api` with a short-lived Redis response cache for global read-only
-/// endpoints (ranking / system / information). On a hit it returns the cached
-/// JSON directly, skipping the upstream call, AES decrypt, Nuverse restore,
-/// re-serialization, and the per-account request lock. The cache key omits any
-/// account (the path keeps the literal `{userId}` placeholder), so all callers
-/// share one entry. Only successful (200) responses are cached.
+/// Resolve the cache windows for a region; regions without config (or an
+/// unparsable server segment, which the router lookup rejects later anyway)
+/// get the defaults.
+fn cache_ttls(state: &AppState, server: &str) -> crate::config::CacheTtlConfig {
+    server
+        .parse::<ServerRegion>()
+        .ok()
+        .and_then(|region| state.config.servers.get(&region))
+        .map(|s| s.cache_ttls.clone())
+        .unwrap_or_default()
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+/// Cache entries are `<fresh_until_ms>|<json>`: the Redis TTL spans freshness
+/// plus the stale window, and the embedded timestamp splits the two so a read
+/// can tell a fresh hit from a stale one (undecodable entries read as a miss).
+fn encode_cache_entry(fresh_until_ms: u64, json: &str) -> String {
+    format!("{fresh_until_ms}|{json}")
+}
+
+fn decode_cache_entry(entry: &str) -> Option<(u64, &str)> {
+    let (fresh_until, json) = entry.split_once('|')?;
+    Some((fresh_until.parse().ok()?, json))
+}
+
+/// `proxy_game_api` with a stale-while-revalidate Redis response cache for
+/// global read-only endpoints (ranking / system / information). A fresh hit
+/// returns the cached JSON directly, skipping the upstream call, AES decrypt,
+/// Nuverse restore, re-serialization, and the per-account request lock. A
+/// stale hit (past the freshness window but inside `max_stale`) still returns
+/// immediately and refreshes in the background, so downstream latency never
+/// couples to upstream latency and a struggling upstream is masked until the
+/// stale window runs out. The cache key omits any account (the path keeps the
+/// literal `{userId}` placeholder), so all callers share one entry. Only
+/// successful (200) responses are cached.
 async fn cache_get(state: &AppState, key: &str) -> Option<String> {
     let mut conn = state.redis.as_ref()?.clone();
     redis::AsyncCommands::get::<_, Option<String>>(&mut conn, key)
@@ -108,43 +136,92 @@ async fn cache_get(state: &AppState, key: &str) -> Option<String> {
         .flatten()
 }
 
-async fn cache_set(state: &AppState, key: &str, json: &str, ttl_secs: u64) {
+async fn cache_set(state: &AppState, key: &str, json: &str, ttl_secs: u64, max_stale_secs: u64) {
     if let Some(ref redis) = state.redis {
         let mut conn = redis.clone();
+        let entry = encode_cache_entry(now_ms() + ttl_secs * 1000, json);
         let _: Result<(), redis::RedisError> =
-            redis::AsyncCommands::set_ex(&mut conn, key, json, ttl_secs).await;
+            redis::AsyncCommands::set_ex(&mut conn, key, entry, ttl_secs + max_stale_secs).await;
     }
 }
 
-async fn proxy_game_api_cached(
+/// Leader-side fetch: call upstream, serialize once, and populate the cache
+/// (200 only) inside the in-flight window, so requests arriving between slot
+/// release and SETEX completion still hit the cache instead of stampeding
+/// upstream. `ttl_secs == 0` disables caching for the endpoint entirely.
+async fn fetch_and_cache(
     state: &AppState,
     server: &str,
     path: &str,
+    cache_key: &str,
     ttl_secs: u64,
+    max_stale_secs: u64,
+) -> Result<(u16, Arc<str>), AppError> {
+    let resp = proxy_game_api(state, server, path).await?;
+    let status = resp.status.as_u16();
+    let json: Arc<str> =
+        Arc::from(sonic_rs::to_string(&resp.body).unwrap_or_else(|_| "{}".to_string()));
+    if status == 200 && ttl_secs > 0 {
+        cache_set(state, cache_key, &json, ttl_secs, max_stale_secs).await;
+    }
+    Ok((status, json))
+}
+
+/// Kick off a background refresh for a stale entry. Deduplicated through the
+/// coalescer: concurrent stale hits join the same in-flight upstream call, so
+/// a stale key costs at most one upstream request at a time.
+fn spawn_revalidation(
+    state: &Arc<AppState>,
+    server: &str,
+    path: &str,
+    cache_key: &str,
+    ttl_secs: u64,
+    max_stale_secs: u64,
+) {
+    let state = state.clone();
+    let server = server.to_string();
+    let path = path.to_string();
+    let cache_key = cache_key.to_string();
+    tokio::spawn(async move {
+        let (outcome, is_leader) = state
+            .coalescer
+            .coalesce(&cache_key, || {
+                fetch_and_cache(&state, &server, &path, &cache_key, ttl_secs, max_stale_secs)
+            })
+            .await;
+        if is_leader {
+            if let Err(e) = outcome {
+                tracing::debug!("Background revalidation of {} failed: {}", cache_key, e);
+            }
+        }
+    });
+}
+
+async fn proxy_game_api_cached(
+    state: &Arc<AppState>,
+    server: &str,
+    path: &str,
+    ttl_secs: u64,
+    max_stale_secs: u64,
 ) -> Result<Response, AppError> {
     let cache_key = format!("haruki_sekai_resp:{server}:{path}");
 
-    // Fast path: serve from cache while the entry is within its freshness window.
-    if let Some(cached) = cache_get(state, &cache_key).await {
-        return Ok(json_string_response(StatusCode::OK, cached));
+    if let Some(entry) = cache_get(state, &cache_key).await {
+        if let Some((fresh_until_ms, json)) = decode_cache_entry(&entry) {
+            if now_ms() >= fresh_until_ms {
+                spawn_revalidation(state, server, path, &cache_key, ttl_secs, max_stale_secs);
+            }
+            return Ok(json_string_response(StatusCode::OK, json.to_string()));
+        }
     }
 
-    // Coalesce concurrent misses for the same key onto a single upstream call;
-    // followers await and share the leader's outcome (success or failure).
+    // Miss (or undecodable entry): coalesce concurrent callers onto a single
+    // upstream call; followers await and share the leader's outcome (success
+    // or failure).
     let (outcome, _is_leader) = state
         .coalescer
-        .coalesce(&cache_key, || async {
-            let resp = proxy_game_api(state, server, path).await?;
-            let status = resp.status.as_u16();
-            let json: Arc<str> =
-                Arc::from(sonic_rs::to_string(&resp.body).unwrap_or_else(|_| "{}".to_string()));
-            // Populate the cache inside the in-flight window (200 only), so
-            // requests arriving between slot release and SETEX completion still
-            // hit the cache instead of stampeding upstream.
-            if status == 200 {
-                cache_set(state, &cache_key, &json, ttl_secs).await;
-            }
-            Ok((status, json))
+        .coalesce(&cache_key, || {
+            fetch_and_cache(state, server, path, &cache_key, ttl_secs, max_stale_secs)
         })
         .await;
 
@@ -218,14 +295,30 @@ pub async fn get_system(
     State(state): State<Arc<AppState>>,
     Path(server): Path<String>,
 ) -> Result<Response, AppError> {
-    proxy_game_api_cached(&state, &server, "/system", STATIC_CACHE_TTL_SECS).await
+    let ttls = cache_ttls(&state, &server);
+    proxy_game_api_cached(
+        &state,
+        &server,
+        "/system",
+        ttls.static_endpoints,
+        ttls.max_stale,
+    )
+    .await
 }
 
 pub async fn get_information(
     State(state): State<Arc<AppState>>,
     Path(server): Path<String>,
 ) -> Result<Response, AppError> {
-    proxy_game_api_cached(&state, &server, "/information", STATIC_CACHE_TTL_SECS).await
+    let ttls = cache_ttls(&state, &server);
+    proxy_game_api_cached(
+        &state,
+        &server,
+        "/information",
+        ttls.static_endpoints,
+        ttls.max_stale,
+    )
+    .await
 }
 
 pub async fn get_mysekai_housing_competition_list(
@@ -355,7 +448,8 @@ pub async fn get_event_ranking_top100(
         "/user/{{userId}}/event/{}/ranking?rankingViewType=top100",
         event_id
     );
-    proxy_game_api_cached(&state, &server, &path, RANKING_TOP100_CACHE_TTL_SECS).await
+    let ttls = cache_ttls(&state, &server);
+    proxy_game_api_cached(&state, &server, &path, ttls.ranking_top100, ttls.max_stale).await
 }
 
 pub async fn get_event_ranking_border(
@@ -366,7 +460,8 @@ pub async fn get_event_ranking_border(
         return Err(AppError::ParseError("event_id must be numeric".to_string()));
     }
     let path = format!("/event/{}/ranking-border", event_id);
-    proxy_game_api_cached(&state, &server, &path, RANKING_BORDER_CACHE_TTL_SECS).await
+    let ttls = cache_ttls(&state, &server);
+    proxy_game_api_cached(&state, &server, &path, ttls.ranking_border, ttls.max_stale).await
 }
 
 #[cfg(test)]
@@ -432,6 +527,46 @@ mod tests {
             coalescer: Arc::new(RequestCoalescer::default()),
         };
         (Arc::new(state), server)
+    }
+
+    #[test]
+    fn cache_entries_round_trip_and_reject_garbage() {
+        let entry = encode_cache_entry(1234, r#"{"a":1}"#);
+        assert_eq!(decode_cache_entry(&entry), Some((1234, r#"{"a":1}"#)));
+        // JSON containing '|' still round-trips: only the first separator splits.
+        let entry = encode_cache_entry(5, r#"{"a":"x|y"}"#);
+        assert_eq!(decode_cache_entry(&entry), Some((5, r#"{"a":"x|y"}"#)));
+        assert_eq!(decode_cache_entry("no-separator"), None);
+        assert_eq!(decode_cache_entry("xyz|{}"), None);
+        // Pre-SWR entries (raw JSON) read as a miss and get overwritten.
+        assert_eq!(decode_cache_entry(r#"{"a":1}"#), None);
+    }
+
+    #[tokio::test]
+    async fn resolves_cache_ttls_per_region_with_defaults() {
+        let (mut state, server) = state_with_router().await;
+        let config: Config = serde_yaml::from_str(
+            "backend: {}\nservers:\n  cn:\n    cache_ttls:\n      ranking_top100: 3\n      max_stale: 60\n",
+        )
+        .unwrap();
+        Arc::get_mut(&mut state).unwrap().config = config;
+
+        // Configured region: overridden fields apply, the rest default.
+        let cn = cache_ttls(&state, "cn");
+        assert_eq!(cn.ranking_top100, 3);
+        assert_eq!(cn.max_stale, 60);
+        assert_eq!(cn.ranking_border, 30);
+        assert_eq!(cn.static_endpoints, 300);
+
+        // Unconfigured region and unparsable server both fall back to defaults.
+        for server in ["jp", "bogus"] {
+            let ttls = cache_ttls(&state, server);
+            assert_eq!(ttls.ranking_top100, 1);
+            assert_eq!(ttls.ranking_border, 30);
+            assert_eq!(ttls.static_endpoints, 300);
+            assert_eq!(ttls.max_stale, 30);
+        }
+        server.abort();
     }
 
     #[test]

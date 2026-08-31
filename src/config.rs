@@ -227,6 +227,56 @@ pub struct MasterSyncConfig {
     pub notify: Vec<MasterSyncPeer>,
 }
 
+/// Freshness/staleness windows (seconds) for the cached global read endpoints
+/// (ranking / system / information). Per-region so a hot region (e.g. one
+/// polled at 1 req/s downstream) can trade a little freshness for fewer
+/// upstream calls without affecting the others.
+#[derive(Debug, Clone, Deserialize)]
+pub struct CacheTtlConfig {
+    /// Freshness window for the event ranking top100 endpoint.
+    #[serde(default = "default_ranking_top100_ttl")]
+    pub ranking_top100: u64,
+    /// Freshness window for the event ranking-border endpoint.
+    #[serde(default = "default_ranking_border_ttl")]
+    pub ranking_border: u64,
+    /// Freshness window for /system and /information.
+    #[serde(rename = "static", default = "default_static_ttl")]
+    pub static_endpoints: u64,
+    /// How long past its freshness window a cached response may still be served
+    /// while a background revalidation refreshes it (stale-while-revalidate).
+    /// Also bounds how long an unreachable upstream is masked by stale data.
+    /// 0 disables stale serving.
+    #[serde(default = "default_max_stale")]
+    pub max_stale: u64,
+}
+
+fn default_ranking_top100_ttl() -> u64 {
+    1
+}
+
+fn default_ranking_border_ttl() -> u64 {
+    30
+}
+
+fn default_static_ttl() -> u64 {
+    300
+}
+
+fn default_max_stale() -> u64 {
+    30
+}
+
+impl Default for CacheTtlConfig {
+    fn default() -> Self {
+        Self {
+            ranking_top100: default_ranking_top100_ttl(),
+            ranking_border: default_ranking_border_ttl(),
+            static_endpoints: default_static_ttl(),
+            max_stale: default_max_stale(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct ServerConfig {
     #[serde(default)]
@@ -271,6 +321,9 @@ pub struct ServerConfig {
     pub master_sync: MasterSyncConfig,
     #[serde(default)]
     pub master_remote_source: MasterRemoteSourceConfig,
+    /// Cache windows for this region's cached read endpoints.
+    #[serde(default)]
+    pub cache_ttls: CacheTtlConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
