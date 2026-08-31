@@ -490,7 +490,7 @@ mod tests {
             let add = |b: &mut tar::Builder<std::fs::File>, name: &str, data: &[u8]| {
                 let mut header = tar::Header::new_gnu();
                 header.set_size(data.len() as u64);
-                header.set_mode(0o644);
+                header.set_mode(0o600);
                 header.set_cksum();
                 b.append_data(&mut header, name, data).unwrap();
             };
