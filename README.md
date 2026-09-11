@@ -21,6 +21,15 @@
 6. Open Terminal, and `cd` to the directory
 7. Run `haruki-sekai-api`
 
+## Master Data Registry
+
+`master_registry` (shipped next to `haruki-sekai-api`) is the master data manager: it pulls each region's master from its owner node (`servers.<region>.master_sync.source_url`), owns git push and database ingest, publishes per-region manifests, maintains the `music_metas` feed and serves everything other projects consume.
+
+1. Reuse `haruki-sekai-configs.yaml`; fill in the `registry:` section (`token`, `state_dir`, `subscribers`, `music_metas`).
+2. Run `master_registry` from the same directory (`CONFIG_PATH` is honoured like the API server).
+3. Consumers read `GET /v1/master/{region}/current` (revalidate with `If-None-Match`), then fetch changed files by digest from `GET /v1/master/{region}/blob/{sha256}` (immutable). `GET /v1/metas/{region}/current` and `blob/{sha256}` work the same way for music metas; `GET /v1/app/{region}` serves the app identity in the `apphash_sources` `url` shape.
+4. Point an owner's `master_sync.notify` at `POST /internal/master-updated` on the registry; mutating endpoints require `Authorization: Bearer <registry.token>`.
+
 ## Nuverse Schema
 
 See [docs/nuverse-schema-guide.md](docs/nuverse-schema-guide.md).
