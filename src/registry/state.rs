@@ -51,18 +51,16 @@ impl PublishRecord {
 }
 
 /// Digest of the file set (names and digests only), independent of the
-/// manifest's timestamp.
+/// manifest's timestamp. Uses the manifest's recorded hash when present.
 pub fn content_hash(manifest: &MasterManifest) -> String {
-    use sha2::Digest as _;
-    let mut hasher = sha2::Sha256::new();
-    for file in &manifest.files {
-        hasher.update(file.name.as_bytes());
-        hasher.update(b":");
-        hasher.update(file.sha256.as_bytes());
-        hasher.update(b"\n");
+    if !manifest.content_hash.is_empty() {
+        return manifest.content_hash.clone();
     }
-    hex::encode(hasher.finalize())
+    crate::api::internal::manifest_content_hash(&manifest.files)
 }
+
+/// Immutable manifest snapshots kept per region (newest publishes).
+const MANIFEST_SNAPSHOTS_KEPT: usize = 20;
 
 #[derive(Debug, Clone)]
 pub struct RegistryState {
@@ -88,6 +86,27 @@ impl RegistryState {
 
     fn history_path(&self, region: ServerRegion) -> PathBuf {
         self.manifest_dir(region).join("history.jsonl")
+    }
+
+    fn snapshot_dir(&self, region: ServerRegion) -> PathBuf {
+        self.manifest_dir(region).join("by-hash")
+    }
+
+    /// An immutable manifest snapshot by content hash, if still kept.
+    pub async fn manifest_by_hash(
+        &self,
+        region: ServerRegion,
+        content_hash: &str,
+    ) -> Result<Option<MasterManifest>, AppError> {
+        if !is_hex_digest(content_hash) {
+            return Ok(None);
+        }
+        read_json(
+            &self
+                .snapshot_dir(region)
+                .join(format!("{content_hash}.json")),
+        )
+        .await
     }
 
     fn app_path(&self, region: ServerRegion) -> PathBuf {
@@ -142,10 +161,20 @@ impl RegistryState {
             }
             None => true,
         };
-        tokio::fs::create_dir_all(self.manifest_dir(region)).await?;
+        tokio::fs::create_dir_all(self.snapshot_dir(region)).await?;
         let json = serde_json::to_vec_pretty(manifest)
             .map_err(|e| AppError::ParseError(format!("manifest: {e}")))?;
         write_file_atomic(&self.current_path(region), &json).await?;
+        if is_hex_digest(&record.content_hash) {
+            write_file_atomic(
+                &self
+                    .snapshot_dir(region)
+                    .join(format!("{}.json", record.content_hash)),
+                &json,
+            )
+            .await?;
+            self.prune_snapshots(region).await;
+        }
         if changed {
             use tokio::io::AsyncWriteExt;
             let mut line = serde_json::to_string(&record)
@@ -160,6 +189,27 @@ impl RegistryState {
             file.flush().await?;
         }
         Ok(changed)
+    }
+
+    /// Keep only the newest `MANIFEST_SNAPSHOTS_KEPT` snapshots (by mtime).
+    async fn prune_snapshots(&self, region: ServerRegion) {
+        let Ok(mut rd) = tokio::fs::read_dir(self.snapshot_dir(region)).await else {
+            return;
+        };
+        let mut entries = Vec::new();
+        while let Ok(Some(entry)) = rd.next_entry().await {
+            if let Ok(meta) = entry.metadata().await {
+                let modified = meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                entries.push((modified, entry.path()));
+            }
+        }
+        if entries.len() <= MANIFEST_SNAPSHOTS_KEPT {
+            return;
+        }
+        entries.sort_by_key(|entry| std::cmp::Reverse(entry.0));
+        for (_, path) in entries.into_iter().skip(MANIFEST_SNAPSHOTS_KEPT) {
+            let _ = tokio::fs::remove_file(path).await;
+        }
     }
 
     /// The operator-set app identity for a region, if one was stored.
@@ -191,6 +241,14 @@ impl RegistryState {
     }
 }
 
+/// A lowercase hex SHA-256, the only shape accepted in digest-keyed paths.
+pub fn is_hex_digest(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
 async fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<Option<T>, AppError> {
     match tokio::fs::read(path).await {
         Ok(data) => serde_json::from_slice(&data)
@@ -216,6 +274,8 @@ mod tests {
             asset_hash: "a".to_string(),
             cdn_version: 0,
             generated_at: "2026-09-11T00:00:00Z".to_string(),
+            content_hash: String::new(),
+            git_commit: None,
             files: files
                 .iter()
                 .map(|(name, sha)| MasterManifestFile {
@@ -260,6 +320,23 @@ mod tests {
         assert!(state.publish(ServerRegion::Jp, &newer).await.unwrap());
         let history = state.history(ServerRegion::Jp, 10).await.unwrap();
         assert_eq!(history.len(), 3);
+        // Every publish left an immutable snapshot addressable by content
+        // hash (two publishes with the same file set share one snapshot).
+        for record in &history {
+            let snap = state
+                .manifest_by_hash(ServerRegion::Jp, &record.content_hash)
+                .await
+                .unwrap()
+                .expect("snapshot kept");
+            assert_eq!(content_hash(&snap), record.content_hash);
+        }
+        assert!(state
+            .manifest_by_hash(ServerRegion::Jp, "../current")
+            .await
+            .unwrap()
+            .is_none());
+        assert!(is_hex_digest(&history[0].content_hash));
+        assert!(!is_hex_digest("ABC"));
         assert_eq!(history[0].data_version, "2");
         assert_eq!(history[2].content_hash, content_hash(&first));
         assert_eq!(state.history(ServerRegion::Jp, 1).await.unwrap().len(), 1);

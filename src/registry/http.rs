@@ -7,13 +7,25 @@
 //! - `GET /v1/master/{region}/files/{name}`       one master file (ETag = its SHA-256,
 //!   `If-None-Match` -> 304, `Last-Modified`, `Content-Length`)
 //! - `GET /v1/master/{region}/bundle`             tar of the master directory
+//! - `GET /v1/master/{region}/manifests/{hash}`  immutable manifest snapshot by contentHash
+//! - `GET /v1/master/{region}/blob/{sha256}`      immutable master file by digest
+//! - `GET /v1/metas/{region}/current`             music_metas pointer (ETag = digest)
+//! - `GET /v1/metas/{region}/music_metas.json`    current music_metas bytes (mutable)
+//! - `GET /v1/metas/{region}/blob/{sha256}`       immutable music_metas bytes
 //! - `GET /v1/app/{region}`                       `{appVersion, appHash}` — the
 //!   shape the SekaiAPI AppHash updater's `url` source consumes
+//!
+//! CDN contract: pointers (`current`, `files/{name}`, `music_metas.json`,
+//! `app`) answer `Cache-Control: no-cache` with a strong ETag and must be
+//! revalidated (a CDN that ignores `no-cache` needs a bypass rule for those
+//! paths, or clients add a unique query parameter); digest-addressed
+//! resources (`manifests/{hash}`, `blob/{sha256}`) are immutable for a year.
 //!
 //! Mutations (require `registry.token`; disabled when it is empty):
 //! - `PUT /v1/app/{region}` / `DELETE /v1/app/{region}`  app-identity override
 //! - `POST /v1/master/{region}/refresh`            pull from owner now, then publish
 //! - `POST /v1/master/{region}/publish`            re-scan the directory and publish
+//! - `POST /v1/metas/{region}/refresh`             pull music_metas from upstream now
 //! - `POST /internal/master-updated`               owner webhook (same shape a
 //!   SekaiAPI peer accepts, so an owner's `master_sync.notify` can point here)
 
@@ -43,8 +55,17 @@ pub fn router(registry: Shared) -> Router {
         .route("/health", get(health))
         .route("/v1/master/{region}/current", get(current))
         .route("/v1/master/{region}/history", get(history))
+        .route(
+            "/v1/master/{region}/manifests/{hash}",
+            get(manifest_by_hash),
+        )
         .route("/v1/master/{region}/files/{name}", get(file))
+        .route("/v1/master/{region}/blob/{sha256}", get(blob))
         .route("/v1/master/{region}/bundle", get(bundle))
+        .route("/v1/metas/{region}/current", get(metas_current))
+        .route("/v1/metas/{region}/music_metas.json", get(metas_file))
+        .route("/v1/metas/{region}/blob/{sha256}", get(metas_blob))
+        .route("/v1/metas/{region}/refresh", post(metas_refresh))
         .route("/v1/master/{region}/refresh", post(refresh))
         .route("/v1/master/{region}/publish", post(publish))
         .route(
@@ -131,6 +152,40 @@ fn http_date(time: std::time::SystemTime) -> String {
         .to_string()
 }
 
+/// Cache policy for content that can never change under its URL (digest or
+/// content-hash addressed): a CDN may hold it for a year.
+const IMMUTABLE: &str = "public, max-age=31536000, immutable";
+
+/// Stream a file as an immutable, digest-tagged response.
+async fn immutable_file(path: &std::path::Path, digest: &str, content_type: &str) -> Response {
+    let meta = match tokio::fs::metadata(path).await {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return AppError::NotFound(format!("no blob {digest}")).into_response()
+        }
+        Err(e) => return AppError::IoError(e.to_string()).into_response(),
+    };
+    match tokio::fs::File::open(path).await {
+        Ok(file) => {
+            let mut response =
+                axum::body::Body::from_stream(tokio_util::io::ReaderStream::new(file))
+                    .into_response();
+            let headers = response.headers_mut();
+            let set = |headers: &mut HeaderMap, name: &'static str, value: String| {
+                if let Ok(value) = axum::http::HeaderValue::from_str(&value) {
+                    headers.insert(name, value);
+                }
+            };
+            set(headers, "content-type", content_type.to_string());
+            set(headers, "content-length", meta.len().to_string());
+            set(headers, "etag", etag(digest));
+            set(headers, "cache-control", IMMUTABLE.to_string());
+            response
+        }
+        Err(e) => AppError::IoError(e.to_string()).into_response(),
+    }
+}
+
 fn not_modified(etag: &str) -> Response {
     (
         StatusCode::NOT_MODIFIED,
@@ -182,6 +237,224 @@ async fn current(
             AppError::NotFound(format!("region {} has not been published", region.as_str()))
                 .into_response()
         }
+        Err(e) => e.into_response(),
+    }
+}
+
+/// Immutable manifest snapshot by content hash (the `contentHash` of a
+/// `current` response).
+async fn manifest_by_hash(
+    State(registry): State<Shared>,
+    Path((region, hash)): Path<(String, String)>,
+) -> Response {
+    let region = match parse_region(&region) {
+        Ok(r) => r,
+        Err(e) => return e.into_response(),
+    };
+    match registry.state.manifest_by_hash(region, &hash).await {
+        Ok(Some(manifest)) => match serde_json::to_string(&manifest) {
+            Ok(body) => (
+                StatusCode::OK,
+                [
+                    ("content-type", "application/json".to_string()),
+                    ("etag", etag(&hash)),
+                    ("cache-control", IMMUTABLE.to_string()),
+                ],
+                body,
+            )
+                .into_response(),
+            Err(e) => AppError::ParseError(e.to_string()).into_response(),
+        },
+        Ok(None) => AppError::NotFound(format!("no manifest {hash}")).into_response(),
+        Err(e) => e.into_response(),
+    }
+}
+
+/// A master file by its SHA-256 (from the manifest): immutable, so a CDN
+/// keeps serving it across versions for every table that did not change.
+/// Only files of the current manifest are addressable; a stale digest is a
+/// 404 and the consumer re-reads `current`.
+async fn blob(
+    State(registry): State<Shared>,
+    Path((region, sha256)): Path<(String, String)>,
+) -> Response {
+    let region = match parse_region(&region) {
+        Ok(r) => r,
+        Err(e) => return e.into_response(),
+    };
+    if !super::state::is_hex_digest(&sha256) {
+        return AppError::NotFound(format!("no blob {sha256}")).into_response();
+    }
+    let manifest = match registry.state.current(region).await {
+        Ok(Some(m)) => m,
+        Ok(None) => return AppError::NotFound(format!("no blob {sha256}")).into_response(),
+        Err(e) => return e.into_response(),
+    };
+    let Some(entry) = manifest.files.iter().find(|f| f.sha256 == sha256) else {
+        return AppError::NotFound(format!("no blob {sha256}")).into_response();
+    };
+    let (master_dir, _) = match registry.region_paths(region) {
+        Ok(p) => p,
+        Err(e) => return e.into_response(),
+    };
+    let path = std::path::Path::new(&master_dir).join(&entry.name);
+    // The file may have been rewritten since the manifest was published;
+    // never serve different bytes under a digest URL.
+    let actual = {
+        let path = path.clone();
+        match tokio::fs::metadata(&path).await {
+            Ok(meta) => {
+                match tokio::task::spawn_blocking(move || file_sha256(&path, &meta)).await {
+                    Ok(Ok(d)) => d,
+                    Ok(Err(e)) => return e.into_response(),
+                    Err(e) => {
+                        return AppError::Internal(format!("digest task: {e}")).into_response()
+                    }
+                }
+            }
+            Err(_) => return AppError::NotFound(format!("no blob {sha256}")).into_response(),
+        }
+    };
+    if actual != sha256 {
+        return AppError::NotFound(format!("no blob {sha256}")).into_response();
+    }
+    immutable_file(&path, &sha256, "application/json").await
+}
+
+fn metas_manager(registry: &Registry) -> Result<&super::metas::MusicMetasManager, AppError> {
+    registry
+        .metas
+        .as_ref()
+        .ok_or_else(|| AppError::NotFound("music_metas feed is disabled".to_string()))
+}
+
+/// The music_metas pointer: digest, size and upstream freshness.
+async fn metas_current(
+    State(registry): State<Shared>,
+    Path(region): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let region = match parse_region(&region) {
+        Ok(r) => r,
+        Err(e) => return e.into_response(),
+    };
+    let manager = match metas_manager(&registry) {
+        Ok(m) => m,
+        Err(e) => return e.into_response(),
+    };
+    match manager.current(region).await {
+        Ok(Some(record)) => {
+            let tag = etag(&record.sha256);
+            if if_none_match(&headers, &tag) {
+                return not_modified(&tag);
+            }
+            match serde_json::to_string(&record) {
+                Ok(body) => (
+                    StatusCode::OK,
+                    [
+                        ("content-type", "application/json".to_string()),
+                        ("etag", tag),
+                        ("cache-control", "no-cache".to_string()),
+                    ],
+                    body,
+                )
+                    .into_response(),
+                Err(e) => AppError::ParseError(e.to_string()).into_response(),
+            }
+        }
+        Ok(None) => AppError::NotFound(format!(
+            "music_metas for {} not fetched yet",
+            region.as_str()
+        ))
+        .into_response(),
+        Err(e) => e.into_response(),
+    }
+}
+
+/// The current music_metas bytes at a stable URL (mutable, ETag = digest).
+async fn metas_file(
+    State(registry): State<Shared>,
+    Path(region): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let region = match parse_region(&region) {
+        Ok(r) => r,
+        Err(e) => return e.into_response(),
+    };
+    let manager = match metas_manager(&registry) {
+        Ok(m) => m,
+        Err(e) => return e.into_response(),
+    };
+    let record = match manager.current(region).await {
+        Ok(Some(r)) => r,
+        Ok(None) => {
+            return AppError::NotFound(format!(
+                "music_metas for {} not fetched yet",
+                region.as_str()
+            ))
+            .into_response()
+        }
+        Err(e) => return e.into_response(),
+    };
+    let tag = etag(&record.sha256);
+    if if_none_match(&headers, &tag) {
+        return not_modified(&tag);
+    }
+    let Some(path) = manager.blob_path(region, &record.sha256) else {
+        return AppError::Internal("corrupt music_metas pointer".to_string()).into_response();
+    };
+    let mut response = immutable_file(&path, &record.sha256, "application/json").await;
+    if let Ok(value) = axum::http::HeaderValue::from_str("no-cache") {
+        response.headers_mut().insert("cache-control", value);
+    }
+    response
+}
+
+/// music_metas bytes by digest: immutable.
+async fn metas_blob(
+    State(registry): State<Shared>,
+    Path((region, sha256)): Path<(String, String)>,
+) -> Response {
+    let region = match parse_region(&region) {
+        Ok(r) => r,
+        Err(e) => return e.into_response(),
+    };
+    let manager = match metas_manager(&registry) {
+        Ok(m) => m,
+        Err(e) => return e.into_response(),
+    };
+    let Some(path) = manager.blob_path(region, &sha256) else {
+        return AppError::NotFound(format!("no blob {sha256}")).into_response();
+    };
+    immutable_file(&path, &sha256, "application/json").await
+}
+
+/// Pull the region's music_metas from upstream now (synchronous; a few
+/// seconds at most).
+async fn metas_refresh(
+    State(registry): State<Shared>,
+    Path(region): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(resp) = check_token(&registry, &headers) {
+        return *resp;
+    }
+    let region = match parse_region(&region) {
+        Ok(r) => r,
+        Err(e) => return e.into_response(),
+    };
+    let manager = match metas_manager(&registry) {
+        Ok(m) => m,
+        Err(e) => return e.into_response(),
+    };
+    match manager.refresh(region).await {
+        Ok(outcome) => json(&serde_json::json!({
+            "changed": outcome.changed,
+            "notModified": outcome.not_modified,
+            "sha256": outcome.record.sha256,
+            "size": outcome.record.size,
+            "rows": outcome.record.rows,
+        })),
         Err(e) => e.into_response(),
     }
 }
@@ -334,7 +607,13 @@ async fn app_identity(State(registry): State<Shared>, Path(region): Path<String>
         Err(e) => return e.into_response(),
     };
     match registry.app_identity(region).await {
-        Ok(info) => json(&info),
+        Ok(info) => {
+            let mut response = json(&info);
+            if let Ok(value) = axum::http::HeaderValue::from_str("no-cache") {
+                response.headers_mut().insert("cache-control", value);
+            }
+            response
+        }
         Err(e) => e.into_response(),
     }
 }
@@ -611,6 +890,46 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), 200);
+        // Digest-addressed blob: immutable, same bytes, stale digests are 404.
+        let sha = current["files"][0]["sha256"].as_str().unwrap().to_string();
+        let resp = client
+            .get(format!("{base}/v1/master/jp/blob/{sha}"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        assert_eq!(resp.headers()["cache-control"], IMMUTABLE);
+        assert_eq!(resp.headers()["etag"], format!("\"{sha}\"").as_str());
+        assert_eq!(resp.text().await.unwrap(), "[{\"id\":1}]");
+        for bad in [
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            "nothex",
+            "..%2Fx",
+        ] {
+            let resp = client
+                .get(format!("{base}/v1/master/jp/blob/{bad}"))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), 404, "{bad}");
+        }
+        // Immutable manifest snapshot by content hash.
+        let content_hash = current["contentHash"].as_str().unwrap().to_string();
+        let resp = client
+            .get(format!("{base}/v1/master/jp/manifests/{content_hash}"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        assert_eq!(resp.headers()["cache-control"], IMMUTABLE);
+        let snapshot: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(snapshot["dataVersion"], "5.6.1.11");
+        let resp = client
+            .get(format!("{base}/v1/master/jp/manifests/deadbeef"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 404);
         // The manifest revalidates the same way.
         let resp = client
             .get(format!("{base}/v1/master/jp/current"))
@@ -618,6 +937,7 @@ mod tests {
             .await
             .unwrap();
         let manifest_etag = resp.headers()["etag"].to_str().unwrap().to_string();
+        assert_eq!(resp.headers()["cache-control"], "no-cache");
         assert_eq!(resp.headers()["x-haruki-data-version"], "5.6.1.11");
         let resp = client
             .get(format!("{base}/v1/master/jp/current"))
@@ -711,6 +1031,22 @@ mod tests {
         assert_eq!(body["changed"], true);
         let (_, history) = get_json(&client, &format!("{base}/v1/master/jp/history")).await;
         assert_eq!(history.as_array().unwrap().len(), 2);
+        // The old blob digest no longer resolves once the file changed; the
+        // new manifest's digest does.
+        let resp = client
+            .get(format!("{base}/v1/master/jp/blob/{sha}"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 404);
+        let (_, refreshed) = get_json(&client, &format!("{base}/v1/master/jp/current")).await;
+        let new_sha = refreshed["files"][0]["sha256"].as_str().unwrap();
+        let resp = client
+            .get(format!("{base}/v1/master/jp/blob/{new_sha}"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
         // Changed content: the old ETags no longer match on file or manifest.
         let resp = client
             .get(format!("{base}/v1/master/jp/files/cards.json"))
@@ -888,6 +1224,140 @@ mod tests {
         assert_eq!(resp.status(), 200);
         server.abort();
         owner_server.abort();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn serves_music_metas_pointer_file_and_blobs() {
+        let root = temp_dir();
+        let upstream_body = serde_json::to_vec(&serde_json::json!([
+            {"music_id": 1, "difficulty": "master", "music_time": 100.0, "event_rate": 100, "base_score": 1.0,
+             "base_score_auto": 1.0, "fever_score": 1.0, "fever_end_time": 1.0, "tap_count": 10,
+             "skill_score_solo": [1,1,1,1,1,1], "skill_score_auto": [1,1,1,1,1,1], "skill_score_multi": [1,1,1,1,1,1]}
+        ]))
+        .unwrap();
+        let upstream = Router::new().fallback(any({
+            let body = upstream_body.clone();
+            move || {
+                let body = body.clone();
+                async move {
+                    (
+                        StatusCode::OK,
+                        [("content-type", "application/json"), ("etag", "\"u1\"")],
+                        body,
+                    )
+                }
+            }
+        }));
+        let (upstream_url, upstream_server) = serve(upstream).await;
+
+        let mut config = base_config(&root, "secret");
+        config
+            .registry
+            .music_metas
+            .sources
+            .insert(ServerRegion::Jp, format!("{upstream_url}/music_metas.json"));
+        // Disable the other regions so nothing reaches the real upstream.
+        for region in [
+            ServerRegion::En,
+            ServerRegion::Tw,
+            ServerRegion::Kr,
+            ServerRegion::Cn,
+        ] {
+            config
+                .registry
+                .music_metas
+                .sources
+                .insert(region, String::new());
+        }
+        let registry = Arc::new(Registry::new(Arc::new(config), HashMap::new()));
+        assert_eq!(
+            registry.metas.as_ref().unwrap().regions(),
+            vec![ServerRegion::Jp]
+        );
+        let (base, server) = serve(router(registry.clone())).await;
+        let client = reqwest::Client::new();
+
+        let (status, _) = get_json(&client, &format!("{base}/v1/metas/jp/current")).await;
+        assert_eq!(status, 404);
+        let resp = client
+            .post(format!("{base}/v1/metas/jp/refresh"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 401);
+        let resp = client
+            .post(format!("{base}/v1/metas/jp/refresh"))
+            .bearer_auth("secret")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let outcome: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(outcome["changed"], true);
+        assert_eq!(outcome["rows"], 4);
+        let sha = outcome["sha256"].as_str().unwrap().to_string();
+
+        let resp = client
+            .get(format!("{base}/v1/metas/jp/current"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        assert_eq!(resp.headers()["cache-control"], "no-cache");
+        let pointer_etag = resp.headers()["etag"].to_str().unwrap().to_string();
+        assert_eq!(pointer_etag, format!("\"{sha}\""));
+        let record: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(record["omakaseInjected"], true);
+        assert_eq!(record["sourceEtag"], "\"u1\"");
+        let resp = client
+            .get(format!("{base}/v1/metas/jp/current"))
+            .header("if-none-match", &pointer_etag)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 304);
+
+        let resp = client
+            .get(format!("{base}/v1/metas/jp/music_metas.json"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        assert_eq!(resp.headers()["cache-control"], "no-cache");
+        assert_eq!(resp.headers()["etag"], pointer_etag.as_str());
+        let served: Vec<serde_json::Value> = resp.json().await.unwrap();
+        assert_eq!(served.len(), 4);
+        assert_eq!(served[3]["music_id"], 10000);
+        let resp = client
+            .get(format!("{base}/v1/metas/jp/music_metas.json"))
+            .header("if-none-match", &pointer_etag)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 304);
+
+        let resp = client
+            .get(format!("{base}/v1/metas/jp/blob/{sha}"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        assert_eq!(resp.headers()["cache-control"], IMMUTABLE);
+        assert_eq!(
+            resp.headers()["content-length"],
+            record["size"].to_string().as_str()
+        );
+        let resp = client
+            .get(format!("{base}/v1/metas/jp/blob/nothex"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 404);
+        let (status, _) = get_json(&client, &format!("{base}/v1/metas/en/current")).await;
+        assert_eq!(status, 404);
+        server.abort();
+        upstream_server.abort();
         std::fs::remove_dir_all(root).unwrap();
     }
 }

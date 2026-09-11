@@ -372,7 +372,46 @@ pub struct MasterManifest {
     pub asset_hash: String,
     pub cdn_version: i32,
     pub generated_at: String,
+    /// SHA-256 over the `name:sha256` lines of `files`: identifies the file
+    /// set independently of when it was published. Immutable manifest and
+    /// blob URLs key on it.
+    #[serde(default)]
+    pub content_hash: String,
+    /// HEAD of the git repository the master directory lives in, when it is
+    /// one (the five region mirrors are). The version reference consumers
+    /// pin; `None` outside a repository.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_commit: Option<String>,
     pub files: Vec<MasterManifestFile>,
+}
+
+/// Digest of a manifest's file set (names and digests only), independent of
+/// the manifest's timestamp and version fields.
+pub fn manifest_content_hash(files: &[MasterManifestFile]) -> String {
+    use sha2::Digest as _;
+    let mut hasher = sha2::Sha256::new();
+    for file in files {
+        hasher.update(file.name.as_bytes());
+        hasher.update(b":");
+        hasher.update(file.sha256.as_bytes());
+        hasher.update(b"\n");
+    }
+    hex::encode(hasher.finalize())
+}
+
+/// `git rev-parse HEAD` for the repository containing `master_dir`, if any.
+fn git_head_of(master_dir: &str) -> Option<String> {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(master_dir)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let head = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (head.len() == 40 && head.chars().all(|c| c.is_ascii_hexdigit())).then_some(head)
 }
 
 /// Digest cache keyed by path and validated by (mtime, size), so a manifest
@@ -446,6 +485,8 @@ pub fn build_master_manifest(
         asset_hash: version.asset_hash,
         cdn_version: version.cdn_version,
         generated_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        content_hash: manifest_content_hash(&files),
+        git_commit: git_head_of(master_dir),
         files,
     })
 }
@@ -1085,6 +1126,59 @@ mod tests {
         assert_eq!(body["files"][0]["name"], "cards.json");
         assert_eq!(body["files"][0]["size"], 3);
         assert_eq!(body["files"][0]["sha256"], sha256_hex(b"[1]"));
+        assert_eq!(body["contentHash"].as_str().unwrap().len(), 64);
+        assert!(
+            body.get("gitCommit").is_none(),
+            "temp dir is not a git repo"
+        );
+        // Inside a repository the manifest pins HEAD.
+        let repo = root.join("master");
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {:?}: {}",
+                args,
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        git(&["init", "-q"]);
+        git(&[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "commit.gpgsign=false",
+            "add",
+            "-A",
+        ]);
+        git(&[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-q",
+            "-m",
+            "x",
+        ]);
+        let response =
+            get_master_manifest(State(state.clone()), auth_headers(), Path("jp".to_string())).await;
+        assert_eq!(
+            json_body(response).await["gitCommit"]
+                .as_str()
+                .unwrap()
+                .len(),
+            40
+        );
 
         // A rewritten file (new size) is re-hashed; an untouched one is served
         // from the cache.

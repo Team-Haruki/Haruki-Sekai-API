@@ -62,6 +62,11 @@ registry: # master data manager (`master_registry` binary); ignored by the API s
   subscribers: [] # peers to POST /internal/master-updated after a region is published
   # - url: "http://100.64.0.2:9999"
   #   token: "peer-internal-token"
+  music_metas: # the registry pulls music_metas*.json for consumers (served under /v1/metas)
+    enabled: true
+    cron: "0 */30 * * * *"
+    inject_omakase: true # add the synthetic music_id 10000 rows consumers expect
+    sources: {} # per-region URL overrides; "" disables a region (defaults: sekai-data.3-3.dev)
 
 apphash_sources: # sources for apphash, to update apphash values periodically
   # - type: file
