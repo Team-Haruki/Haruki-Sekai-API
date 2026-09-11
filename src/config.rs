@@ -107,10 +107,19 @@ pub struct DatabaseConfig {
     pub dsn: String,
     #[serde(default = "default_max_connections")]
     pub max_connections: u32,
+    /// Master-data ingest only: JSON files ingested at once. Each file keeps a
+    /// few row batches in memory, so this is the ingest memory knob on a
+    /// shared node.
+    #[serde(default = "default_ingest_concurrency")]
+    pub ingest_concurrency: usize,
 }
 
 fn default_max_connections() -> u32 {
     10
+}
+
+fn default_ingest_concurrency() -> usize {
+    crate::ingest_engine::DEFAULT_INGEST_CONCURRENCY
 }
 
 impl Default for DatabaseConfig {
@@ -119,6 +128,7 @@ impl Default for DatabaseConfig {
             enabled: false,
             dsn: String::new(),
             max_connections: default_max_connections(),
+            ingest_concurrency: default_ingest_concurrency(),
         }
     }
 }
@@ -480,6 +490,7 @@ servers:
         assert!(!config.database.enabled);
         assert_eq!(config.database.dsn, "");
         assert_eq!(config.master_database.max_connections, 10);
+        assert_eq!(config.master_database.ingest_concurrency, 2);
         assert_eq!(config.git.username, "");
         assert!(!config.git.sign_commits);
         assert!(config.servers.is_empty());

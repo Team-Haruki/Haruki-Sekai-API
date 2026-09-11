@@ -199,6 +199,8 @@ pub struct MasterUpdater {
     /// so their read-modify-writes do not clobber each other's fields.
     version_lock: Arc<tokio::sync::Mutex<()>>,
     db: Option<sea_orm::DatabaseConnection>,
+    /// Files ingested at once when `db` is set.
+    ingest_concurrency: usize,
     /// Set when the last DB ingest failed. The next cron tick retries the ingest
     /// even if the master version is unchanged, so a transient DB failure does not
     /// leave the DB out of sync until the next upstream version bump.
@@ -214,6 +216,7 @@ impl MasterUpdater {
         proxy: Option<String>,
         asset_updater_servers: Vec<AssetUpdaterInfo>,
         db: Option<sea_orm::DatabaseConnection>,
+        ingest_concurrency: usize,
         version_lock: Arc<tokio::sync::Mutex<()>>,
         remote_source: Option<RemoteMasterSource>,
     ) -> Self {
@@ -236,6 +239,7 @@ impl MasterUpdater {
             update_lock: tokio::sync::Mutex::new(()),
             version_lock,
             db,
+            ingest_concurrency,
             ingest_failed: std::sync::atomic::AtomicBool::new(false),
         }
     }
@@ -714,7 +718,10 @@ treating difference as an update",
             region
         );
         let ingest_ok = match crate::ingest_engine::IngestionEngine::new(db).await {
-            Ok(engine) => self.run_ingestion(&engine, master_dir, &region).await,
+            Ok(engine) => {
+                let engine = engine.with_concurrency(self.ingest_concurrency);
+                self.run_ingestion(&engine, master_dir, &region).await
+            }
             Err(e) => {
                 error!(
                     "{} Failed to initialize ingestion engine (skipping DB ingest; will retry on the next cron tick): {e:#}",
@@ -1205,6 +1212,7 @@ mod tests {
             None,
             asset_updaters,
             None,
+            crate::ingest_engine::DEFAULT_INGEST_CONCURRENCY,
             Arc::new(tokio::sync::Mutex::new(())),
             None,
         )

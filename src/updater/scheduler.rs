@@ -116,6 +116,7 @@ async fn schedule_local_master_updates(
             proxy.clone(),
             config.asset_updater_servers.clone(),
             db.clone(),
+            config.master_database.ingest_concurrency,
             version_lock(version_locks, *region),
             None,
         ));
@@ -210,6 +211,7 @@ async fn schedule_remote_master_updates(
             proxy.clone(),
             config.asset_updater_servers.clone(),
             db.clone(),
+            config.master_database.ingest_concurrency,
             version_lock(version_locks, *region),
             Some(remote),
         ));
