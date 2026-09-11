@@ -20,6 +20,8 @@ serde_yaml = { package = "yaml_serde", version = "0.10" }
 indexmap = { version = "2", features = ["serde"] }
 rmp-serde = "1"
 rmpv = "1"
+rmp = "0.8"
+cipher = "0.5"
 aes = "0.9"
 cbc = { version = "0.2", features = ["alloc"] }
 hex = "0.4"

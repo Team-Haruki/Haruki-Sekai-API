@@ -39,7 +39,7 @@ Branch on protocol with `ServerRegion::is_cp_server()`.
 - `src/upstream.rs` - `RegionRouter`: priority-ordered failover across local client and remote Haruki nodes, per-target circuit breakers
 - `src/crypto/` - AES-128-CBC encrypt/decrypt with MessagePack
 - `src/db/` - SeaORM entities, two databases: user DB (`database`) and master data DB (`master_database`)
-- `src/updater/` - Cron jobs for master data version check/download (with local or remote-borrowed accounts), git push, app hash polling; `sync.rs` pulls master bundles from a region's owner node
+- `src/updater/` - Cron jobs for master data version check/download (with local or remote-borrowed accounts), git push, app hash polling; `sync.rs` pulls master bundles from a region's owner node; `master_stream.rs` decodes a downloaded master payload table by table (rows streamed) so the producer's peak memory is bounded by one row, not the payload — keep new master consumers on that path, never `unpack_ordered` on a whole master
 - `src/ingest_engine.rs` - Bulk JSON->DB ingestion using `schema_info.json` for column mapping
 - `src/models/` - ~92 auto-generated game data models (do NOT manually edit; regenerate from source data)
 

@@ -1,14 +1,15 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
-use serde_json::Value as JsonValue;
 use tracing::{error, info, warn};
 
 use super::git::GitHelper;
-use crate::client::helper::{compare_version, effective_app_version, VersionInfo};
+use super::master_stream::{walk_master_payload, MasterTableWriter};
+use crate::client::helper::{
+    compare_version, effective_app_version, stream_response_to_file, VersionInfo,
+};
 use crate::client::{AccountSession, LoginResponse, SekaiClient};
 use crate::config::{AssetUpdaterInfo, GitConfig, MasterRemoteSourceConfig, ServerRegion};
 use crate::error::AppError;
@@ -97,9 +98,10 @@ impl RemoteMasterSource {
     }
 
     /// Fetch one CP master split as the raw encrypted bytes relayed by the
-    /// account node. The full split buffers here (the decoding node), never on
-    /// the relay.
-    async fn fetch_split_bytes(&self, api_path: &str) -> Result<Vec<u8>, AppError> {
+    /// account node, streamed straight into `dest`. Neither node buffers the
+    /// split: the relay forwards chunks and this side writes them to disk for
+    /// the table-at-a-time decode. Returns the byte count.
+    async fn fetch_split_to_file(&self, api_path: &str, dest: &Path) -> Result<u64, AppError> {
         let resp = self
             .http
             .post(format!("{}/internal/game-stream", self.base_url))
@@ -112,22 +114,22 @@ impl RemoteMasterSource {
             .await
             .map_err(|e| AppError::NetworkError(format!("game stream: {}", e)))?;
         let status = resp.status();
-        let is_json = resp
-            .headers()
-            .get("content-type")
-            .and_then(|v| v.to_str().ok())
-            .is_some_and(|v| v.starts_with("application/json"));
-        let bytes = resp
-            .bytes()
-            .await
-            .map_err(|e| AppError::NetworkError(format!("game stream: {}", e)))?;
         if !status.is_success() {
             return Err(AppError::NetworkError(format!(
                 "game stream returned {}",
                 status
             )));
         }
+        let is_json = resp
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| v.starts_with("application/json"));
         if is_json {
+            let bytes = resp
+                .bytes()
+                .await
+                .map_err(|e| AppError::NetworkError(format!("game stream: {}", e)))?;
             let envelope: InternalApiResponse = serde_json::from_slice(&bytes)
                 .map_err(|e| AppError::NetworkError(format!("game stream envelope: {}", e)))?;
             return Err(AppError::from_kind(
@@ -136,7 +138,50 @@ impl RemoteMasterSource {
                 envelope.message.unwrap_or_default(),
             ));
         }
-        Ok(bytes.to_vec())
+        // The relay forwards the game status out of band; anything but 200 is
+        // not a master split and must not be decoded as one.
+        let game_status = resp
+            .headers()
+            .get("x-haruki-game-status")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse::<u16>().ok())
+            .unwrap_or(200);
+        if game_status != 200 {
+            return Err(AppError::Unknown {
+                status: game_status,
+                body: format!(
+                    "master split {} returned game status {}",
+                    api_path, game_status
+                ),
+            });
+        }
+        stream_response_to_file(resp, dest).await
+    }
+}
+
+/// Per-update scratch directory for encrypted payloads and their decrypted
+/// msgpack twins; removed on drop so an aborted update leaves nothing behind.
+struct StagingDir(PathBuf);
+
+impl StagingDir {
+    fn new(region: ServerRegion) -> Result<Self, AppError> {
+        let path = std::env::temp_dir().join(format!(
+            "haruki-master-{}-{}",
+            region.as_str(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&path)?;
+        Ok(Self(path))
+    }
+
+    fn file(&self, name: &str) -> PathBuf {
+        self.0.join(name)
+    }
+}
+
+impl Drop for StagingDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
     }
 }
 
@@ -568,12 +613,17 @@ treating difference as an update",
         Ok(())
     }
 
+    /// Download every payload of this update (CP: one per master split;
+    /// Nuverse: the single CDN blob) into a staging directory and decode each
+    /// one table by table into `master_dir`. Only one payload is staged at a
+    /// time and the in-memory footprint is bounded by the largest table.
     async fn download_master_files(
         &self,
         session: Option<&AccountSession>,
         login: &LoginResponse,
         master_dir: &str,
     ) -> Result<(), AppError> {
+        let staging = StagingDir::new(self.region)?;
         if self.region.is_cp_server() {
             let paths: Vec<String> = login
                 .suite_master_split_path
@@ -586,27 +636,72 @@ treating difference as an update",
                     }
                 })
                 .collect();
-            for api_path in paths {
-                let data = if let Some(ref remote) = self.remote_source {
-                    self.download_cp_master_split_remote(remote, &api_path)
-                        .await?
+            for (index, api_path) in paths.iter().enumerate() {
+                let cipher = staging.file(&format!("split-{}.bin", index));
+                if let Some(ref remote) = self.remote_source {
+                    self.download_cp_master_split_remote(remote, api_path, &cipher)
+                        .await?;
                 } else {
                     let session = session.ok_or_else(|| {
                         AppError::Internal("no session for local master download".to_string())
                     })?;
-                    self.download_cp_master_split(session, &api_path).await?
-                };
-                self.save_master_files(&data, master_dir).await?;
+                    self.download_cp_master_split(session, api_path, &cipher)
+                        .await?;
+                }
+                self.decode_master_payload(&cipher, master_dir).await?;
+                let _ = tokio::fs::remove_file(&cipher).await;
             }
         } else {
             let url = format!(
                 "{}/master-data-{}.info",
                 self.client.config.nuverse_master_data_url, login.cdn_version
             );
-            let restored = self.download_nuverse_master(&url).await?;
-            self.save_master_files(&restored, master_dir).await?;
+            let cipher = staging.file("nuverse.bin");
+            self.download_nuverse_master(&url, &cipher).await?;
+            self.decode_master_payload(&cipher, master_dir).await?;
         }
         Ok(())
+    }
+
+    /// Decrypt a staged payload through a streaming reader and walk it
+    /// table by table (rows streamed for array tables) into `master_dir`,
+    /// with Nuverse schema restoration when this region has a schema store.
+    /// Runs on the blocking pool; the in-memory footprint is one row of the
+    /// largest table plus fixed buffers. Returns the top-level table count.
+    async fn decode_master_payload(
+        &self,
+        cipher_path: &Path,
+        master_dir: &str,
+    ) -> Result<usize, AppError> {
+        let cryptor = self.client.cryptor.clone();
+        let schema = if self.region.is_cp_server() {
+            None
+        } else {
+            self.client.nuverse_schema_store.clone()
+        };
+        let cipher_path = cipher_path.to_path_buf();
+        let master_dir = PathBuf::from(master_dir);
+        let region_upper = self.region.as_str().to_uppercase();
+        tokio::task::spawn_blocking(move || -> Result<usize, AppError> {
+            let cipher_len = std::fs::metadata(&cipher_path)?.len();
+            let reader = cryptor.decrypt_reader(std::io::BufReader::with_capacity(
+                1 << 20,
+                std::fs::File::open(&cipher_path)?,
+            ));
+            let mut writer = MasterTableWriter::new(&master_dir, &region_upper, schema.as_deref());
+            let tables = walk_master_payload(reader, &mut writer)?;
+            info!(
+                "{} Decoded {} master tables from {} encrypted bytes ({} files written, {} skipped)",
+                region_upper,
+                tables,
+                cipher_len,
+                writer.written(),
+                writer.skipped()
+            );
+            Ok(tables)
+        })
+        .await
+        .map_err(|e| AppError::Internal(format!("master decode task: {}", e)))?
     }
 
     async fn ingest_master_files(&self, master_dir: &str) {
@@ -657,26 +752,20 @@ treating difference as an update",
         }
     }
 
-    /// Download and restore the Nuverse master blob with a bounded retry, mirroring
-    /// the CP split download. Checks the HTTP status before reading the body so a
-    /// CDN 404/5xx surfaces as a clear error instead of an opaque decrypt failure.
-    async fn download_nuverse_master(
-        &self,
-        url: &str,
-    ) -> Result<IndexMap<String, serde_json::Value>, crate::error::AppError> {
-        use crate::error::AppError;
+    /// Download the Nuverse master blob into `dest` with a bounded retry. The
+    /// body streams to disk; decoding happens in `decode_master_payload`.
+    async fn download_nuverse_master(&self, url: &str, dest: &Path) -> Result<u64, AppError> {
         let region = self.region.as_str().to_uppercase();
         let http_client = &self.client.http_client;
         let mut last_err = AppError::NetworkError("Nuverse master download failed".to_string());
         for attempt in 1..=CP_MASTER_SPLIT_MAX_RETRIES {
             match http_client.get(url).send().await {
-                Ok(resp) if resp.status().is_success() => match resp.bytes().await {
-                    Ok(body) => match self.client.restore_nuverse_master(&body) {
-                        Ok(restored) => return Ok(restored),
+                Ok(resp) if resp.status().is_success() => {
+                    match stream_response_to_file(resp, dest).await {
+                        Ok(len) => return Ok(len),
                         Err(e) => last_err = e,
-                    },
-                    Err(e) => last_err = AppError::NetworkError(e.to_string()),
-                },
+                    }
+                }
                 Ok(resp) => {
                     last_err = AppError::NetworkError(format!(
                         "Nuverse master download returned HTTP {} for {}",
@@ -697,22 +786,17 @@ treating difference as an update",
         Err(last_err)
     }
 
-    /// Fetch and decode one CP master split via the remote account node: the
-    /// relay hands back the untouched encrypted bytes and decoding happens
-    /// here with this node's own cryptor (same region keys).
     async fn download_cp_master_split_remote(
         &self,
         remote: &RemoteMasterSource,
         api_path: &str,
-    ) -> Result<IndexMap<String, JsonValue>, crate::error::AppError> {
+        dest: &Path,
+    ) -> Result<u64, AppError> {
         let mut last_err =
             AppError::NetworkError("remote master split download failed".to_string());
         for attempt in 1..=CP_MASTER_SPLIT_MAX_RETRIES {
-            match remote.fetch_split_bytes(api_path).await {
-                Ok(bytes) => match self.client.cryptor.unpack_ordered(&bytes) {
-                    Ok(map) => return Ok(map),
-                    Err(e) => last_err = e,
-                },
+            match remote.fetch_split_to_file(api_path, dest).await {
+                Ok(len) => return Ok(len),
                 Err(e) => last_err = e,
             }
             if attempt < CP_MASTER_SPLIT_MAX_RETRIES {
@@ -730,168 +814,70 @@ treating difference as an update",
         Err(last_err)
     }
 
+    /// Download one CP master split with this node's own session, streaming
+    /// the encrypted body into `dest`. Session/version recovery (403 relogin,
+    /// 426 version refresh) is handled inside the raw GET; only transport
+    /// errors are retried here.
     async fn download_cp_master_split(
         &self,
-        session: &crate::client::AccountSession,
+        session: &AccountSession,
         api_path: &str,
-    ) -> Result<IndexMap<String, JsonValue>, crate::error::AppError> {
+        dest: &Path,
+    ) -> Result<u64, AppError> {
+        let region = self.region.as_str().to_uppercase();
         for attempt in 1..=CP_MASTER_SPLIT_MAX_RETRIES {
-            let resp = match self
-                .client
-                .get_with_timeout(
-                    session,
-                    api_path,
-                    None,
-                    Duration::from_secs(CP_MASTER_SPLIT_TIMEOUT_SECS),
-                )
-                .await
-            {
-                Ok(resp) => resp,
-                Err(e) => {
-                    if matches!(e, crate::error::AppError::NetworkError(_))
-                        && attempt < CP_MASTER_SPLIT_MAX_RETRIES
-                    {
-                        warn!(
-                            "{} Failed to request master split {} (attempt {}/{}): {}; retrying in {}s",
-                            self.region.as_str().to_uppercase(),
-                            api_path,
-                            attempt,
-                            CP_MASTER_SPLIT_MAX_RETRIES,
-                            e,
-                            CP_MASTER_SPLIT_RETRY_DELAY_SECS
-                        );
-                        tokio::time::sleep(Duration::from_secs(CP_MASTER_SPLIT_RETRY_DELAY_SECS))
-                            .await;
-                        continue;
-                    }
-                    warn!(
-                        "{} Failed to request master split {}: {}",
-                        self.region.as_str().to_uppercase(),
+            let result = async {
+                let resp = self
+                    .client
+                    .get_game_api_raw_with_session(
+                        session,
                         api_path,
-                        e
-                    );
-                    return Err(e);
-                }
-            };
-
-            let status = resp.status();
-            let content_type = resp
-                .headers()
-                .get("content-type")
-                .and_then(|h| h.to_str().ok())
-                .unwrap_or("")
-                .to_string();
-            let content_encoding = resp
-                .headers()
-                .get("content-encoding")
-                .and_then(|h| h.to_str().ok())
-                .unwrap_or("")
-                .to_string();
-
-            match self.client.handle_response_ordered(resp).await {
-                Ok((data, _status)) => return Ok(data),
-                Err(e) => {
-                    if matches!(e, crate::error::AppError::NetworkError(_))
-                        && attempt < CP_MASTER_SPLIT_MAX_RETRIES
-                    {
-                        warn!(
-                            "{} Failed to read master split {} (attempt {}/{}; status={}, content-type={}, content-encoding={}): {}; retrying in {}s",
-                            self.region.as_str().to_uppercase(),
-                            api_path,
-                            attempt,
-                            CP_MASTER_SPLIT_MAX_RETRIES,
-                            status,
-                            content_type,
-                            content_encoding,
-                            e,
-                            CP_MASTER_SPLIT_RETRY_DELAY_SECS
-                        );
-                        tokio::time::sleep(Duration::from_secs(CP_MASTER_SPLIT_RETRY_DELAY_SECS))
-                            .await;
-                        continue;
-                    }
-                    warn!(
-                        "{} Failed to process master split {} (status={}, content-type={}, content-encoding={}): {}",
-                        self.region.as_str().to_uppercase(),
-                        api_path,
+                        Duration::from_secs(CP_MASTER_SPLIT_TIMEOUT_SECS),
+                    )
+                    .await?;
+                // The raw GET passes 400/404/409 octet bodies through for
+                // callers that decode game errors; a master split is only
+                // ever a 200.
+                let status = resp.status().as_u16();
+                if status != 200 {
+                    return Err(AppError::Unknown {
                         status,
-                        content_type,
-                        content_encoding,
-                        e
+                        body: format!("master split {} returned status {}", api_path, status),
+                    });
+                }
+                stream_response_to_file(resp, dest).await
+            }
+            .await;
+            match result {
+                Ok(len) => return Ok(len),
+                Err(e)
+                    if matches!(e, AppError::NetworkError(_))
+                        && attempt < CP_MASTER_SPLIT_MAX_RETRIES =>
+                {
+                    warn!(
+                        "{} Failed to download master split {} (attempt {}/{}): {}; retrying in {}s",
+                        region,
+                        api_path,
+                        attempt,
+                        CP_MASTER_SPLIT_MAX_RETRIES,
+                        e,
+                        CP_MASTER_SPLIT_RETRY_DELAY_SECS
+                    );
+                    tokio::time::sleep(Duration::from_secs(CP_MASTER_SPLIT_RETRY_DELAY_SECS)).await;
+                }
+                Err(e) => {
+                    warn!(
+                        "{} Failed to download master split {}: {}",
+                        region, api_path, e
                     );
                     return Err(e);
                 }
             }
         }
-
-        Err(crate::error::AppError::NetworkError(format!(
+        Err(AppError::NetworkError(format!(
             "Failed to download master split {} after {} retries",
             api_path, CP_MASTER_SPLIT_MAX_RETRIES
         )))
-    }
-
-    async fn save_master_files(
-        &self,
-        data: &IndexMap<String, JsonValue>,
-        master_dir: &str,
-    ) -> Result<(), crate::error::AppError> {
-        let total_keys = data.len();
-        let mut success_count = 0;
-        let mut fail_count = 0;
-        for (key, value) in data {
-            if !is_safe_path_component(key) {
-                warn!(
-                    "{} Skipping master key {:?}: not a safe filename",
-                    self.region.as_str().to_uppercase(),
-                    key
-                );
-                fail_count += 1;
-                continue;
-            }
-            let file_path = Path::new(master_dir).join(format!("{}.json", key));
-            let json = match sonic_rs::to_string_pretty(value) {
-                Ok(j) => j,
-                Err(e) => {
-                    warn!(
-                        "{} Failed to serialize {}: {}",
-                        self.region.as_str().to_uppercase(),
-                        key,
-                        e
-                    );
-                    fail_count += 1;
-                    continue;
-                }
-            };
-            match crate::client::helper::write_file_atomic(&file_path, json.as_bytes()).await {
-                Ok(_) => success_count += 1,
-                Err(e) => {
-                    warn!(
-                        "{} Failed to write {}: {}",
-                        self.region.as_str().to_uppercase(),
-                        key,
-                        e
-                    );
-                    fail_count += 1;
-                }
-            }
-        }
-        info!(
-            "{} Wrote {}/{} master files ({} failed)",
-            self.region.as_str().to_uppercase(),
-            success_count,
-            total_keys,
-            fail_count
-        );
-        if fail_count > 0 {
-            // A torn write set must not be recorded as a completed update: bail so
-            // the caller neither saves the version nor pushes the git mirror, and
-            // the next cron tick re-downloads.
-            return Err(crate::error::AppError::IoError(format!(
-                "{} of {} master file writes failed",
-                fail_count, total_keys
-            )));
-        }
-        Ok(())
     }
 
     /// Persist the master/asset version fields, preserving whatever
@@ -1115,6 +1101,7 @@ mod tests {
     use axum::extract::State;
     use axum::http::Response;
     use axum::Router;
+    use serde_json::Value as JsonValue;
 
     use super::*;
 
@@ -1348,20 +1335,40 @@ mod tests {
 
         let master_dir = root.join("master");
         std::fs::create_dir_all(&master_dir).unwrap();
-        let data = IndexMap::from([
-            ("cards".to_string(), serde_json::json!([{"id": 1}])),
-            ("musics".to_string(), serde_json::json!([])),
-        ]);
-        updater
-            .save_master_files(&data, master_dir.to_str().unwrap())
+        let cryptor = crate::crypto::SekaiCryptor::from_hex(KEY, IV).unwrap();
+        let cipher = root.join("payload.bin");
+        std::fs::write(
+            &cipher,
+            cryptor
+                .pack(&serde_json::json!({"cards": [{"id": 1}], "musics": []}))
+                .unwrap(),
+        )
+        .unwrap();
+        let tables = updater
+            .decode_master_payload(&cipher, master_dir.to_str().unwrap())
             .await
             .unwrap();
+        assert_eq!(tables, 2);
         assert!(master_dir.join("cards.json").exists());
-        let unsafe_data = IndexMap::from([("../escape".to_string(), serde_json::json!([]))]);
+        assert!(master_dir.join("musics.json").exists());
+        assert!(
+            std::fs::read_dir(&root).unwrap().all(|e| !e
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .ends_with(".msgpack")),
+            "no plaintext twin is staged"
+        );
+        std::fs::write(
+            &cipher,
+            cryptor.pack(&serde_json::json!({"../escape": []})).unwrap(),
+        )
+        .unwrap();
         assert!(updater
-            .save_master_files(&unsafe_data, master_dir.to_str().unwrap())
+            .decode_master_payload(&cipher, master_dir.to_str().unwrap())
             .await
             .is_err());
+        assert!(!root.join("escape.json").exists());
 
         let mut no_split = login_response();
         no_split.data_version = "6.0.0.49".to_string();
@@ -1483,10 +1490,12 @@ mod tests {
             },
             crate::upstream::build_internal_http_client().unwrap(),
         );
+        let dest = std::env::temp_dir().join(format!("haruki_split_{}", uuid::Uuid::new_v4()));
         assert_eq!(
-            source.fetch_split_bytes("/split").await.unwrap(),
-            vec![1, 2, 3]
+            source.fetch_split_to_file("/split", &dest).await.unwrap(),
+            3
         );
+        assert_eq!(std::fs::read(&dest).unwrap(), vec![1, 2, 3]);
         server.abort();
 
         let envelope = InternalApiResponse {
@@ -1511,10 +1520,31 @@ mod tests {
             crate::upstream::build_internal_http_client().unwrap(),
         );
         assert!(matches!(
-            source.fetch_split_bytes("/split").await,
+            source.fetch_split_to_file("/split", &dest).await,
             Err(AppError::SessionError)
         ));
         server.abort();
+
+        let (url, server) = spawn_server(Reply {
+            status: 500,
+            content_type: "text/plain",
+            body: Vec::new(),
+        })
+        .await;
+        let source = RemoteMasterSource::new(
+            ServerRegion::Jp,
+            &MasterRemoteSourceConfig {
+                url,
+                token: String::new(),
+            },
+            crate::upstream::build_internal_http_client().unwrap(),
+        );
+        assert!(matches!(
+            source.fetch_split_to_file("/split", &dest).await,
+            Err(AppError::NetworkError(_))
+        ));
+        server.abort();
+        let _ = std::fs::remove_file(&dest);
     }
 
     #[tokio::test]
@@ -1531,13 +1561,36 @@ mod tests {
         .await;
         let root = temp_dir();
         let updater = make_updater(ServerRegion::Cn, &url, &root, Vec::new()).await;
-        let restored = updater.download_nuverse_master(&url).await.unwrap();
-        assert_eq!(restored["cards"][0]["id"], 1);
+        let cipher = root.join("nuverse.bin");
+        let len = updater
+            .download_nuverse_master(&url, &cipher)
+            .await
+            .unwrap();
+        assert_eq!(
+            len as usize,
+            std::fs::metadata(&cipher).unwrap().len() as usize
+        );
+        let master_dir = root.join("master");
+        std::fs::create_dir_all(&master_dir).unwrap();
+        updater
+            .decode_master_payload(&cipher, master_dir.to_str().unwrap())
+            .await
+            .unwrap();
+        let cards: serde_json::Value =
+            sonic_rs::from_slice(&std::fs::read(master_dir.join("cards.json")).unwrap()).unwrap();
+        assert_eq!(cards[0]["id"], 1);
+        std::fs::remove_file(master_dir.join("cards.json")).unwrap();
         let mut login = login_response();
         login.cdn_version = 1;
         updater.update_master_data(None, &login).await.unwrap();
         assert!(root.join("master/cards.json").exists());
         server.abort();
+        // A failing download surfaces the last transport error.
+        let dead = make_updater(ServerRegion::Cn, "http://127.0.0.1:1", &root, Vec::new()).await;
+        assert!(dead
+            .download_nuverse_master("http://127.0.0.1:1/x", &cipher)
+            .await
+            .is_err());
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -1562,11 +1615,12 @@ mod tests {
                 credential: "credential".to_string(),
             },
         ));
-        let data = updater
-            .download_cp_master_split(&session, "/split")
+        let cipher = root.join("split.bin");
+        updater
+            .download_cp_master_split(&session, "/split", &cipher)
             .await
             .unwrap();
-        assert_eq!(data["events"][0]["id"], 1);
+        assert_eq!(std::fs::read(&cipher).unwrap(), encrypted);
         let mut login = login_response();
         login.suite_master_split_path = vec!["split".to_string(), "/split".to_string()];
         std::fs::create_dir_all(root.join("master")).unwrap();
@@ -1584,7 +1638,7 @@ mod tests {
         let (url, server) = spawn_server(Reply {
             status: 200,
             content_type: "application/octet-stream",
-            body: encrypted,
+            body: encrypted.clone(),
         })
         .await;
         let remote = RemoteMasterSource::new(
@@ -1595,11 +1649,20 @@ mod tests {
             },
             crate::upstream::build_internal_http_client().unwrap(),
         );
-        let data = updater
-            .download_cp_master_split_remote(&remote, "/split")
+        updater
+            .download_cp_master_split_remote(&remote, "/split", &cipher)
             .await
             .unwrap();
-        assert_eq!(data["events"][0]["id"], 1);
+        assert_eq!(std::fs::read(&cipher).unwrap(), encrypted);
+        let master_dir = root.join("master");
+        std::fs::remove_file(master_dir.join("events.json")).unwrap();
+        updater
+            .decode_master_payload(&cipher, master_dir.to_str().unwrap())
+            .await
+            .unwrap();
+        let events: serde_json::Value =
+            sonic_rs::from_slice(&std::fs::read(master_dir.join("events.json")).unwrap()).unwrap();
+        assert_eq!(events[0]["id"], 1);
         server.abort();
         std::fs::remove_dir_all(root).unwrap();
     }
