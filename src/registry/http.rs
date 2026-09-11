@@ -12,8 +12,8 @@
 //! - `GET /v1/metas/{region}/current`             music_metas pointer (ETag = digest)
 //! - `GET /v1/metas/{region}/music_metas.json`    current music_metas bytes (mutable)
 //! - `GET /v1/metas/{region}/blob/{sha256}`       immutable music_metas bytes
-//! - `GET /v1/app/{region}`                       `{appVersion, appHash}` — the
-//!   shape the SekaiAPI AppHash updater's `url` source consumes
+//! - `GET /v1/app/{region}`                       `{appVersion, appHash}` (override,
+//!   else the identity the owner's synced version file carries)
 //!
 //! CDN contract: pointers (`current`, `files/{name}`, `music_metas.json`,
 //! `app`) answer `Cache-Control: no-cache` with a strong ETag and must be
@@ -22,7 +22,8 @@
 //! resources (`manifests/{hash}`, `blob/{sha256}`) are immutable for a year.
 //!
 //! Mutations (require `registry.token`; disabled when it is empty):
-//! - `PUT /v1/app/{region}` / `DELETE /v1/app/{region}`  app-identity override
+//! - `PUT /v1/app/{region}` / `DELETE /v1/app/{region}`  app-identity override; PUT
+//!   also pushes it to every `registry.account_nodes` entry (`POST /internal/app-identity`)
 //! - `POST /v1/master/{region}/refresh`            pull from owner now, then publish
 //! - `POST /v1/master/{region}/publish`            re-scan the directory and publish
 //! - `POST /v1/metas/{region}/refresh`             pull music_metas from upstream now
@@ -43,9 +44,9 @@ use tracing::{error, info};
 
 use super::Registry;
 use crate::api::internal::{build_master_tar, file_sha256, MasterUpdatedNotice};
+use crate::client::helper::AppInfo;
 use crate::config::ServerRegion;
 use crate::error::AppError;
-use crate::updater::apphash::AppInfo;
 use crate::updater::master::is_safe_path_component;
 
 type Shared = Arc<Registry>;
@@ -653,7 +654,12 @@ async fn set_app_identity(
                 info.app_version,
                 info.app_hash.chars().take(16).collect::<String>()
             );
-            json(&info)
+            let pushed = registry.push_app_identity(region, &info).await;
+            json(&serde_json::json!({
+                "appVersion": info.app_version,
+                "appHash": info.app_hash,
+                "pushed": pushed,
+            }))
         }
         Err(e) => e.into_response(),
     }
@@ -999,6 +1005,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), 200);
+        let put_body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(put_body["appVersion"], "5.7.0");
+        assert_eq!(put_body["pushed"], serde_json::json!([]));
         let (_, app) = get_json(&client, &format!("{base}/v1/app/jp")).await;
         assert_eq!(app["appVersion"], "5.7.0");
         let resp = client
@@ -1224,6 +1233,73 @@ mod tests {
         assert_eq!(resp.status(), 200);
         server.abort();
         owner_server.abort();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn put_app_identity_pushes_to_account_nodes() {
+        let root = temp_dir();
+        let received = Arc::new(parking_lot::Mutex::new(Vec::<serde_json::Value>::new()));
+        let node = Router::new().route(
+            "/internal/app-identity",
+            axum::routing::post({
+                let received = received.clone();
+                move |headers: HeaderMap, body: String| {
+                    let received = received.clone();
+                    async move {
+                        let authed = headers.get("authorization").and_then(|v| v.to_str().ok())
+                            == Some("Bearer node-token");
+                        received.lock().push(serde_json::from_str(&body).unwrap());
+                        if authed {
+                            json(&serde_json::json!({"ok": true, "data": {"changed": true}}))
+                        } else {
+                            (StatusCode::UNAUTHORIZED, "").into_response()
+                        }
+                    }
+                }
+            }),
+        );
+        let (node_url, node_server) = serve(node).await;
+        let mut config = base_config(&root, "secret");
+        config.registry.account_nodes = vec![
+            MasterSyncPeer {
+                url: node_url.clone(),
+                token: "node-token".to_string(),
+            },
+            MasterSyncPeer {
+                url: node_url.clone(),
+                token: "wrong".to_string(),
+            },
+            MasterSyncPeer {
+                url: "http://127.0.0.1:1".to_string(),
+                token: String::new(),
+            },
+        ];
+        let registry = Arc::new(Registry::new(Arc::new(config), HashMap::new()));
+        let (base, server) = serve(router(registry)).await;
+        let client = reqwest::Client::new();
+        let resp = client
+            .put(format!("{base}/v1/app/en"))
+            .bearer_auth("secret")
+            .json(&serde_json::json!({"appVersion": "5.7.0", "appHash": "new-hash"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        let pushed = body["pushed"].as_array().unwrap();
+        assert_eq!(pushed.len(), 3);
+        assert_eq!(pushed[0]["ok"], true);
+        assert_eq!(pushed[1]["ok"], false);
+        assert_eq!(pushed[1]["message"], "HTTP 401 Unauthorized");
+        assert_eq!(pushed[2]["ok"], false);
+        let seen = received.lock().clone();
+        assert_eq!(seen.len(), 2);
+        assert_eq!(seen[0]["server"], "en");
+        assert_eq!(seen[0]["appVersion"], "5.7.0");
+        assert_eq!(seen[0]["appHash"], "new-hash");
+        server.abort();
+        node_server.abort();
         std::fs::remove_dir_all(root).unwrap();
     }
 

@@ -8,6 +8,17 @@ use serde::{Deserialize, Serialize};
 use crate::config::ServerRegion;
 use crate::error::AppError;
 
+/// The app identity a region's accounts log in with: what the registry
+/// publishes (`GET /v1/app/{region}`) and what `POST /internal/app-identity`
+/// accepts. Serialized with the game's own field names.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppInfo {
+    #[serde(rename = "appVersion")]
+    pub app_version: String,
+    #[serde(rename = "appHash")]
+    pub app_hash: String,
+}
+
 /// Write `contents` to `path` atomically: write a uniquely-named temp file in the
 /// same directory and rename it over the target. A concurrent reader therefore
 /// never observes a truncated/partial file (e.g. version_helper.load on the

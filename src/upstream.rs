@@ -102,6 +102,18 @@ pub struct LoginProbeResponse {
     pub app_hash: String,
 }
 
+/// Body of `POST /internal/app-identity`: the appVersion/appHash a region's
+/// accounts must use from now on. Empty fields are left untouched.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppIdentityRequest {
+    pub server: String,
+    #[serde(default)]
+    pub app_version: String,
+    #[serde(default)]
+    pub app_hash: String,
+}
+
 /// Request for a peer node's `POST /internal/game-stream`: execute an
 /// authenticated game GET and relay the response body back untouched (still
 /// encrypted) as an octet stream. The relay node's memory cost is O(chunk);

@@ -21,8 +21,8 @@ use serde_json::Value as JsonValue;
 use crate::config::ServerRegion;
 use crate::error::AppError;
 use crate::upstream::{
-    GameStreamRequest, InternalApiRequest, InternalApiResponse, InternalImageRequest,
-    LoginProbeRequest, LoginProbeResponse,
+    AppIdentityRequest, GameStreamRequest, InternalApiRequest, InternalApiResponse,
+    InternalImageRequest, LoginProbeRequest, LoginProbeResponse,
 };
 use crate::AppState;
 
@@ -207,6 +207,91 @@ pub async fn post_login_probe(
         )
             .into_response(),
     }
+}
+
+/// POST /internal/app-identity — record the appVersion/appHash this node's
+/// accounts must log in with. Replaces the removed polling AppHash updater:
+/// whoever learns of a new app build (the registry's `PUT /v1/app/{region}`
+/// or an operator's refresh script) pushes it here; the node writes it into
+/// the region's version file under the version lock and reloads its login
+/// headers at once, so the next login already uses the new identity.
+pub async fn post_app_identity(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(req): Json<AppIdentityRequest>,
+) -> Response {
+    if let Some(resp) = check_internal_auth(&state, &headers) {
+        return resp;
+    }
+    let (region, config) = match region_config(&state, &req.server) {
+        Ok(v) => v,
+        Err(resp) => return *resp,
+    };
+    if config.version_path.is_empty() {
+        return envelope_response(&error_envelope(&AppError::NotFound(
+            "version_path not configured".to_string(),
+        )));
+    }
+    let app = crate::updater::master::AppIdentity {
+        app_version: req.app_version,
+        app_hash: req.app_hash,
+    };
+    if !app.is_known() {
+        return envelope_response(&error_envelope(&AppError::ParseError(
+            "appVersion or appHash is required".to_string(),
+        )));
+    }
+    let lock = state
+        .version_locks
+        .get(&region)
+        .cloned()
+        .unwrap_or_else(|| Arc::new(tokio::sync::Mutex::new(())));
+    let changed = {
+        let _guard = lock.lock().await;
+        match crate::updater::master::persist_app_identity(region, &config.version_path, &app).await
+        {
+            Ok(changed) => changed,
+            Err(e) => return envelope_response(&error_envelope(&e)),
+        }
+    };
+    if let Some(client) = state.clients.get(&region) {
+        if let Err(e) = client.refresh_version().await {
+            tracing::warn!(
+                "{} App identity written but header refresh failed: {}",
+                region.as_str().to_uppercase(),
+                e
+            );
+        }
+    }
+    let current: crate::client::helper::VersionInfo = match tokio::fs::read(&config.version_path)
+        .await
+        .map_err(|e| AppError::IoError(format!("version file: {e}")))
+        .and_then(|data| {
+            sonic_rs::from_slice(&data)
+                .map_err(|e| AppError::ParseError(format!("version file: {e}")))
+        }) {
+        Ok(v) => v,
+        Err(e) => return envelope_response(&error_envelope(&e)),
+    };
+    if changed {
+        tracing::info!(
+            "{} App identity updated via webhook: appVersion={} appHash={}",
+            region.as_str().to_uppercase(),
+            current.app_version,
+            current.app_hash.chars().take(16).collect::<String>()
+        );
+    }
+    envelope_response(&InternalApiResponse {
+        ok: true,
+        status: None,
+        data: Some(serde_json::json!({
+            "changed": changed,
+            "appVersion": current.app_version,
+            "appHash": current.app_hash,
+        })),
+        kind: None,
+        message: None,
+    })
 }
 
 /// POST /internal/game-stream — execute an authenticated game GET with this
@@ -1098,6 +1183,69 @@ mod tests {
     fn sha256_hex(data: &[u8]) -> String {
         use sha2::Digest as _;
         hex::encode(sha2::Sha256::digest(data))
+    }
+
+    #[tokio::test]
+    async fn app_identity_webhook_persists_and_refreshes_login_headers() {
+        let root = temp_dir();
+        let (state, server) = initialized_state(&root).await;
+        let jp = state.clients.get(&ServerRegion::Jp).unwrap().clone();
+        assert_eq!(jp.version_helper.get().app_version, "1");
+
+        let call = |server: &str, version: &str, hash: &str| {
+            post_app_identity(
+                State(state.clone()),
+                auth_headers(),
+                Json(AppIdentityRequest {
+                    server: server.to_string(),
+                    app_version: version.to_string(),
+                    app_hash: hash.to_string(),
+                }),
+            )
+        };
+        let body = json_body(call("jp", "2.0.0", "new-hash").await).await;
+        assert_eq!(body["ok"], true);
+        assert_eq!(body["data"]["changed"], true);
+        assert_eq!(body["data"]["appVersion"], "2.0.0");
+        let on_disk: serde_json::Value =
+            sonic_rs::from_slice(&std::fs::read(root.join("version.json")).unwrap()).unwrap();
+        assert_eq!(on_disk["appVersion"], "2.0.0");
+        assert_eq!(on_disk["appHash"], "new-hash");
+        assert_eq!(on_disk["dataVersion"], "d", "other fields untouched");
+        // The running client reloaded its headers without a restart.
+        assert_eq!(jp.version_helper.get().app_version, "2.0.0");
+        assert_eq!(jp.version_helper.get().app_hash, "new-hash");
+
+        // Same identity again: no change; partial updates keep the other field.
+        assert_eq!(
+            json_body(call("jp", "2.0.0", "new-hash").await).await["data"]["changed"],
+            false
+        );
+        let body = json_body(call("jp", "", "only-hash").await).await;
+        assert_eq!(body["data"]["appVersion"], "2.0.0");
+        assert_eq!(body["data"]["appHash"], "only-hash");
+        assert_eq!(json_body(call("jp", "", "").await).await["kind"], "parse");
+        assert_eq!(
+            json_body(call("xx", "1", "h").await).await["kind"],
+            "invalid_server_region"
+        );
+        assert_eq!(
+            json_body(call("kr", "1", "h").await).await["kind"],
+            "not_found"
+        );
+        let unauthorized = post_app_identity(
+            State(state.clone()),
+            HeaderMap::new(),
+            Json(AppIdentityRequest {
+                server: "jp".to_string(),
+                app_version: "3".to_string(),
+                app_hash: "h".to_string(),
+            }),
+        )
+        .await;
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+        server.abort();
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]

@@ -5,7 +5,6 @@ use sea_orm::DatabaseConnection;
 use tokio_cron_scheduler::{Job, JobScheduler, JobSchedulerError};
 use tracing::{error, info, warn};
 
-use super::apphash::AppHashUpdater;
 use super::master::{MasterUpdater, RemoteMasterSource};
 use super::sync::MasterSyncer;
 use crate::client::SekaiClient;
@@ -36,7 +35,13 @@ pub async fn start_scheduler(
         &proxy,
     )
     .await;
-    schedule_apphash_updates(&scheduler, config, version_locks, &proxy).await;
+    for setting in config.deprecated_app_hash_settings() {
+        warn!(
+            "{} is deprecated and ignored: the polling AppHash updater was removed; push app \
+identity to POST /internal/app-identity instead",
+            setting
+        );
+    }
     schedule_remote_master_updates(&scheduler, clients, config, db, version_locks, &proxy).await;
     schedule_master_syncs(&scheduler, config, syncers).await;
     scheduler.start().await?;
@@ -131,58 +136,6 @@ async fn schedule_local_master_updates(
         });
         add_job(scheduler, *region, &cron, "master updater", job).await;
     }
-}
-
-async fn schedule_apphash_updates(
-    scheduler: &JobScheduler,
-    config: &Config,
-    version_locks: &VersionLocks,
-    proxy: &Option<String>,
-) {
-    for (region, server) in &config.servers {
-        if !apphash_enabled(server) {
-            continue;
-        }
-        if config.apphash_sources.is_empty() {
-            info!(
-                "{} AppHash updater disabled: no sources configured",
-                region.as_str().to_uppercase()
-            );
-            continue;
-        }
-        if !server.master_remote_source.url.is_empty() {
-            warn!(
-                "{} AppHash updater runs alongside master_remote_source: the account node's \
-app identity is recorded on every remote master update, so local apphash \
-sources for this region should agree with it or be disabled",
-                region.as_str().to_uppercase()
-            );
-        }
-        let cron = server.app_hash_updater_cron.clone();
-        let updater = Arc::new(AppHashUpdater::new(
-            *region,
-            config.apphash_sources.clone(),
-            server.version_path.clone(),
-            proxy.clone(),
-            version_lock(version_locks, *region),
-        ));
-        info!(
-            "{} AppHash updater scheduled: {}",
-            region.as_str().to_uppercase(),
-            cron
-        );
-        let job = Job::new_async(cron.as_str(), move |_uuid, _lock| {
-            let updater = updater.clone();
-            Box::pin(async move { updater.check_update().await })
-        });
-        add_job(scheduler, *region, &cron, "apphash updater", job).await;
-    }
-}
-
-fn apphash_enabled(server: &crate::config::ServerConfig) -> bool {
-    server.enable_app_hash_updater
-        && !server.app_hash_updater_cron.is_empty()
-        && !server.version_path.is_empty()
 }
 
 async fn schedule_remote_master_updates(
@@ -352,7 +305,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::config::{AppHashSource, MasterRemoteSourceConfig, MasterSyncConfig, ServerConfig};
+    use crate::config::{MasterRemoteSourceConfig, MasterSyncConfig, ServerConfig};
 
     const KEY: &str = "00112233445566778899aabbccddeeff";
     const IV: &str = "ffeeddccbbaa99887766554433221100";
@@ -391,10 +344,6 @@ mod tests {
         let root = std::env::temp_dir().join(format!("haruki_scheduler_{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
         let mut server = server_config(&root);
-        assert!(!apphash_enabled(&server));
-        server.enable_app_hash_updater = true;
-        server.app_hash_updater_cron = "0 0 0 1 1 *".to_string();
-        assert!(apphash_enabled(&server));
 
         let clients = HashMap::new();
         assert!(!remote_master_enabled(ServerRegion::Jp, &server, &clients));
@@ -452,8 +401,7 @@ mod tests {
         let mut remote_server = server_config(&root);
         remote_server.enable_master_updater = true;
         remote_server.master_updater_cron = cron.clone();
-        remote_server.enable_app_hash_updater = true;
-        remote_server.app_hash_updater_cron = cron.clone();
+        remote_server.enable_app_hash_updater = true; // deprecated: only warns
         remote_server.master_remote_source = MasterRemoteSourceConfig {
             url: "http://127.0.0.1:1".to_string(),
             token: String::new(),
@@ -468,17 +416,15 @@ mod tests {
         let mut config: Config = serde_yaml::from_str("backend: {}").unwrap();
         config.servers.insert(ServerRegion::Jp, local_server);
         config.servers.insert(ServerRegion::Cn, remote_server);
-        config.apphash_sources.push(AppHashSource {
-            source_type: "file".to_string(),
-            dir: root.to_string_lossy().into_owned(),
-            url: String::new(),
-        });
+        assert_eq!(
+            config.deprecated_app_hash_settings(),
+            vec!["servers.cn.enable_app_hash_updater".to_string()]
+        );
         let locks = HashMap::new();
         let syncers = super::super::sync::build_syncers(&config, &clients, None, &locks);
         let scheduler = JobScheduler::new().await.unwrap();
         schedule_cookie_refreshes(&scheduler, &clients).await;
         schedule_local_master_updates(&scheduler, &clients, &config, None, &locks, &None).await;
-        schedule_apphash_updates(&scheduler, &config, &locks, &None).await;
         schedule_remote_master_updates(&scheduler, &clients, &config, None, &locks, &None).await;
         schedule_master_syncs(&scheduler, &config, &syncers).await;
         add_job(

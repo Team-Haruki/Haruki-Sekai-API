@@ -11,10 +11,19 @@ use tracing::{error, info, warn};
 use super::metas::MusicMetasManager;
 use super::state::RegistryState;
 use crate::api::internal::{build_master_manifest, MasterManifest};
+use crate::client::helper::AppInfo;
 use crate::config::{Config, ServerRegion};
 use crate::error::AppError;
-use crate::updater::apphash::AppInfo;
 use crate::updater::sync::MasterSyncer;
+
+/// Outcome of pushing an app identity to one account node.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AppIdentityPush {
+    pub url: String,
+    pub ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
 
 pub struct Registry {
     pub config: Arc<Config>,
@@ -193,6 +202,90 @@ impl Registry {
                 ),
             }
         }
+    }
+
+    /// Push an app identity to every configured account node
+    /// (`POST /internal/app-identity`), returning one outcome per node.
+    pub async fn push_app_identity(
+        &self,
+        region: ServerRegion,
+        info: &AppInfo,
+    ) -> Vec<AppIdentityPush> {
+        let payload = serde_json::json!({
+            "server": region.as_str(),
+            "appVersion": info.app_version,
+            "appHash": info.app_hash,
+        });
+        let mut outcomes = Vec::new();
+        for node in &self.config.registry.account_nodes {
+            let endpoint = format!("{}/internal/app-identity", node.url.trim_end_matches('/'));
+            let mut req = self.http.post(&endpoint).json(&payload);
+            if !node.token.is_empty() {
+                req = req.bearer_auth(&node.token);
+            }
+            let outcome = match req.send().await {
+                Ok(resp) if resp.status().is_success() => {
+                    let body: serde_json::Value = resp.json().await.unwrap_or_default();
+                    if body.get("ok").and_then(|v| v.as_bool()) == Some(true) {
+                        info!(
+                            "{} App identity pushed to {}",
+                            region.as_str().to_uppercase(),
+                            node.url
+                        );
+                        AppIdentityPush {
+                            url: node.url.clone(),
+                            ok: true,
+                            message: None,
+                        }
+                    } else {
+                        let message = body
+                            .get("message")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("rejected")
+                            .to_string();
+                        warn!(
+                            "{} Account node {} rejected app identity: {}",
+                            region.as_str().to_uppercase(),
+                            node.url,
+                            message
+                        );
+                        AppIdentityPush {
+                            url: node.url.clone(),
+                            ok: false,
+                            message: Some(message),
+                        }
+                    }
+                }
+                Ok(resp) => {
+                    warn!(
+                        "{} Account node {} returned {}",
+                        region.as_str().to_uppercase(),
+                        node.url,
+                        resp.status()
+                    );
+                    AppIdentityPush {
+                        url: node.url.clone(),
+                        ok: false,
+                        message: Some(format!("HTTP {}", resp.status())),
+                    }
+                }
+                Err(e) => {
+                    warn!(
+                        "{} Failed to push app identity to {}: {}",
+                        region.as_str().to_uppercase(),
+                        node.url,
+                        e
+                    );
+                    AppIdentityPush {
+                        url: node.url.clone(),
+                        ok: false,
+                        message: Some(e.to_string()),
+                    }
+                }
+            };
+            outcomes.push(outcome);
+        }
+        outcomes
     }
 
     async fn notify_subscribers(&self, region: ServerRegion, data_version: &str) {
