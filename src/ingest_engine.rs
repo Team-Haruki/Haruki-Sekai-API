@@ -4,7 +4,6 @@ use sea_orm::sea_query::{Alias, Expr, ExprTrait, InsertStatement, Query};
 use sea_orm::{ConnectionTrait, DatabaseConnection, TransactionTrait};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
-use std::fs;
 use std::path::{Path, PathBuf};
 use tracing::{info, warn};
 
@@ -41,8 +40,9 @@ pub struct IngestionEngine {
 
 impl IngestionEngine {
     pub async fn new(db: DatabaseConnection) -> Result<Self> {
-        let schema_json =
-            fs::read_to_string("schema_info.json").context("Failed to read schema_info.json")?;
+        let schema_json = tokio::fs::read_to_string("schema_info.json")
+            .await
+            .context("Failed to read schema_info.json")?;
         let tables: Vec<TableInfo> = serde_json::from_str(&schema_json)?;
 
         let mut schema_map = HashMap::new();
@@ -187,7 +187,7 @@ impl IngestionEngine {
         // INSERTs inside one transaction. Peak memory per file is a couple of
         // batches, independent of the table size.
         let (tx, mut rx) = tokio::sync::mpsc::channel::<Batch>(CHANNEL_DEPTH);
-        let file = std::fs::File::open(path)?;
+        let file = tokio::fs::File::open(path).await?.into_std().await;
         let db_cols_owned = db_cols.clone();
         let region_owned = region.to_string();
         let table_for_parse = table_name.clone();
