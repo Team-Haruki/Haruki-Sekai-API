@@ -509,15 +509,16 @@ impl Config {
         if !self.apphash_sources.is_empty() {
             found.push("apphash_sources".to_string());
         }
-        let mut regions: Vec<_> = self
-            .servers
-            .iter()
-            .filter(|(_, s)| s.enable_app_hash_updater)
-            .map(|(r, _)| r.as_str())
-            .collect();
-        regions.sort();
-        for region in regions {
-            found.push(format!("servers.{region}.enable_app_hash_updater"));
+        let mut regions: Vec<_> = self.servers.iter().collect();
+        regions.sort_by_key(|(r, _)| **r);
+        for (region, server) in regions {
+            let region = region.as_str();
+            if server.enable_app_hash_updater {
+                found.push(format!("servers.{region}.enable_app_hash_updater"));
+            }
+            if !server.app_hash_updater_cron.trim().is_empty() {
+                found.push(format!("servers.{region}.app_hash_updater_cron"));
+            }
         }
         found
     }

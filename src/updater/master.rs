@@ -55,11 +55,13 @@ pub(crate) async fn persist_app_identity(
     path: &str,
     app: &AppIdentity,
 ) -> Result<bool, AppError> {
-    let mut existing: serde_json::Map<String, serde_json::Value> = match tokio::fs::read(path).await
-    {
-        Ok(data) => sonic_rs::from_slice(&data).unwrap_or_default(),
-        Err(_) => serde_json::Map::new(),
-    };
+    // A partial identity must never replace a missing or unreadable version
+    // file with a two-field stub: refuse and leave the file untouched.
+    let data = tokio::fs::read(path)
+        .await
+        .map_err(|e| AppError::IoError(format!("version file {path}: {e}")))?;
+    let mut existing: serde_json::Map<String, serde_json::Value> = sonic_rs::from_slice(&data)
+        .map_err(|e| AppError::ParseError(format!("version file {path}: {e}")))?;
     let mut changed = false;
     if !app.app_version.trim().is_empty() {
         let version = effective_app_version(region, &app.app_version);

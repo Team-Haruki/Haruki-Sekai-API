@@ -62,7 +62,9 @@ registry: # master data manager (`master_registry` binary); ignored by the API s
   subscribers: [] # peers to POST /internal/master-updated after a region is published
   # - url: "http://100.64.0.2:9999"
   #   token: "peer-internal-token"
-  account_nodes: [] # SekaiAPI nodes to push app identity to on PUT /v1/app/{region}
+  account_nodes: [] # SekaiAPI nodes to push app identity to on PUT /v1/app/{region}; like every
+  # other node-to-node URL here, use internal-network (Tailscale) addresses only — the bearer
+  # token is sent in clear over that already-encrypted overlay, never over the public internet
   # - url: "http://100.76.159.97:9999"
   #   token: "that node's backend.internal_token"
   music_metas: # the registry pulls music_metas*.json for consumers (served under /v1/metas)

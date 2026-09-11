@@ -13,9 +13,9 @@ use crate::error::AppError;
 /// accepts. Serialized with the game's own field names.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppInfo {
-    #[serde(rename = "appVersion")]
+    #[serde(rename = "appVersion", default)]
     pub app_version: String,
-    #[serde(rename = "appHash")]
+    #[serde(rename = "appHash", default)]
     pub app_hash: String,
 }
 

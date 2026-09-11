@@ -122,6 +122,9 @@ impl MasterSyncer {
                 app_hash: version.app_hash.clone(),
             };
             if owner_app.is_known()
+                && tokio::fs::try_exists(&self.version_path)
+                    .await
+                    .unwrap_or(false)
                 && persist_app_identity(self.region, &self.version_path, &owner_app).await?
             {
                 info!(

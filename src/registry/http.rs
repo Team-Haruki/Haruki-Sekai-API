@@ -646,21 +646,12 @@ async fn set_app_identity(
         return AppError::ParseError("appVersion or appHash is required".to_string())
             .into_response();
     }
-    match registry.state.set_app_identity(region, &info).await {
-        Ok(()) => {
-            info!(
-                "{} App identity override set: appVersion={} appHash={}",
-                region.as_str().to_uppercase(),
-                info.app_version,
-                info.app_hash.chars().take(16).collect::<String>()
-            );
-            let pushed = registry.push_app_identity(region, &info).await;
-            json(&serde_json::json!({
-                "appVersion": info.app_version,
-                "appHash": info.app_hash,
-                "pushed": pushed,
-            }))
-        }
+    match registry.set_app_identity(region, &info).await {
+        Ok((effective, pushed)) => json(&serde_json::json!({
+            "appVersion": effective.app_version,
+            "appHash": effective.app_hash,
+            "pushed": pushed,
+        })),
         Err(e) => e.into_response(),
     }
 }
@@ -1010,6 +1001,27 @@ mod tests {
         assert_eq!(put_body["pushed"], serde_json::json!([]));
         let (_, app) = get_json(&client, &format!("{base}/v1/app/jp")).await;
         assert_eq!(app["appVersion"], "5.7.0");
+        // A partial PUT keeps the other field from the effective identity.
+        let resp = client
+            .put(format!("{base}/v1/app/jp"))
+            .bearer_auth("secret")
+            .json(&serde_json::json!({"appVersion": "5.7.1"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let (_, app) = get_json(&client, &format!("{base}/v1/app/jp")).await;
+        assert_eq!(app["appVersion"], "5.7.1");
+        assert_eq!(app["appHash"], "manual");
+        // A region with no current identity at all cannot take a partial PUT.
+        let resp = client
+            .put(format!("{base}/v1/app/kr"))
+            .bearer_auth("secret")
+            .json(&serde_json::json!({"appVersion": "1.0.0"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 400);
         let resp = client
             .put(format!("{base}/v1/app/jp"))
             .bearer_auth("secret")

@@ -35,6 +35,9 @@ pub struct Registry {
     /// One publish at a time per region so a webhook and a poll cannot
     /// interleave their manifest/history writes.
     publish_locks: HashMap<ServerRegion, tokio::sync::Mutex<()>>,
+    /// Serializes app-identity writes and their delivery per region so two
+    /// concurrent PUTs cannot persist one identity and deliver the other.
+    app_locks: HashMap<ServerRegion, tokio::sync::Mutex<()>>,
 }
 
 impl Registry {
@@ -68,7 +71,70 @@ impl Registry {
             metas,
             http,
             publish_locks,
+            app_locks: [
+                ServerRegion::Jp,
+                ServerRegion::En,
+                ServerRegion::Tw,
+                ServerRegion::Kr,
+                ServerRegion::Cn,
+            ]
+            .into_iter()
+            .map(|region| (region, tokio::sync::Mutex::new(())))
+            .collect(),
         }
+    }
+
+    /// Store a (possibly partial) app-identity override and deliver the
+    /// resulting complete identity to every account node, serialized per
+    /// region. Omitted fields are filled from the current effective identity
+    /// (previous override, else the owner's synced version file); a field
+    /// that cannot be filled from anywhere is rejected.
+    pub async fn set_app_identity(
+        &self,
+        region: ServerRegion,
+        requested: &AppInfo,
+    ) -> Result<(AppInfo, Vec<AppIdentityPush>), AppError> {
+        let _guard = match self.app_locks.get(&region) {
+            Some(lock) => lock.lock().await,
+            None => return Err(AppError::InvalidServerRegion(region.as_str().to_string())),
+        };
+        let current = self.app_identity(region).await.ok();
+        let pick =
+            |given: &str, field: &str, fallback: Option<&String>| -> Result<String, AppError> {
+                if !given.trim().is_empty() {
+                    return Ok(given.trim().to_string());
+                }
+                fallback
+                    .filter(|v| !v.trim().is_empty())
+                    .cloned()
+                    .ok_or_else(|| {
+                        AppError::ParseError(format!(
+                            "{field} is required: no current value to keep for region {}",
+                            region.as_str()
+                        ))
+                    })
+            };
+        let effective = AppInfo {
+            app_version: pick(
+                &requested.app_version,
+                "appVersion",
+                current.as_ref().map(|c| &c.app_version),
+            )?,
+            app_hash: pick(
+                &requested.app_hash,
+                "appHash",
+                current.as_ref().map(|c| &c.app_hash),
+            )?,
+        };
+        self.state.set_app_identity(region, &effective).await?;
+        info!(
+            "{} App identity override set: appVersion={} appHash={}",
+            region.as_str().to_uppercase(),
+            effective.app_version,
+            effective.app_hash.chars().take(16).collect::<String>()
+        );
+        let pushed = self.push_app_identity(region, &effective).await;
+        Ok((effective, pushed))
     }
 
     /// Regions this registry manages: those with a master directory.
@@ -216,8 +282,27 @@ impl Registry {
             "appVersion": info.app_version,
             "appHash": info.app_hash,
         });
-        let mut outcomes = Vec::new();
-        for node in &self.config.registry.account_nodes {
+        // Bounded fan-out; `buffered` keeps configuration order in the result.
+        const PUSH_CONCURRENCY: usize = 4;
+        use futures::StreamExt;
+        let nodes: Vec<crate::config::MasterSyncPeer> = self.config.registry.account_nodes.clone();
+        futures::stream::iter(nodes)
+            .map(|node| {
+                let payload = payload.clone();
+                async move { self.push_app_identity_to(region, &node, payload).await }
+            })
+            .buffered(PUSH_CONCURRENCY)
+            .collect()
+            .await
+    }
+
+    async fn push_app_identity_to(
+        &self,
+        region: ServerRegion,
+        node: &crate::config::MasterSyncPeer,
+        payload: serde_json::Value,
+    ) -> AppIdentityPush {
+        {
             let endpoint = format!("{}/internal/app-identity", node.url.trim_end_matches('/'));
             let mut req = self.http.post(&endpoint).json(&payload);
             if !node.token.is_empty() {
@@ -283,9 +368,8 @@ impl Registry {
                     }
                 }
             };
-            outcomes.push(outcome);
+            outcome
         }
-        outcomes
     }
 
     async fn notify_subscribers(&self, region: ServerRegion, data_version: &str) {
