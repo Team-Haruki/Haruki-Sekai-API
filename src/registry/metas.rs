@@ -370,8 +370,9 @@ pub fn sha256_hex(data: &[u8]) -> String {
 
 /// Parse an upstream music_metas payload (a JSON array of row objects),
 /// optionally inject the omakase rows, and return the served bytes, the row
-/// count and whether rows were injected. Without injection the upstream bytes
-/// are served untouched.
+/// count and whether rows were injected. The upstream rows are never
+/// re-serialized: injected rows are spliced onto the original bytes, so
+/// every real row is served exactly as upstream wrote it.
 pub fn prepare_music_metas(body: &[u8], inject: bool) -> Result<(Vec<u8>, usize, bool), AppError> {
     let mut rows: Vec<JsonMap<String, JsonValue>> = serde_json::from_slice(body)
         .map_err(|e| AppError::UpstreamData(format!("music_metas is not a row array: {e}")))?;
@@ -383,12 +384,23 @@ pub fn prepare_music_metas(body: &[u8], inject: bool) -> Result<(Vec<u8>, usize,
     if !inject {
         return Ok((body.to_vec(), rows.len(), false));
     }
-    let injected = inject_omakase_rows(&mut rows);
-    if !injected {
-        return Ok((body.to_vec(), rows.len(), false));
+    let existing = rows.len();
+    if !inject_omakase_rows(&mut rows) {
+        return Ok((body.to_vec(), existing, false));
     }
-    let processed =
-        serde_json::to_vec(&rows).map_err(|e| AppError::ParseError(format!("music_metas: {e}")))?;
+    let appended = serde_json::to_vec(&rows[existing..])
+        .map_err(|e| AppError::ParseError(format!("music_metas: {e}")))?;
+    // `body` is a non-empty array, so it ends with `]` after optional
+    // whitespace; `appended` is `[...]` of the new rows.
+    let close = body
+        .iter()
+        .rposition(|b| *b == b']')
+        .ok_or_else(|| AppError::UpstreamData("music_metas array is unterminated".to_string()))?;
+    let mut processed = Vec::with_capacity(close + appended.len() + 2);
+    processed.extend_from_slice(&body[..close]);
+    processed.push(b',');
+    processed.extend_from_slice(&appended[1..appended.len() - 1]);
+    processed.push(b']');
     Ok((processed, rows.len(), true))
 }
 
@@ -516,6 +528,10 @@ mod tests {
         assert!(injected);
         assert_eq!(rows, 6);
         let out: Vec<JsonValue> = serde_json::from_slice(&processed).unwrap();
+        // Original rows are served byte for byte: the upstream prefix is intact.
+        let upstream = serde_json::to_vec(&payload).unwrap();
+        assert!(processed.starts_with(&upstream[..upstream.len() - 1]));
+        assert_eq!(out[0], payload[0]);
         let omakase: Vec<&JsonValue> = out
             .iter()
             .filter(|r| r["music_id"] == json!(10000))
