@@ -31,6 +31,27 @@ struct AssetUpdaterPayload {
     dry_run: bool,
 }
 
+/// The appVersion/appHash a login actually used, as reported by the account
+/// node. Empty fields mean "unknown, keep what is on disk".
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AppIdentity {
+    pub app_version: String,
+    pub app_hash: String,
+}
+
+impl AppIdentity {
+    fn is_known(&self) -> bool {
+        !self.app_version.trim().is_empty() || !self.app_hash.trim().is_empty()
+    }
+}
+
+/// What a remote login probe yields: the version metadata as a LoginResponse
+/// plus the account node's app identity.
+pub struct RemoteProbe {
+    pub login: LoginResponse,
+    pub app: AppIdentity,
+}
+
 /// A peer node lending its game accounts to this node's master production.
 /// The peer only ever executes a login (returning version metadata) or relays
 /// an authenticated GET as an untouched encrypted byte stream; every
@@ -57,8 +78,9 @@ impl RemoteMasterSource {
     }
 
     /// Login on the account node; returns the version metadata as a
-    /// LoginResponse (session token intentionally absent).
-    async fn probe(&self) -> Result<LoginResponse, AppError> {
+    /// LoginResponse (session token intentionally absent) plus the app
+    /// identity that login used.
+    async fn probe(&self) -> Result<RemoteProbe, AppError> {
         let resp = self
             .http
             .post(format!("{}/internal/login-probe", self.base_url))
@@ -86,14 +108,20 @@ impl RemoteMasterSource {
                 probe.message.unwrap_or_default(),
             ));
         }
-        Ok(LoginResponse {
-            session_token: String::new(),
-            data_version: probe.data_version,
-            asset_version: probe.asset_version,
-            asset_hash: probe.asset_hash,
-            suite_master_split_path: probe.suite_master_split_path,
-            cdn_version: probe.cdn_version,
-            user_registration: None,
+        Ok(RemoteProbe {
+            login: LoginResponse {
+                session_token: String::new(),
+                data_version: probe.data_version,
+                asset_version: probe.asset_version,
+                asset_hash: probe.asset_hash,
+                suite_master_split_path: probe.suite_master_split_path,
+                cdn_version: probe.cdn_version,
+                user_registration: None,
+            },
+            app: AppIdentity {
+                app_version: probe.app_version,
+                app_hash: probe.app_hash,
+            },
         })
     }
 
@@ -270,7 +298,7 @@ impl MasterUpdater {
                 return;
             }
         };
-        let Some((session, login_response)) = self.load_login_context().await else {
+        let Some((session, login_response, remote_app)) = self.load_login_context().await else {
             return;
         };
         let (need_master_update, need_asset_update, need_version_save) =
@@ -305,7 +333,12 @@ impl MasterUpdater {
         }
         if need_version_save {
             if let Err(e) = self
-                .save_publish_and_notify(current_version, &login_response, need_master_update)
+                .save_publish_and_notify(
+                    current_version,
+                    &login_response,
+                    remote_app.as_ref(),
+                    need_master_update,
+                )
                 .await
             {
                 error!(
@@ -322,10 +355,19 @@ impl MasterUpdater {
         );
     }
 
-    async fn load_login_context(&self) -> Option<(Option<Arc<AccountSession>>, LoginResponse)> {
+    /// Login (locally or via the remote probe) and return the session used
+    /// (local only), the login metadata, and the account node's app identity
+    /// (remote only).
+    async fn load_login_context(
+        &self,
+    ) -> Option<(
+        Option<Arc<AccountSession>>,
+        LoginResponse,
+        Option<AppIdentity>,
+    )> {
         if let Some(remote) = &self.remote_source {
             return match remote.probe().await {
-                Ok(response) => Some((None, response)),
+                Ok(probe) => Some((None, probe.login, Some(probe.app))),
                 Err(e) => {
                     error!(
                         "{} Remote login probe failed: {}",
@@ -345,7 +387,7 @@ impl MasterUpdater {
         })?;
         self.login_with_version_refresh(&session)
             .await
-            .map(|response| (Some(session), response))
+            .map(|response| (Some(session), response, None))
     }
 
     async fn login_with_version_refresh(&self, session: &AccountSession) -> Option<LoginResponse> {
@@ -426,8 +468,12 @@ impl MasterUpdater {
         &self,
         current: VersionInfo,
         login: &LoginResponse,
+        remote_app: Option<&AppIdentity>,
         notify_peers: bool,
     ) -> Result<(), AppError> {
+        if let Some(app) = remote_app.filter(|app| app.is_known()) {
+            self.adopt_app_identity(app).await?;
+        }
         let new_version = VersionInfo {
             app_version: current.app_version,
             app_hash: current.app_hash,
@@ -443,6 +489,54 @@ impl MasterUpdater {
         if notify_peers {
             self.notify_sync_peers(&data_version).await;
         }
+        Ok(())
+    }
+
+    /// Record the account node's app identity in this node's version file
+    /// before the version merge, so the committed snapshot carries the
+    /// appVersion/appHash the master was actually produced with. The on-disk
+    /// values normally win the merge (they belong to the AppHashUpdater), so
+    /// this is an explicit override, taken under the same version lock.
+    async fn adopt_app_identity(&self, app: &AppIdentity) -> Result<(), AppError> {
+        let path = &self.client.config.version_path;
+        let _guard = self.version_lock.lock().await;
+        let mut existing: serde_json::Map<String, serde_json::Value> =
+            match tokio::fs::read(path).await {
+                Ok(data) => sonic_rs::from_slice(&data).unwrap_or_default(),
+                Err(_) => serde_json::Map::new(),
+            };
+        let mut changed = false;
+        if !app.app_version.trim().is_empty() {
+            let version = effective_app_version(self.region, &app.app_version);
+            if existing.get("appVersion").and_then(|v| v.as_str()) != Some(version.as_str()) {
+                existing.insert("appVersion".to_string(), serde_json::Value::String(version));
+                changed = true;
+            }
+        }
+        if !app.app_hash.trim().is_empty()
+            && existing.get("appHash").and_then(|v| v.as_str()) != Some(app.app_hash.as_str())
+        {
+            existing.insert(
+                "appHash".to_string(),
+                serde_json::Value::String(app.app_hash.clone()),
+            );
+            changed = true;
+        }
+        if !changed {
+            return Ok(());
+        }
+        info!(
+            "{} Adopting account node app identity: appVersion={} appHash={}",
+            self.region.as_str().to_uppercase(),
+            app.app_version,
+            app.app_hash.chars().take(16).collect::<String>()
+        );
+        if let Some(parent) = Path::new(path).parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        let json = sonic_rs::to_string_pretty(&existing)
+            .map_err(|e| AppError::ParseError(e.to_string()))?;
+        crate::client::helper::write_file_atomic(Path::new(path), json.as_bytes()).await?;
         Ok(())
     }
 
@@ -1399,7 +1493,7 @@ mod tests {
         updater.log_master_update(&login, false);
         updater.log_master_update(&login, true);
         updater
-            .save_publish_and_notify(version_info(), &login, true)
+            .save_publish_and_notify(version_info(), &login, None, true)
             .await
             .unwrap();
         assert_eq!(updater.client.version_helper.get().data_version, "6.0.0.49");
@@ -1466,6 +1560,8 @@ mod tests {
             asset_hash: "hash".to_string(),
             cdn_version: 7,
             suite_master_split_path: vec!["split".to_string()],
+            app_version: String::new(),
+            app_hash: String::new(),
         };
         let (url, server) = spawn_server(Reply {
             status: 200,
@@ -1481,7 +1577,9 @@ mod tests {
             },
             crate::upstream::build_internal_http_client().unwrap(),
         );
-        assert_eq!(source.probe().await.unwrap().data_version, "data");
+        let probed = source.probe().await.unwrap();
+        assert_eq!(probed.login.data_version, "data");
+        assert_eq!(probed.app, AppIdentity::default());
         server.abort();
 
         let (url, server) = spawn_server(Reply {
@@ -1717,6 +1815,8 @@ mod tests {
                     asset_hash: String::new(),
                     cdn_version: 0,
                     suite_master_split_path: Vec::new(),
+                    app_version: String::new(),
+                    app_hash: String::new(),
                 })
                 .unwrap(),
             ),
@@ -1752,6 +1852,8 @@ mod tests {
             asset_hash: "new-asset".to_string(),
             cdn_version: 160,
             suite_master_split_path: Vec::new(),
+            app_version: "6.1.0".to_string(),
+            app_hash: "remote-app-hash".to_string(),
         };
         let (url, server) = spawn_update_server(UpdateReply {
             probe: serde_json::to_vec(&probe).unwrap(),
@@ -1776,6 +1878,9 @@ mod tests {
             sonic_rs::from_slice(&std::fs::read(root.join("version.json")).unwrap()).unwrap();
         assert_eq!(persisted.data_version, "6.0.0.49");
         assert_eq!(persisted.cdn_version, 160);
+        // The account node's app identity replaced the stale local one.
+        assert_eq!(persisted.app_version, "6.1.0");
+        assert_eq!(persisted.app_hash, "remote-app-hash");
         server.abort();
         std::fs::remove_dir_all(root).unwrap();
     }

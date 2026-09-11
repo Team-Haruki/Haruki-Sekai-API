@@ -1560,6 +1560,7 @@ dependencies = [
  "sea-orm",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "sonic-rs",
  "tar",
  "thiserror 2.0.18",
