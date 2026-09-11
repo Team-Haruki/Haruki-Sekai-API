@@ -220,26 +220,33 @@ impl IngestionEngine {
         let parsed = parser
             .await
             .map_err(|e| anyhow::anyhow!("ingest parse task: {e}"))?;
+        // The transaction is committed only once the parser reports success:
+        // a file that fails to parse after some batches were inserted rolls
+        // back instead of replacing the region with a truncated row set.
         match (result, parsed) {
             (Err(e), _) => Err(e),
-            (Ok(_), Err(e)) => Err(e.context(format!("parsing {}", path.display()))),
-            (Ok(_), Ok(_)) => Ok(()),
+            (Ok(txn), Err(e)) => {
+                drop(txn);
+                Err(e.context(format!("parsing {}", path.display())))
+            }
+            (Ok(Some(txn)), Ok(_)) => txn.commit().await.context("Failed to commit transaction"),
+            (Ok(None), Ok(_)) => Ok(()),
         }
     }
 
-    /// Receive parsed batches and write them under one transaction. The
-    /// transaction (and the region DELETE) only starts once the first batch
-    /// arrives, so an empty file leaves the table untouched, matching the
-    /// previous whole-file behavior.
+    /// Receive parsed batches and write them under one transaction, which is
+    /// returned uncommitted (`None` when no batch arrived: an empty file
+    /// leaves the table untouched, matching the previous whole-file
+    /// behavior). The region DELETE only runs once the first batch arrives.
     async fn insert_batches(
         &self,
         table_name: &str,
         region: &str,
         has_server_region: bool,
         rx: &mut tokio::sync::mpsc::Receiver<Batch>,
-    ) -> Result<()> {
+    ) -> Result<Option<sea_orm::DatabaseTransaction>> {
         let Some(first) = rx.recv().await else {
-            return Ok(());
+            return Ok(None);
         };
         let txn = self
             .db
@@ -265,8 +272,7 @@ impl IngestionEngine {
             insert_batch(&txn, table_name, batch).await?;
             next = rx.recv().await;
         }
-        txn.commit().await.context("Failed to commit transaction")?;
-        Ok(())
+        Ok(Some(txn))
     }
 }
 
@@ -947,6 +953,21 @@ mod tests {
 
         // A truncated file fails and the transaction rolls back.
         std::fs::write(root.join("bonds.json"), r#"[{"id": 1}, {"id": 2"#).unwrap();
+        assert!(engine
+            .ingest_master_data(root.to_str().unwrap(), "jp")
+            .await
+            .is_err());
+        assert_eq!(count("jp").await, (1, 1));
+        // Same when the failure comes after whole batches were already
+        // inserted: nothing of the truncated file may survive.
+        let mut big = serde_json::to_vec(
+            &(0..ROWS_PER_BATCH + 500)
+                .map(|i| json!({"id": i, "groupId": 1}))
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        big.truncate(big.len() - 3);
+        std::fs::write(root.join("bonds.json"), &big).unwrap();
         assert!(engine
             .ingest_master_data(root.to_str().unwrap(), "jp")
             .await
