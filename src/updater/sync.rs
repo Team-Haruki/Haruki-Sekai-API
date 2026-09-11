@@ -47,6 +47,8 @@ pub struct MasterSyncer {
     source_token: String,
     http: reqwest::Client,
     master_db: Option<sea_orm::DatabaseConnection>,
+    /// Files ingested at once when `master_db` is set.
+    ingest_concurrency: usize,
     git_helper: Option<GitHelper>,
     /// The local client's in-memory version state, when this node also serves
     /// the region itself; updated after a pull so request headers stay current.
@@ -223,6 +225,7 @@ impl MasterSyncer {
         );
         let ok = match crate::ingest_engine::IngestionEngine::new(db).await {
             Ok(engine) => match engine
+                .with_concurrency(self.ingest_concurrency)
                 .ingest_master_data(&self.master_dir, self.region.as_str())
                 .await
             {
@@ -388,6 +391,7 @@ pub fn build_syncers(
                 source_token: sync.source_token.clone(),
                 http: http.clone(),
                 master_db: master_db.clone(),
+                ingest_concurrency: config.master_database.ingest_concurrency,
                 git_helper: git_helper.clone(),
                 version_helper: clients.get(region).map(|c| c.version_helper.clone()),
                 version_lock,
@@ -604,6 +608,7 @@ mod tests {
             source_token: String::new(),
             http: reqwest::Client::new(),
             master_db: None,
+            ingest_concurrency: crate::ingest_engine::DEFAULT_INGEST_CONCURRENCY,
             git_helper: None,
             version_helper: None,
             version_lock: Arc::new(tokio::sync::Mutex::new(())),

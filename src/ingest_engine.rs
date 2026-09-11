@@ -21,10 +21,22 @@ type ColumnTypeMap = HashMap<String, String>;
 type UniqueKeys = Vec<Vec<String>>;
 type SchemaMap = HashMap<String, (ColumnTypeMap, UniqueKeys)>;
 
+/// Files ingested concurrently by default. Each in-flight file holds at most
+/// a few row batches in memory, so this bounds the ingest footprint on a
+/// shared node; raise it via `master_database.ingest_concurrency` where RAM
+/// allows.
+pub const DEFAULT_INGEST_CONCURRENCY: usize = 2;
+/// Rows parsed per batch before they are turned into an INSERT. Bounded
+/// memory per file is roughly `ROWS_PER_BATCH * CHANNEL_DEPTH` rows.
+const ROWS_PER_BATCH: usize = 2_000;
+/// Parsed batches allowed to queue ahead of the inserting side.
+const CHANNEL_DEPTH: usize = 2;
+
 pub struct IngestionEngine {
     db: DatabaseConnection,
     schema_map: SchemaMap, // table -> (column -> type, unique_keys)
     file_to_table: HashMap<String, String>,
+    concurrency: usize,
 }
 
 impl IngestionEngine {
@@ -64,7 +76,14 @@ impl IngestionEngine {
             db,
             schema_map,
             file_to_table,
+            concurrency: DEFAULT_INGEST_CONCURRENCY,
         })
+    }
+
+    /// Number of files ingested at once (minimum 1).
+    pub fn with_concurrency(mut self, concurrency: usize) -> Self {
+        self.concurrency = concurrency.max(1);
+        self
     }
 
     fn resolve_table_name(&self, file_name_without_ext: &str) -> Option<String> {
@@ -87,9 +106,10 @@ impl IngestionEngine {
     }
 
     /// Ingest all JSON files in `dir_path` for the given `region`, running up to
-    /// `CONCURRENCY` files concurrently. Each file is processed in its own transaction
+    /// `concurrency` files at once. Each file is processed in its own transaction
     /// (DELETE existing region rows → batch INSERT new rows), so a failure in one file
-    /// does not roll back others.
+    /// does not roll back others. Rows are parsed and inserted in bounded batches,
+    /// so a 50 MB table never has to be materialized whole.
     pub async fn ingest_master_data(&self, dir_path: &str, region: &str) -> Result<()> {
         let path = Path::new(dir_path);
         if !path.exists() || !path.is_dir() {
@@ -106,9 +126,8 @@ impl IngestionEngine {
             }
         }
 
-        // Process up to CONCURRENCY files at a time. The connection pool will queue
-        // transactions that exceed its max_connections; no failures from contention.
-        const CONCURRENCY: usize = 8;
+        // The connection pool queues transactions that exceed its
+        // max_connections; no failures from contention.
         let failed_tables: Vec<String> = futures::stream::iter(json_files)
             .map(|p| async move {
                 match self.ingest_file(&p, region).await {
@@ -119,7 +138,7 @@ impl IngestionEngine {
                     }
                 }
             })
-            .buffer_unordered(CONCURRENCY)
+            .buffer_unordered(self.concurrency)
             .filter_map(|r| async move { r })
             .collect()
             .await;
@@ -163,30 +182,65 @@ impl IngestionEngine {
         let (db_cols, _unique_keys) = self.schema_map.get(&table_name).unwrap();
         let has_server_region = db_cols.contains_key("server_region");
 
-        // Async file I/O — does not block the runtime.
-        let json_content = tokio::fs::read_to_string(path).await?;
-
-        // JSON parsing and row-value building are CPU-bound; run on the blocking thread pool
-        // so they don't starve other async tasks running concurrently.
+        // Parse on the blocking pool, streaming the JSON array in row batches
+        // through a bounded channel; the async side turns each batch into
+        // INSERTs inside one transaction. Peak memory per file is a couple of
+        // batches, independent of the table size.
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Batch>(CHANNEL_DEPTH);
+        let file = std::fs::File::open(path)?;
         let db_cols_owned = db_cols.clone();
-        let region_str = region.to_string();
-        let table_name_for_build = table_name.clone();
-        let (column_names, rows) = tokio::task::spawn_blocking(move || {
-            build_insert_data(
-                &json_content,
-                &table_name_for_build,
-                &db_cols_owned,
-                &region_str,
-                has_server_region,
-            )
-        })
-        .await??;
+        let region_owned = region.to_string();
+        let table_for_parse = table_name.clone();
+        let parser = tokio::task::spawn_blocking(move || -> Result<usize> {
+            let reader = std::io::BufReader::with_capacity(256 * 1024, file);
+            let mut total = 0usize;
+            stream_rows(reader, ROWS_PER_BATCH, |rows| {
+                total += rows.len();
+                let batch = build_batch(
+                    &rows,
+                    &table_for_parse,
+                    &db_cols_owned,
+                    &region_owned,
+                    has_server_region,
+                );
+                if batch.rows.is_empty() {
+                    return Ok(());
+                }
+                tx.blocking_send(batch)
+                    .map_err(|_| anyhow::anyhow!("ingest receiver closed"))
+            })?;
+            Ok(total)
+        });
 
-        if rows.is_empty() {
-            return Ok(());
+        let result = self
+            .insert_batches(&table_name, region, has_server_region, &mut rx)
+            .await;
+        // Drain so a parser blocked on a full channel can finish and report.
+        drop(rx);
+        let parsed = parser
+            .await
+            .map_err(|e| anyhow::anyhow!("ingest parse task: {e}"))?;
+        match (result, parsed) {
+            (Err(e), _) => Err(e),
+            (Ok(_), Err(e)) => Err(e.context(format!("parsing {}", path.display()))),
+            (Ok(_), Ok(_)) => Ok(()),
         }
+    }
 
-        // Everything below is I/O-bound DB work — stays on the async executor.
+    /// Receive parsed batches and write them under one transaction. The
+    /// transaction (and the region DELETE) only starts once the first batch
+    /// arrives, so an empty file leaves the table untouched, matching the
+    /// previous whole-file behavior.
+    async fn insert_batches(
+        &self,
+        table_name: &str,
+        region: &str,
+        has_server_region: bool,
+        rx: &mut tokio::sync::mpsc::Receiver<Batch>,
+    ) -> Result<()> {
+        let Some(first) = rx.recv().await else {
+            return Ok(());
+        };
         let txn = self
             .db
             .begin()
@@ -195,61 +249,126 @@ impl IngestionEngine {
 
         if has_server_region {
             let mut del = Query::delete();
-            del.from_table(Alias::new(&table_name))
+            del.from_table(Alias::new(table_name))
                 .and_where(Expr::col(Alias::new("server_region")).eq(region));
             txn.execute(&del)
                 .await
                 .context("Failed to delete existing region data")?;
         } else {
             let mut del = Query::delete();
-            del.from_table(Alias::new(&table_name));
+            del.from_table(Alias::new(table_name));
             txn.execute(&del).await.context("Failed to clear table")?;
         }
 
-        let mut insert_stmt = InsertStatement::new()
-            .into_table(Alias::new(&table_name))
-            .to_owned();
-        insert_stmt.columns(column_names.iter().map(|n| Alias::new(n.as_str())));
-
-        // PostgreSQL limits bind parameters to 65535 per query.
-        // Divide by column count (minimum 1) to stay safely under the limit.
-        let batch_size = (65_535 / column_names.len().max(1)).clamp(1, 5_000);
-        let mut rows_iter = rows.into_iter();
-        loop {
-            let chunk: Vec<Vec<sea_orm::sea_query::SimpleExpr>> =
-                rows_iter.by_ref().take(batch_size).collect();
-            if chunk.is_empty() {
-                break;
-            }
-            let mut batch = insert_stmt.clone();
-            for row in chunk {
-                batch.values_panic(row);
-            }
-            txn.execute(&batch)
-                .await
-                .context("Failed to execute batch insert")?;
+        let mut next = Some(first);
+        while let Some(batch) = next.take() {
+            insert_batch(&txn, table_name, batch).await?;
+            next = rx.recv().await;
         }
-
         txn.commit().await.context("Failed to commit transaction")?;
         Ok(())
     }
 }
 
-/// CPU-bound work extracted for `spawn_blocking`: parse JSON, map keys to DB columns,
-/// and build typed row values. Returns (ordered column names, rows of SimpleExpr).
-fn build_insert_data(
-    json_content: &str,
+/// One parsed row batch: the INSERT column list (derived from the keys
+/// present in this batch) and the typed row values.
+struct Batch {
+    column_names: Vec<String>,
+    rows: Vec<Vec<sea_orm::sea_query::SimpleExpr>>,
+}
+
+async fn insert_batch(
+    txn: &sea_orm::DatabaseTransaction,
+    table_name: &str,
+    batch: Batch,
+) -> Result<()> {
+    let mut insert_stmt = InsertStatement::new()
+        .into_table(Alias::new(table_name))
+        .to_owned();
+    insert_stmt.columns(batch.column_names.iter().map(|n| Alias::new(n.as_str())));
+    // PostgreSQL limits bind parameters to 65535 per query.
+    // Divide by column count (minimum 1) to stay safely under the limit.
+    let chunk_rows = (65_535 / batch.column_names.len().max(1)).clamp(1, 5_000);
+    let mut rows_iter = batch.rows.into_iter();
+    loop {
+        let chunk: Vec<Vec<sea_orm::sea_query::SimpleExpr>> =
+            rows_iter.by_ref().take(chunk_rows).collect();
+        if chunk.is_empty() {
+            break;
+        }
+        let mut stmt = insert_stmt.clone();
+        for row in chunk {
+            stmt.values_panic(row);
+        }
+        txn.execute(&stmt)
+            .await
+            .context("Failed to execute batch insert")?;
+    }
+    Ok(())
+}
+
+/// Stream a JSON array from `reader`, handing `f` the elements in batches of
+/// at most `batch_size`. Non-object elements are passed through and filtered
+/// by the batch builder, as before. The last (partial) batch is flushed at
+/// the end of the array.
+fn stream_rows<R: std::io::Read>(
+    reader: R,
+    batch_size: usize,
+    f: impl FnMut(Vec<Value>) -> Result<()>,
+) -> Result<()> {
+    struct RowsVisitor<F> {
+        batch_size: usize,
+        f: F,
+    }
+    impl<'de, F: FnMut(Vec<Value>) -> Result<()>> serde::de::Visitor<'de> for RowsVisitor<F> {
+        type Value = ();
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("a JSON array of master rows")
+        }
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(
+            mut self,
+            mut seq: A,
+        ) -> std::result::Result<(), A::Error> {
+            let mut buf = Vec::with_capacity(self.batch_size);
+            while let Some(row) = seq.next_element::<Value>()? {
+                buf.push(row);
+                if buf.len() >= self.batch_size {
+                    let full = std::mem::replace(&mut buf, Vec::with_capacity(self.batch_size));
+                    (self.f)(full).map_err(serde::de::Error::custom)?;
+                }
+            }
+            if !buf.is_empty() {
+                (self.f)(buf).map_err(serde::de::Error::custom)?;
+            }
+            Ok(())
+        }
+    }
+    let mut de = serde_json::Deserializer::from_reader(reader);
+    serde::Deserializer::deserialize_seq(&mut de, RowsVisitor { batch_size, f })?;
+    de.end()?;
+    Ok(())
+}
+
+/// CPU-bound work for one batch: map the keys present in these rows to DB
+/// columns and build typed row values. Columns absent from every row of a
+/// batch are omitted from that batch's INSERT (they take the column default,
+/// NULL for every master table), which is how missing keys were handled
+/// before batching as well.
+fn build_batch(
+    data: &[Value],
     table_name: &str,
     db_cols: &HashMap<String, String>,
     region: &str,
     has_server_region: bool,
-) -> Result<(Vec<String>, Vec<Vec<sea_orm::sea_query::SimpleExpr>>)> {
-    let data: Vec<Value> = serde_json::from_str(json_content)?;
+) -> Batch {
     if data.is_empty() {
-        return Ok((Vec::new(), Vec::new()));
+        return Batch {
+            column_names: Vec::new(),
+            rows: Vec::new(),
+        };
     }
 
-    let all_json_keys = collect_json_keys(&data);
+    let all_json_keys = collect_json_keys(data);
     let target_columns = map_target_columns(&all_json_keys, db_cols);
 
     let mut column_names: Vec<String> = target_columns.iter().map(|c| c.db_col.clone()).collect();
@@ -258,7 +377,7 @@ fn build_insert_data(
     }
 
     let rows = build_rows(
-        &data,
+        data,
         table_name,
         &target_columns,
         region,
@@ -266,7 +385,7 @@ fn build_insert_data(
         column_names.len(),
     );
 
-    Ok((column_names, rows))
+    Batch { column_names, rows }
 }
 
 struct MappedCol {
@@ -578,25 +697,58 @@ mod tests {
         columns.insert("enabled".to_string(), "bool".to_string());
         columns.insert("server_region".to_string(), "string".to_string());
 
-        let (names, rows) = build_insert_data(
+        let data: Vec<Value> = serde_json::from_str(
             r#"[{"id":1,"displayName":"A","enabled":true},{"id":"2","displayName":"B"},null]"#,
-            "items",
-            &columns,
-            "jp",
-            true,
         )
         .unwrap();
+        let batch = build_batch(&data, "items", &columns, "jp", true);
 
-        assert!(names.contains(&"game_id".to_string()));
-        assert!(names.contains(&"display_name".to_string()));
-        assert!(names.contains(&"enabled".to_string()));
-        assert_eq!(names.last().unwrap(), "server_region");
-        assert_eq!(rows.len(), 2);
-        assert!(build_insert_data("[]", "items", &columns, "jp", true)
-            .unwrap()
-            .0
-            .is_empty());
-        assert!(build_insert_data("invalid", "items", &columns, "jp", true).is_err());
+        assert!(batch.column_names.contains(&"game_id".to_string()));
+        assert!(batch.column_names.contains(&"display_name".to_string()));
+        assert!(batch.column_names.contains(&"enabled".to_string()));
+        assert_eq!(batch.column_names.last().unwrap(), "server_region");
+        assert_eq!(batch.rows.len(), 2);
+        let empty = build_batch(&[], "items", &columns, "jp", true);
+        assert!(empty.column_names.is_empty() && empty.rows.is_empty());
+    }
+
+    #[test]
+    fn streams_rows_in_bounded_batches_and_rejects_bad_json() {
+        let json = r#"[{"id":1},{"id":2},{"id":3},null,{"id":5}]"#;
+        let mut batches = Vec::new();
+        stream_rows(std::io::Cursor::new(json), 2, |rows| {
+            batches.push(rows);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(batches.len(), 3);
+        assert_eq!(batches[0].len(), 2);
+        assert_eq!(batches[2], vec![json!({"id": 5})]);
+
+        let mut none = 0;
+        stream_rows(std::io::Cursor::new("[]"), 2, |_| {
+            none += 1;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(none, 0);
+
+        assert!(stream_rows(std::io::Cursor::new("invalid"), 2, |_| Ok(())).is_err());
+        assert!(stream_rows(std::io::Cursor::new(r#"{"a":1}"#), 2, |_| Ok(())).is_err());
+        assert!(stream_rows(std::io::Cursor::new("[1,2] trailing"), 2, |_| Ok(())).is_err());
+        // A truncated array fails after the complete batches were delivered.
+        let mut seen = 0;
+        assert!(stream_rows(std::io::Cursor::new("[1,2,3"), 2, |rows| {
+            seen += rows.len();
+            Ok(())
+        })
+        .is_err());
+        assert_eq!(seen, 2);
+        // Callback errors propagate.
+        assert!(stream_rows(std::io::Cursor::new("[1]"), 1, |_| {
+            anyhow::bail!("stop")
+        })
+        .is_err());
     }
 
     #[test]
@@ -722,10 +874,100 @@ mod tests {
         ));
     }
 
+    /// End-to-end against an in-memory SQLite: batches cross the
+    /// ROWS_PER_BATCH boundary, per-batch column sets differ, a broken file
+    /// rolls back, and an empty file leaves the table alone.
+    #[tokio::test]
+    async fn ingests_in_batches_with_rollback_and_empty_file_semantics() {
+        use sea_orm::Statement;
+        let mut opt = ConnectOptions::new("sqlite::memory:".to_string());
+        opt.max_connections(1);
+        let db = Database::connect(opt).await.unwrap();
+        db.execute_unprepared(
+            "CREATE TABLE bonds (game_id INTEGER, group_id INTEGER, character_id1 INTEGER, \
+             character_id2 INTEGER, server_region TEXT)",
+        )
+        .await
+        .unwrap();
+        let engine = IngestionEngine::new(db.clone()).await.unwrap();
+        let root = std::env::temp_dir().join(format!("haruki_ingest_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let count = |region: &'static str| {
+            let db = db.clone();
+            async move {
+                let row = db
+                    .query_one_raw(Statement::from_string(
+                        db.get_database_backend(),
+                        format!(
+                            "SELECT COUNT(*) AS n, SUM(character_id2 IS NULL) AS nulls FROM bonds \
+                             WHERE server_region = '{region}'"
+                        ),
+                    ))
+                    .await
+                    .unwrap()
+                    .unwrap();
+                (
+                    row.try_get::<i64>("", "n").unwrap(),
+                    row.try_get::<i64>("", "nulls").unwrap(),
+                )
+            }
+        };
+
+        // Rows 0..2500 carry characterId2, the rest do not: the second batch's
+        // INSERT omits that column and those rows read back NULL.
+        let total = ROWS_PER_BATCH * 2 + 500;
+        let rows: Vec<Value> = (0..total)
+            .map(|i| {
+                if i < 2500 {
+                    json!({"id": i, "groupId": 1, "characterId1": 1, "characterId2": 2})
+                } else {
+                    json!({"id": i, "groupId": 1, "characterId1": 1})
+                }
+            })
+            .collect();
+        std::fs::write(root.join("bonds.json"), serde_json::to_vec(&rows).unwrap()).unwrap();
+        engine
+            .ingest_master_data(root.to_str().unwrap(), "jp")
+            .await
+            .unwrap();
+        assert_eq!(count("jp").await, (total as i64, (total - 2500) as i64));
+
+        // Re-ingest replaces the region's rows only.
+        std::fs::write(root.join("bonds.json"), r#"[{"id": 1, "groupId": 9}]"#).unwrap();
+        engine
+            .ingest_master_data(root.to_str().unwrap(), "en")
+            .await
+            .unwrap();
+        engine
+            .ingest_master_data(root.to_str().unwrap(), "jp")
+            .await
+            .unwrap();
+        assert_eq!(count("jp").await, (1, 1));
+        assert_eq!(count("en").await, (1, 1));
+
+        // A truncated file fails and the transaction rolls back.
+        std::fs::write(root.join("bonds.json"), r#"[{"id": 1}, {"id": 2"#).unwrap();
+        assert!(engine
+            .ingest_master_data(root.to_str().unwrap(), "jp")
+            .await
+            .is_err());
+        assert_eq!(count("jp").await, (1, 1));
+
+        // An empty array leaves existing rows in place (no DELETE is issued).
+        std::fs::write(root.join("bonds.json"), "[]").unwrap();
+        engine
+            .ingest_master_data(root.to_str().unwrap(), "jp")
+            .await
+            .unwrap();
+        assert_eq!(count("jp").await, (1, 1));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[tokio::test]
     async fn loads_schema_resolves_tables_and_skips_non_ingestable_files() {
         let db = Database::connect("sqlite::memory:").await.unwrap();
-        let engine = IngestionEngine::new(db).await.unwrap();
+        let engine = IngestionEngine::new(db).await.unwrap().with_concurrency(0);
+        assert_eq!(engine.concurrency, 1);
         assert!(engine.resolve_table_name("cards").is_some());
         assert!(engine.resolve_table_name("card").is_some());
         assert!(engine.resolve_table_name("definitely_unknown").is_none());

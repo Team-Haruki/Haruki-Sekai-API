@@ -27,7 +27,9 @@ async fn main() -> anyhow::Result<()> {
     println!("Connected! Initializing engine...");
 
     // Engine initialization
-    let engine = IngestionEngine::new(db).await?;
+    let engine = IngestionEngine::new(db)
+        .await?
+        .with_concurrency(master_db_config.ingest_concurrency);
 
     // Traverse and ingest all regions
     for region in [
