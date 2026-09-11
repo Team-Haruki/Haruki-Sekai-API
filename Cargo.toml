@@ -25,6 +25,7 @@ cipher = "0.5"
 aes = "0.9"
 cbc = { version = "0.2", features = ["alloc"] }
 hex = "0.4"
+sha2 = "0.10"
 base64 = "0.22"
 serde_json = { version = "1", features = ["preserve_order"] }
 jsonwebtoken = { version = "10", features = ["aws_lc_rs"] }

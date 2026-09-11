@@ -121,6 +121,10 @@ pub fn create_router(state: Arc<MainAppState>) -> Router {
             get(internal::get_master_bundle),
         )
         .route(
+            "/internal/master/{server}/manifest",
+            get(internal::get_master_manifest),
+        )
+        .route(
             "/internal/master-updated",
             post(internal::post_master_updated),
         );

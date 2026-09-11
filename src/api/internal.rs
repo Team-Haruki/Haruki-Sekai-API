@@ -169,16 +169,23 @@ pub async fn post_login_probe(
         Err(e) => Err(e),
     };
     let probe = match login {
-        Ok(login) => LoginProbeResponse {
-            ok: true,
-            kind: None,
-            message: None,
-            data_version: login.data_version,
-            asset_version: login.asset_version,
-            asset_hash: login.asset_hash,
-            cdn_version: login.cdn_version,
-            suite_master_split_path: login.suite_master_split_path,
-        },
+        Ok(login) => {
+            // Report the identity this login actually used (post-426 refresh
+            // included), not whatever the caller has on disk.
+            let app = client.version_helper.get();
+            LoginProbeResponse {
+                ok: true,
+                kind: None,
+                message: None,
+                data_version: login.data_version,
+                asset_version: login.asset_version,
+                asset_hash: login.asset_hash,
+                cdn_version: login.cdn_version,
+                suite_master_split_path: login.suite_master_split_path,
+                app_version: app.app_version,
+                app_hash: app.app_hash,
+            }
+        }
         Err(e) => LoginProbeResponse {
             ok: false,
             kind: Some(e.kind().to_string()),
@@ -188,6 +195,8 @@ pub async fn post_login_probe(
             asset_hash: String::new(),
             cdn_version: 0,
             suite_master_split_path: Vec::new(),
+            app_version: String::new(),
+            app_hash: String::new(),
         },
     };
     match serde_json::to_string(&probe) {
@@ -337,6 +346,147 @@ pub async fn get_master_version(
         Err(e) => envelope_response(&error_envelope(&AppError::IoError(format!(
             "version file: {e}"
         )))),
+    }
+}
+
+/// One master file as listed by the manifest.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct MasterManifestFile {
+    pub name: String,
+    pub size: u64,
+    pub sha256: String,
+}
+
+/// What a region's master directory currently holds: the version identity
+/// (as the version file records it) plus every `*.json` with its size and
+/// SHA-256. Consumers and the master data manager use it to decide whether
+/// to pull and which files changed, without downloading the bundle.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MasterManifest {
+    pub server: String,
+    pub app_version: String,
+    pub app_hash: String,
+    pub data_version: String,
+    pub asset_version: String,
+    pub asset_hash: String,
+    pub cdn_version: i32,
+    pub generated_at: String,
+    pub files: Vec<MasterManifestFile>,
+}
+
+/// Digest cache keyed by path and validated by (mtime, size), so a manifest
+/// request only hashes files that changed since the last one. Process-wide:
+/// master directories are few and their entries change only on updates.
+type DigestCache =
+    std::collections::HashMap<std::path::PathBuf, (std::time::SystemTime, u64, String)>;
+static DIGEST_CACHE: std::sync::LazyLock<parking_lot::Mutex<DigestCache>> =
+    std::sync::LazyLock::new(Default::default);
+
+fn file_sha256(path: &std::path::Path, meta: &std::fs::Metadata) -> Result<String, AppError> {
+    use sha2::Digest as _;
+    let key = (meta.modified()?, meta.len());
+    if let Some((mtime, len, digest)) = DIGEST_CACHE.lock().get(path) {
+        if (*mtime, *len) == key {
+            return Ok(digest.clone());
+        }
+    }
+    let mut file = std::fs::File::open(path)?;
+    let mut hasher = sha2::Sha256::new();
+    std::io::copy(&mut file, &mut hasher)?;
+    let digest = hex::encode(hasher.finalize());
+    DIGEST_CACHE
+        .lock()
+        .insert(path.to_path_buf(), (key.0, key.1, digest.clone()));
+    Ok(digest)
+}
+
+/// Build the manifest for `master_dir` (blocking: hashes changed files).
+pub fn build_master_manifest(
+    region: ServerRegion,
+    master_dir: &str,
+    version_path: &str,
+) -> Result<MasterManifest, AppError> {
+    let version: crate::client::helper::VersionInfo = if version_path.is_empty() {
+        Default::default()
+    } else {
+        let data = std::fs::read(version_path)
+            .map_err(|e| AppError::IoError(format!("version file: {e}")))?;
+        sonic_rs::from_slice(&data)
+            .map_err(|e| AppError::ParseError(format!("version file: {e}")))?
+    };
+    let mut entries: Vec<(String, std::path::PathBuf, std::fs::Metadata)> = Vec::new();
+    for entry in std::fs::read_dir(master_dir)? {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let meta = entry.metadata()?;
+        if !meta.is_file() || !name.ends_with(".json") || name.starts_with('.') {
+            continue;
+        }
+        entries.push((name, entry.path(), meta));
+    }
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    let files = entries
+        .iter()
+        .map(|(name, path, meta)| {
+            Ok(MasterManifestFile {
+                name: name.clone(),
+                size: meta.len(),
+                sha256: file_sha256(path, meta)?,
+            })
+        })
+        .collect::<Result<Vec<_>, AppError>>()?;
+    Ok(MasterManifest {
+        server: region.as_str().to_string(),
+        app_version: version.app_version,
+        app_hash: version.app_hash,
+        data_version: version.data_version,
+        asset_version: version.asset_version,
+        asset_hash: version.asset_hash,
+        cdn_version: version.cdn_version,
+        generated_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        files,
+    })
+}
+
+/// GET /internal/master/{server}/manifest — version identity plus the
+/// name/size/sha256 of every master file, for consumers that pin a version
+/// or fetch only what changed.
+pub async fn get_master_manifest(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    axum::extract::Path(server): axum::extract::Path<String>,
+) -> Response {
+    if let Some(resp) = check_internal_auth(&state, &headers) {
+        return resp;
+    }
+    let (region, config) = match region_config(&state, &server) {
+        Ok(v) => v,
+        Err(resp) => return *resp,
+    };
+    if config.master_dir.is_empty() {
+        return envelope_response(&error_envelope(&AppError::NotFound(
+            "master_dir not configured".to_string(),
+        )));
+    }
+    let master_dir = config.master_dir.clone();
+    let version_path = config.version_path.clone();
+    let built = tokio::task::spawn_blocking(move || {
+        build_master_manifest(region, &master_dir, &version_path)
+    })
+    .await;
+    let manifest = match built {
+        Ok(Ok(m)) => m,
+        Ok(Err(e)) => return envelope_response(&error_envelope(&e)),
+        Err(e) => {
+            return envelope_response(&error_envelope(&AppError::Internal(format!(
+                "manifest task: {e}"
+            ))))
+        }
+    };
+    match serde_json::to_string(&manifest) {
+        Ok(json) => (StatusCode::OK, [("content-type", "application/json")], json).into_response(),
+        Err(e) => envelope_response(&error_envelope(&AppError::ParseError(e.to_string()))),
     }
 }
 
@@ -898,6 +1048,55 @@ mod tests {
             get_master_version(State(state), auth_headers(), Path("jp".to_string())).await;
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(json_body(response).await["appVersion"], "1");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    fn sha256_hex(data: &[u8]) -> String {
+        use sha2::Digest as _;
+        hex::encode(sha2::Sha256::digest(data))
+    }
+
+    #[tokio::test]
+    async fn serves_master_manifest_with_cached_digests() {
+        let root = temp_dir();
+        let state = state(&root, false).await;
+        // No version file yet: manifest still lists files with empty identity.
+        std::fs::write(root.join("master/cards.json"), "[1]").unwrap();
+        std::fs::write(root.join("master/.tmp.json"), "[]").unwrap();
+        std::fs::write(root.join("master/note.txt"), "x").unwrap();
+        let response =
+            get_master_manifest(State(state.clone()), auth_headers(), Path("jp".to_string())).await;
+        assert_eq!(json_body(response).await["kind"], "io");
+
+        std::fs::write(
+            root.join("version.json"),
+            r#"{"appVersion":"5.6.0","appHash":"h","dataVersion":"5.6.1.11","assetVersion":"5.6.1.10","cdnVersion":0}"#,
+        )
+        .unwrap();
+        let response =
+            get_master_manifest(State(state.clone()), auth_headers(), Path("jp".to_string())).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        assert_eq!(body["server"], "jp");
+        assert_eq!(body["appVersion"], "5.6.0");
+        assert_eq!(body["dataVersion"], "5.6.1.11");
+        assert_eq!(body["files"].as_array().unwrap().len(), 1);
+        assert_eq!(body["files"][0]["name"], "cards.json");
+        assert_eq!(body["files"][0]["size"], 3);
+        assert_eq!(body["files"][0]["sha256"], sha256_hex(b"[1]"));
+
+        // A rewritten file (new size) is re-hashed; an untouched one is served
+        // from the cache.
+        std::fs::write(root.join("master/cards.json"), "[1,2]").unwrap();
+        let cards = root.join("master/cards.json");
+        let meta = std::fs::metadata(&cards).unwrap();
+        let fresh = file_sha256(&cards, &meta).unwrap();
+        assert_eq!(fresh, sha256_hex(b"[1,2]"));
+        assert_eq!(file_sha256(&cards, &meta).unwrap(), fresh);
+
+        let missing =
+            get_master_manifest(State(state), auth_headers(), Path("kr".to_string())).await;
+        assert_eq!(json_body(missing).await["kind"], "not_found");
         std::fs::remove_dir_all(root).unwrap();
     }
 

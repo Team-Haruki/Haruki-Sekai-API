@@ -92,6 +92,14 @@ pub struct LoginProbeResponse {
     pub cdn_version: i32,
     #[serde(default)]
     pub suite_master_split_path: Vec<String>,
+    /// The app identity the account node actually logged in with. The
+    /// account node owns these (its version file is what the game accepted),
+    /// so a master producer borrowing its accounts records them instead of
+    /// its own possibly stale copy.
+    #[serde(default)]
+    pub app_version: String,
+    #[serde(default)]
+    pub app_hash: String,
 }
 
 /// Request for a peer node's `POST /internal/game-stream`: execute an

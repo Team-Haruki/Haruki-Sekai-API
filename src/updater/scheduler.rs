@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use sea_orm::DatabaseConnection;
 use tokio_cron_scheduler::{Job, JobScheduler, JobSchedulerError};
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use super::apphash::AppHashUpdater;
 use super::master::{MasterUpdater, RemoteMasterSource};
@@ -149,6 +149,14 @@ async fn schedule_apphash_updates(
                 region.as_str().to_uppercase()
             );
             continue;
+        }
+        if !server.master_remote_source.url.is_empty() {
+            warn!(
+                "{} AppHash updater runs alongside master_remote_source: the account node's \
+app identity is recorded on every remote master update, so local apphash \
+sources for this region should agree with it or be disabled",
+                region.as_str().to_uppercase()
+            );
         }
         let cron = server.app_hash_updater_cron.clone();
         let updater = Arc::new(AppHashUpdater::new(
