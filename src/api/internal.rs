@@ -556,7 +556,7 @@ pub async fn get_master_bundle(
 
 /// Tar up every `*.json` in `master_dir` (flat, no directories) plus the
 /// version file under `BUNDLE_VERSION_ENTRY`, writing to `out_path`.
-fn build_master_tar(
+pub fn build_master_tar(
     master_dir: &str,
     version_path: &str,
     out_path: &std::path::Path,

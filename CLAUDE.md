@@ -9,6 +9,7 @@ cargo build                    # Development build
 cargo build --release          # Release build (LTO, stripped)
 cargo run                      # Run the API server
 cargo run --bin run_ingest     # Run standalone master data ingestion CLI
+cargo run --bin master_registry # Run the master data manager (registry) on the same config file
 cargo test                     # Run all tests
 cargo test <test_name>         # Run a single test
 cargo test -- --ignored        # Run ignored tests (require external services)
@@ -40,7 +41,8 @@ Branch on protocol with `ServerRegion::is_cp_server()`.
 - `src/crypto/` - AES-128-CBC encrypt/decrypt with MessagePack
 - `src/db/` - SeaORM entities, two databases: user DB (`database`) and master data DB (`master_database`)
 - `src/updater/` - Cron jobs for master data version check/download (with local or remote-borrowed accounts), git push, app hash polling; `sync.rs` pulls master bundles from a region's owner node; `master_stream.rs` decodes a downloaded master payload table by table (rows streamed) so the producer's peak memory is bounded by one row, not the payload — keep new master consumers on that path, never `unpack_ordered` on a whole master
-- `src/ingest_engine.rs` - Bulk JSON->DB ingestion using `schema_info.json` for column mapping
+- `src/ingest_engine.rs` - Bulk JSON->DB ingestion using `schema_info.json` for column mapping, streamed in row batches (`master_database.ingest_concurrency` bounds memory)
+- `src/registry/` - Master data manager (`master_registry` binary): pulls each region from its owner via `MasterSyncer`, owns git push and ingest, publishes per-region manifests (`Data/registry/` JSON state), serves files/bundles and the app-identity override (`GET /v1/app/{region}` is the shape `apphash_sources` `url` entries consume), and fans out `master-updated` notices to `registry.subscribers`
 - `src/models/` - ~92 auto-generated game data models (do NOT manually edit; regenerate from source data)
 
 ### Schema System
