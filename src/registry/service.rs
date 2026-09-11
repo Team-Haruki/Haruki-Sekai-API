@@ -8,6 +8,7 @@ use std::sync::Arc;
 use tokio_cron_scheduler::{Job, JobScheduler, JobSchedulerError};
 use tracing::{error, info, warn};
 
+use super::metas::MusicMetasManager;
 use super::state::RegistryState;
 use crate::api::internal::{build_master_manifest, MasterManifest};
 use crate::config::{Config, ServerRegion};
@@ -19,6 +20,8 @@ pub struct Registry {
     pub config: Arc<Config>,
     pub state: RegistryState,
     pub syncers: HashMap<ServerRegion, Arc<MasterSyncer>>,
+    /// The music_metas feed, when `registry.music_metas.enabled`.
+    pub metas: Option<MusicMetasManager>,
     http: reqwest::Client,
     /// One publish at a time per region so a webhook and a poll cannot
     /// interleave their manifest/history writes.
@@ -28,6 +31,17 @@ pub struct Registry {
 impl Registry {
     pub fn new(config: Arc<Config>, syncers: HashMap<ServerRegion, Arc<MasterSyncer>>) -> Self {
         let state = RegistryState::new(&config.registry.state_dir);
+        let metas = if config.registry.music_metas.enabled {
+            match MusicMetasManager::new(&config) {
+                Ok(m) => Some(m),
+                Err(e) => {
+                    error!("music_metas feed disabled: {}", e);
+                    None
+                }
+            }
+        } else {
+            None
+        };
         let publish_locks = config
             .servers
             .keys()
@@ -42,6 +56,7 @@ impl Registry {
             config,
             state,
             syncers,
+            metas,
             http,
             publish_locks,
         }
@@ -208,9 +223,37 @@ impl Registry {
     }
 
     /// Schedule the per-region fallback polls (`master_sync.poll_cron`), each
-    /// running `refresh`. Owner webhooks remain the primary trigger.
+    /// running `refresh`, plus the music_metas tick. Owner webhooks remain the
+    /// primary trigger for master data.
     pub async fn start_polls(self: &Arc<Self>) -> Result<JobScheduler, JobSchedulerError> {
         let scheduler = JobScheduler::new().await?;
+        if self.metas.is_some() {
+            let cron = self.config.registry.music_metas.cron.clone();
+            let registry = self.clone();
+            // First pull right away so `current` exists before the first tick.
+            tokio::spawn({
+                let registry = registry.clone();
+                async move {
+                    if let Some(metas) = &registry.metas {
+                        metas.refresh_all().await;
+                    }
+                }
+            });
+            match Job::new_async(cron.as_str(), move |_uuid, _lock| {
+                let registry = registry.clone();
+                Box::pin(async move {
+                    if let Some(metas) = &registry.metas {
+                        metas.refresh_all().await;
+                    }
+                })
+            }) {
+                Ok(job) => {
+                    scheduler.add(job).await?;
+                    info!("music_metas tick scheduled: {}", cron);
+                }
+                Err(e) => error!("Invalid music_metas cron '{}': {}", cron, e),
+            }
+        }
         for (region, syncer) in &self.syncers {
             let _ = syncer;
             let cron = self

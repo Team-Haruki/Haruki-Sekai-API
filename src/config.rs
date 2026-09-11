@@ -361,6 +361,45 @@ pub struct RegistryConfig {
     /// is published.
     #[serde(default)]
     pub subscribers: Vec<MasterSyncPeer>,
+    /// The music_metas feed the registry maintains for its consumers.
+    #[serde(default)]
+    pub music_metas: MusicMetasConfig,
+}
+
+/// Periodic pull of the regional `music_metas*.json` files (see
+/// `registry::metas`). Enabled by default with the community upstream.
+#[derive(Debug, Clone, Deserialize)]
+pub struct MusicMetasConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// 6-field cron for the upstream check; every 30 minutes by default.
+    #[serde(default = "default_music_metas_cron")]
+    pub cron: String,
+    /// Inject the synthetic omakase rows (music_id 10000) consumers expect.
+    #[serde(default = "default_true")]
+    pub inject_omakase: bool,
+    /// Per-region upstream URL overrides; an empty string disables a region.
+    #[serde(default)]
+    pub sources: HashMap<ServerRegion, String>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_music_metas_cron() -> String {
+    "0 */30 * * * *".to_string()
+}
+
+impl Default for MusicMetasConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            cron: default_music_metas_cron(),
+            inject_omakase: true,
+            sources: HashMap::new(),
+        }
+    }
 }
 
 fn default_registry_port() -> u16 {
@@ -379,6 +418,7 @@ impl Default for RegistryConfig {
             token: String::new(),
             state_dir: default_registry_state_dir(),
             subscribers: Vec::new(),
+            music_metas: MusicMetasConfig::default(),
         }
     }
 }
@@ -539,6 +579,9 @@ servers:
         assert_eq!(config.registry.port, 9998);
         assert_eq!(config.registry.state_dir, "./Data/registry");
         assert!(config.registry.token.is_empty());
+        assert!(config.registry.music_metas.enabled);
+        assert!(config.registry.music_metas.inject_omakase);
+        assert_eq!(config.registry.music_metas.cron, "0 */30 * * * *");
         assert_eq!(config.git.username, "");
         assert!(!config.git.sign_commits);
         assert!(config.servers.is_empty());
