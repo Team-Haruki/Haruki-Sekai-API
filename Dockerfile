@@ -22,9 +22,10 @@ RUN apk --no-cache add \
 WORKDIR /app
 COPY --chown=haruki:haruki --from=builder /app/target/release/haruki-sekai-api .
 COPY --chown=haruki:haruki --from=builder /app/target/release/run_ingest .
+COPY --chown=haruki:haruki --from=builder /app/target/release/master_registry .
 COPY --chown=haruki:haruki Data ./Data
 RUN mkdir -p logs && chown haruki:haruki logs
-EXPOSE 9999
+EXPOSE 9999 9998
 ENV TZ=Asia/Shanghai
 ENV RUST_LOG=info
 ARG VERSION=dev

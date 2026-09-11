@@ -54,6 +54,15 @@ master_database:
   max_connections: 10
   ingest_concurrency: 2 # master JSON files ingested at once; each holds only a few row batches in memory
 
+registry: # master data manager (`master_registry` binary); ignored by the API server
+  host: "0.0.0.0"
+  port: 9998
+  token: "" # bearer for PUT/POST endpoints and owner webhooks; empty disables them
+  state_dir: "./Data/registry" # manifests, publish history, app-identity overrides
+  subscribers: [] # peers to POST /internal/master-updated after a region is published
+  # - url: "http://100.64.0.2:9999"
+  #   token: "peer-internal-token"
+
 apphash_sources: # sources for apphash, to update apphash values periodically
   # - type: file
   #   dir: "/path/to/your/local/apphash_json/directory"

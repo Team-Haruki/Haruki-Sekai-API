@@ -340,6 +340,49 @@ pub struct ServerConfig {
     pub cache_ttls: CacheTtlConfig,
 }
 
+/// Settings for the `master_registry` binary (the master data manager): a
+/// headless node that pulls each region's master from its owner node
+/// (`servers.<region>.master_sync`), owns git push and DB ingest, publishes a
+/// manifest per region and fans out update notices.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RegistryConfig {
+    #[serde(default = "default_host")]
+    pub host: String,
+    #[serde(default = "default_registry_port")]
+    pub port: u16,
+    /// Bearer token for mutating endpoints and owner webhooks. Empty disables
+    /// them (reads stay open, they are served on the internal network).
+    #[serde(default)]
+    pub token: String,
+    /// Directory for manifests, publish history and app-identity overrides.
+    #[serde(default = "default_registry_state_dir")]
+    pub state_dir: String,
+    /// Peers to notify (`POST <url>/internal/master-updated`) after a region
+    /// is published.
+    #[serde(default)]
+    pub subscribers: Vec<MasterSyncPeer>,
+}
+
+fn default_registry_port() -> u16 {
+    9998
+}
+
+fn default_registry_state_dir() -> String {
+    "./Data/registry".to_string()
+}
+
+impl Default for RegistryConfig {
+    fn default() -> Self {
+        Self {
+            host: default_host(),
+            port: default_registry_port(),
+            token: String::new(),
+            state_dir: default_registry_state_dir(),
+            subscribers: Vec::new(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct AppHashSource {
     #[serde(rename = "type")]
@@ -378,6 +421,8 @@ pub struct Config {
     pub asset_updater_servers: Vec<AssetUpdaterInfo>,
     #[serde(default)]
     pub servers: HashMap<ServerRegion, ServerConfig>,
+    #[serde(default)]
+    pub registry: RegistryConfig,
 }
 
 impl Default for RedisConfig {
@@ -491,6 +536,9 @@ servers:
         assert_eq!(config.database.dsn, "");
         assert_eq!(config.master_database.max_connections, 10);
         assert_eq!(config.master_database.ingest_concurrency, 2);
+        assert_eq!(config.registry.port, 9998);
+        assert_eq!(config.registry.state_dir, "./Data/registry");
+        assert!(config.registry.token.is_empty());
         assert_eq!(config.git.username, "");
         assert!(!config.git.sign_commits);
         assert!(config.servers.is_empty());

@@ -6,6 +6,7 @@ pub mod db;
 pub mod error;
 pub mod ingest_engine;
 pub mod models;
+pub mod registry;
 pub mod updater;
 pub mod upstream;
 pub mod utils;
