@@ -459,7 +459,9 @@ pub fn build_master_manifest(
     for entry in std::fs::read_dir(master_dir)? {
         let entry = entry?;
         let name = entry.file_name().to_string_lossy().into_owned();
-        let meta = entry.metadata()?;
+        // Follow symlinks so the manifest describes the same files the bundle
+        // archives (`build_master_tar` uses `Path::is_file`, which follows).
+        let meta = std::fs::metadata(entry.path())?;
         if !meta.is_file() || !name.ends_with(".json") || name.starts_with('.') {
             continue;
         }

@@ -232,17 +232,7 @@ impl MusicMetasManager {
         }
         let source_etag = header_string(&resp, "etag");
         let source_last_modified = header_string(&resp, "last-modified");
-        let body = resp
-            .bytes()
-            .await
-            .map_err(|e| AppError::NetworkError(format!("music_metas {}: {e}", region.as_str())))?;
-        if body.len() > MAX_RESPONSE_BYTES {
-            return Err(AppError::UpstreamData(format!(
-                "music_metas {} upstream body too large ({} bytes)",
-                region.as_str(),
-                body.len()
-            )));
-        }
+        let body = read_bounded_body(resp, region).await?;
         let inject = self.inject_omakase;
         let (processed, rows, injected) =
             tokio::task::spawn_blocking(move || prepare_music_metas(&body, inject))
@@ -349,6 +339,34 @@ impl MusicMetasManager {
             }
         }
     }
+}
+
+/// Read the body chunk by chunk, aborting as soon as it exceeds
+/// `MAX_RESPONSE_BYTES` instead of buffering an oversized upstream reply.
+async fn read_bounded_body(
+    mut resp: reqwest::Response,
+    region: ServerRegion,
+) -> Result<Vec<u8>, AppError> {
+    let mut body = Vec::with_capacity(
+        resp.content_length()
+            .unwrap_or(0)
+            .min(MAX_RESPONSE_BYTES as u64) as usize,
+    );
+    while let Some(chunk) = resp
+        .chunk()
+        .await
+        .map_err(|e| AppError::NetworkError(format!("music_metas {}: {e}", region.as_str())))?
+    {
+        if body.len() + chunk.len() > MAX_RESPONSE_BYTES {
+            return Err(AppError::UpstreamData(format!(
+                "music_metas {} upstream body exceeds {} bytes",
+                region.as_str(),
+                MAX_RESPONSE_BYTES
+            )));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
 }
 
 fn header_string(resp: &reqwest::Response, name: &str) -> Option<String> {

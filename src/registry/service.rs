@@ -117,17 +117,23 @@ impl Registry {
     /// subscribers when it changed. Returns the manifest and whether it was
     /// a new publish.
     pub async fn publish(&self, region: ServerRegion) -> Result<(MasterManifest, bool), AppError> {
-        let _guard = match self.publish_locks.get(&region) {
-            Some(lock) => lock.lock().await,
-            None => return Err(AppError::InvalidServerRegion(region.as_str().to_string())),
+        let (manifest, changed) = {
+            // The lock covers manifest build and state write only; the
+            // subscriber fan-out (up to one timeout per unreachable peer)
+            // runs after it is released so a concurrent refresh is not held up.
+            let _guard = match self.publish_locks.get(&region) {
+                Some(lock) => lock.lock().await,
+                None => return Err(AppError::InvalidServerRegion(region.as_str().to_string())),
+            };
+            let (master_dir, version_path) = self.region_paths(region)?;
+            let manifest = tokio::task::spawn_blocking(move || {
+                build_master_manifest(region, &master_dir, &version_path)
+            })
+            .await
+            .map_err(|e| AppError::Internal(format!("manifest task: {e}")))??;
+            let changed = self.state.publish(region, &manifest).await?;
+            (manifest, changed)
         };
-        let (master_dir, version_path) = self.region_paths(region)?;
-        let manifest = tokio::task::spawn_blocking(move || {
-            build_master_manifest(region, &master_dir, &version_path)
-        })
-        .await
-        .map_err(|e| AppError::Internal(format!("manifest task: {e}")))??;
-        let changed = self.state.publish(region, &manifest).await?;
         if changed {
             info!(
                 "{} Published master dataVersion {} ({} files)",
