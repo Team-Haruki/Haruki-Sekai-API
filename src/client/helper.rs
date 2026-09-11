@@ -20,6 +20,27 @@ pub async fn write_file_atomic(path: &Path, contents: &[u8]) -> std::io::Result<
     Ok(())
 }
 
+/// Stream an HTTP response body to `path` chunk by chunk (the whole body is
+/// never held in memory). Returns the byte count. The target is truncated
+/// first; callers stage into a temp location and decide what to keep.
+pub async fn stream_response_to_file(
+    resp: reqwest::Response,
+    path: &Path,
+) -> Result<u64, AppError> {
+    use futures::StreamExt;
+    use tokio::io::AsyncWriteExt;
+    let mut file = tokio::fs::File::create(path).await?;
+    let mut stream = resp.bytes_stream();
+    let mut total = 0u64;
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| AppError::NetworkError(format!("body stream: {}", e)))?;
+        file.write_all(&chunk).await?;
+        total += chunk.len() as u64;
+    }
+    file.flush().await?;
+    Ok(total)
+}
+
 #[cfg(test)]
 mod tests {
     use axum::{http::StatusCode, response::IntoResponse, routing::post, Router};

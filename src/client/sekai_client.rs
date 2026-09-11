@@ -922,12 +922,24 @@ impl SekaiClient {
         timeout: Duration,
     ) -> Result<Response, AppError> {
         let session = self.get_session().ok_or(AppError::NoClientAvailable)?;
+        self.get_game_api_raw_with_session(&session, path, timeout)
+            .await
+    }
+
+    /// `get_game_api_raw` on a caller-chosen session (the master updater
+    /// reuses the account it just logged in with).
+    pub async fn get_game_api_raw_with_session(
+        &self,
+        session: &AccountSession,
+        path: &str,
+        timeout: Duration,
+    ) -> Result<Response, AppError> {
         let max_retries = 4;
         let mut retry_count = 0;
         while retry_count < max_retries {
             let resp = self
                 .call_api_with_timeout::<()>(
-                    &session,
+                    session,
                     reqwest::Method::GET,
                     path,
                     None,
@@ -938,7 +950,7 @@ impl SekaiClient {
             match self.classify_raw_response(resp).await? {
                 RawResponse::Success(resp) => return Ok(resp),
                 RawResponse::Recover { error, status } => {
-                    self.recover_raw_response(&session, error, status).await?;
+                    self.recover_raw_response(session, error, status).await?;
                 }
             }
             retry_count += 1;

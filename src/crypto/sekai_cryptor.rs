@@ -118,6 +118,36 @@ impl SekaiCryptor {
         Ok(buf)
     }
 
+    /// Wrap a ciphertext reader in a [`DecryptReader`] that yields the
+    /// AES-128-CBC + PKCS7 plaintext incrementally (64 KiB of ciphertext in
+    /// flight, one block carried between chunks). Used for master-data blobs,
+    /// whose full-buffer decode would otherwise cost several times the
+    /// payload size.
+    pub fn decrypt_reader<R: std::io::Read>(&self, reader: R) -> DecryptReader<R> {
+        DecryptReader {
+            inner: reader,
+            decryptor: Aes128CbcDec::new(&self.key.into(), &self.iv.into()),
+            chunk: vec![0u8; DECRYPT_CHUNK],
+            out: Vec::with_capacity(DECRYPT_CHUNK),
+            pos: 0,
+            carry: None,
+            eof: false,
+        }
+    }
+
+    /// Decrypt `reader` into `writer` through [`Self::decrypt_reader`];
+    /// returns the plaintext length.
+    pub fn decrypt_stream<R: std::io::Read, W: std::io::Write>(
+        &self,
+        reader: R,
+        mut writer: W,
+    ) -> Result<u64, AppError> {
+        let mut reader = self.decrypt_reader(reader);
+        let n = std::io::copy(&mut reader, &mut writer)?;
+        writer.flush()?;
+        Ok(n)
+    }
+
     pub fn unpack_value(&self, data: &[u8]) -> Result<serde_json::Value, AppError> {
         if data.is_empty() {
             return Err(AppError::CryptoError("Content cannot be empty".to_string()));
@@ -136,6 +166,97 @@ impl SekaiCryptor {
         let unpadded = pkcs7_unpad(decrypted)?;
         msgpack_to_ordered_value(unpadded)
     }
+}
+
+const DECRYPT_CHUNK: usize = 64 * 1024;
+
+/// Streaming AES-128-CBC + PKCS7 decryptor over any `Read`. The final block
+/// is only unpadded once the source reports EOF, so the plaintext boundary is
+/// exact without knowing the payload length up front. Malformed input
+/// (length not a block multiple, bad padding, empty payload) surfaces as an
+/// `InvalidData` I/O error.
+pub struct DecryptReader<R> {
+    inner: R,
+    decryptor: Aes128CbcDec,
+    chunk: Vec<u8>,
+    out: Vec<u8>,
+    pos: usize,
+    carry: Option<[u8; 16]>,
+    eof: bool,
+}
+
+impl<R: std::io::Read> DecryptReader<R> {
+    fn refill(&mut self) -> std::io::Result<()> {
+        use cipher::Block;
+        use std::io::{Error, ErrorKind};
+        self.out.clear();
+        self.pos = 0;
+        let n = read_fill(&mut self.inner, &mut self.chunk)?;
+        if n == 0 {
+            self.eof = true;
+            let Some(last) = self.carry.take() else {
+                return Err(Error::new(
+                    ErrorKind::InvalidData,
+                    "Content cannot be empty",
+                ));
+            };
+            let unpadded = pkcs7_unpad(&last)
+                .map_err(|e| Error::new(ErrorKind::InvalidData, e.to_string()))?;
+            self.out.extend_from_slice(unpadded);
+            return Ok(());
+        }
+        if n % 16 != 0 {
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                "Content length is not a multiple of AES block size",
+            ));
+        }
+        for block in self.chunk[..n].chunks_exact_mut(16) {
+            let block = <&mut Block<Aes128CbcDec>>::try_from(block)
+                .map_err(|e| Error::new(ErrorKind::InvalidData, e.to_string()))?;
+            self.decryptor.decrypt_block(block);
+        }
+        if let Some(prev) = self.carry.take() {
+            self.out.extend_from_slice(&prev);
+        }
+        self.out.extend_from_slice(&self.chunk[..n - 16]);
+        let mut last = [0u8; 16];
+        last.copy_from_slice(&self.chunk[n - 16..n]);
+        self.carry = Some(last);
+        Ok(())
+    }
+}
+
+impl<R: std::io::Read> std::io::Read for DecryptReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        while self.pos == self.out.len() {
+            if self.eof {
+                return Ok(0);
+            }
+            self.refill()?;
+        }
+        let n = buf.len().min(self.out.len() - self.pos);
+        buf[..n].copy_from_slice(&self.out[self.pos..self.pos + n]);
+        self.pos += n;
+        Ok(n)
+    }
+}
+
+/// Read until `buf` is full or the reader hits EOF; returns the byte count.
+pub(crate) fn read_fill<R: std::io::Read>(
+    reader: &mut R,
+    buf: &mut [u8],
+) -> std::io::Result<usize> {
+    let mut filled = 0;
+    while filled < buf.len() {
+        match reader.read(&mut buf[filled..]) {
+            Ok(0) => break,
+            Ok(n) => filled += n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(filled)
 }
 
 fn pkcs7_pad(data: &[u8], block_size: usize) -> Vec<u8> {
@@ -187,6 +308,12 @@ pub fn decode_msgpack_value(data: &[u8]) -> Result<serde_json::Value, AppError> 
     let value = rmpv::decode::read_value_ref(&mut reader)
         .map_err(|e| AppError::UpstreamData(format!("MsgPack decode error: {}", e)))?;
     rmpv_ref_to_json(value)
+}
+
+/// Convert an owned rmpv value with the same semantics as
+/// [`decode_msgpack_value`] (stringified integer keys, base64 binaries).
+pub fn msgpack_value_to_json(value: &rmpv::Value) -> Result<serde_json::Value, AppError> {
+    rmpv_ref_to_json(value.as_ref())
 }
 
 fn rmpv_ref_to_json(value: rmpv::ValueRef) -> Result<serde_json::Value, AppError> {
@@ -362,6 +489,65 @@ mod tests {
         assert_eq!(decoded["f64"], 2.5);
         assert_eq!(decoded["ext"], "AQID");
         assert!(decoded.get("false").is_none());
+    }
+
+    #[test]
+    fn decrypt_stream_matches_buffered_decrypt_across_chunk_boundaries() {
+        let cryptor = SekaiCryptor::from_hex(
+            "00112233445566778899aabbccddeeff",
+            "ffeeddccbbaa99887766554433221100",
+        )
+        .unwrap();
+        // Sizes straddle the 64 KiB chunk and the 16-byte block boundaries.
+        for len in [1usize, 15, 16, 17, 65_520, 65_536, 65_537, 200_000] {
+            let plain: Vec<u8> = (0..len).map(|i| (i % 251) as u8).collect();
+            let packed = cryptor.pack_bytes(&plain).unwrap();
+            let mut out = Vec::new();
+            let n = cryptor
+                .decrypt_stream(std::io::Cursor::new(&packed), &mut out)
+                .unwrap();
+            assert_eq!(n as usize, len);
+            assert_eq!(out, plain, "len {len}");
+            assert_eq!(out, cryptor.decrypt_msgpack(&packed).unwrap());
+            // Tiny reads through the adapter must yield the same bytes.
+            let mut reader = cryptor.decrypt_reader(std::io::Cursor::new(&packed));
+            let mut small = Vec::new();
+            let mut byte = [0u8; 3];
+            loop {
+                let n = std::io::Read::read(&mut reader, &mut byte).unwrap();
+                if n == 0 {
+                    break;
+                }
+                small.extend_from_slice(&byte[..n]);
+            }
+            assert_eq!(small, plain);
+        }
+        let mut out = Vec::new();
+        assert!(cryptor
+            .decrypt_stream(std::io::Cursor::new(&[]), &mut out)
+            .is_err());
+        assert!(cryptor
+            .decrypt_stream(std::io::Cursor::new(&[0u8; 20]), &mut out)
+            .is_err());
+        assert!(cryptor
+            .decrypt_stream(std::io::Cursor::new(&[0u8; 16]), &mut out)
+            .is_err());
+    }
+
+    #[test]
+    fn owned_msgpack_value_conversion_matches_borrowed_path() {
+        use rmpv::Value as RV;
+        let value = RV::Map(vec![
+            (RV::from(0i64), RV::from("alpha")),
+            (RV::from("bin"), RV::Binary(vec![0xDE, 0xAD])),
+            (RV::from("ext"), RV::Ext(1, vec![1, 2, 3])),
+        ]);
+        let mut buf = Vec::new();
+        rmpv::encode::write_value(&mut buf, &value).unwrap();
+        assert_eq!(
+            msgpack_value_to_json(&value).unwrap(),
+            decode_msgpack_value(&buf).unwrap()
+        );
     }
 
     #[test]

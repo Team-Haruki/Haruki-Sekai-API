@@ -128,28 +128,58 @@ impl NuverseSchemaStore {
             ));
         };
         let mut restored = IndexMap::with_capacity(raw_obj.len());
+        let mut expanded = Vec::new();
         for (key, value) in raw_obj {
-            let value = match self.master.get(&key).and_then(|name| self.schema(name)) {
-                Some(schema) => restore_master_value(schema, value, &self.registry)?,
-                None => value,
-            };
-            restored.insert(key, value);
+            let mut tables = self.restore_master_table(key, value)?.into_iter();
+            if let Some((key, value)) = tables.next() {
+                restored.insert(key, value);
+            }
+            expanded.extend(tables);
         }
-        let expanded = restored
-            .iter()
-            .filter_map(|(key, value)| {
-                let suffix = key.strip_prefix("compact")?;
-                let first = suffix.chars().next()?;
-                let table = value.as_object()?;
-                let mut derived_key = first.to_lowercase().collect::<String>();
-                derived_key.push_str(&suffix[first.len_utf8()..]);
-                Some((derived_key, expand_compact_master_table(table)))
-            })
-            .collect::<Vec<_>>();
         for (key, value) in expanded {
             restored.insert(key, value);
         }
         Ok(restored)
+    }
+
+    /// Restore one row of an array-shaped master table (the per-row half of
+    /// [`restore_master_table`], for callers that stream rows).
+    ///
+    /// [`restore_master_table`]: Self::restore_master_table
+    pub fn restore_master_row(&self, key: &str, row: JsonValue) -> Result<JsonValue, AppError> {
+        match self.master.get(key).and_then(|name| self.schema(name)) {
+            Some(schema) => restore_json(schema, row, &self.registry),
+            None => Ok(row),
+        }
+    }
+
+    /// Restore one top-level master table. Yields the (schema-restored) table
+    /// itself first and, for a `compactFoo` column-oriented table, the derived
+    /// row-oriented `foo` table after it. Callers that persist tables one at a
+    /// time must give derived tables precedence over a raw table of the same
+    /// name, which is what [`restore_master_msgpack`] does for whole payloads.
+    ///
+    /// [`restore_master_msgpack`]: Self::restore_master_msgpack
+    pub fn restore_master_table(
+        &self,
+        key: String,
+        value: JsonValue,
+    ) -> Result<Vec<(String, JsonValue)>, AppError> {
+        let value = match self.master.get(&key).and_then(|name| self.schema(name)) {
+            Some(schema) => restore_master_value(schema, value, &self.registry)?,
+            None => value,
+        };
+        let derived = key.strip_prefix("compact").and_then(|suffix| {
+            let first = suffix.chars().next()?;
+            let table = value.as_object()?;
+            let mut derived_key = first.to_lowercase().collect::<String>();
+            derived_key.push_str(&suffix[first.len_utf8()..]);
+            Some((derived_key, expand_compact_master_table(table)))
+        });
+        let mut tables = Vec::with_capacity(2);
+        tables.push((key, value));
+        tables.extend(derived);
+        Ok(tables)
     }
 
     pub fn restore_api_json(&self, path: &str, value: JsonValue) -> Result<JsonValue, AppError> {
