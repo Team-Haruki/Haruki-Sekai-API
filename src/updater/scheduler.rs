@@ -416,9 +416,17 @@ mod tests {
         let mut config: Config = serde_yaml::from_str("backend: {}").unwrap();
         config.servers.insert(ServerRegion::Jp, local_server);
         config.servers.insert(ServerRegion::Cn, remote_server);
+        config
+            .servers
+            .get_mut(&ServerRegion::Cn)
+            .unwrap()
+            .app_hash_updater_cron = "30 * * * * *".to_string();
         assert_eq!(
             config.deprecated_app_hash_settings(),
-            vec!["servers.cn.enable_app_hash_updater".to_string()]
+            vec![
+                "servers.cn.enable_app_hash_updater".to_string(),
+                "servers.cn.app_hash_updater_cron".to_string()
+            ]
         );
         let locks = HashMap::new();
         let syncers = super::super::sync::build_syncers(&config, &clients, None, &locks);

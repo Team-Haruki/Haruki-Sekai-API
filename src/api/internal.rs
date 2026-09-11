@@ -254,13 +254,14 @@ pub async fn post_app_identity(
             Err(e) => return envelope_response(&error_envelope(&e)),
         }
     };
+    // The file is written; a failed header reload must still surface so the
+    // (idempotent) push is retried rather than recorded as delivered while
+    // the running client keeps logging in with the old identity.
     if let Some(client) = state.clients.get(&region) {
         if let Err(e) = client.refresh_version().await {
-            tracing::warn!(
-                "{} App identity written but header refresh failed: {}",
-                region.as_str().to_uppercase(),
-                e
-            );
+            return envelope_response(&error_envelope(&AppError::Internal(format!(
+                "app identity written but header refresh failed: {e}"
+            ))));
         }
     }
     let current: crate::client::helper::VersionInfo = match tokio::fs::read(&config.version_path)
@@ -1233,6 +1234,16 @@ mod tests {
             json_body(call("kr", "1", "h").await).await["kind"],
             "not_found"
         );
+        // A missing or corrupt version file is never replaced by a stub.
+        std::fs::write(root.join("version.json"), "{").unwrap();
+        assert_eq!(json_body(call("jp", "9", "h").await).await["kind"], "parse");
+        assert_eq!(
+            std::fs::read_to_string(root.join("version.json")).unwrap(),
+            "{"
+        );
+        std::fs::remove_file(root.join("version.json")).unwrap();
+        assert_eq!(json_body(call("jp", "9", "h").await).await["kind"], "io");
+        assert!(!root.join("version.json").exists());
         let unauthorized = post_app_identity(
             State(state.clone()),
             HeaderMap::new(),
