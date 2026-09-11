@@ -2,9 +2,10 @@
 //!
 //! Reads (open on the internal network):
 //! - `GET /health`
-//! - `GET /v1/master/{region}/current`            latest manifest
+//! - `GET /v1/master/{region}/current`            latest manifest (ETag = file set + version)
 //! - `GET /v1/master/{region}/history?limit=N`    publish history, newest first
-//! - `GET /v1/master/{region}/files/{name}`       one master file
+//! - `GET /v1/master/{region}/files/{name}`       one master file (ETag = its SHA-256,
+//!   `If-None-Match` -> 304, `Last-Modified`, `Content-Length`)
 //! - `GET /v1/master/{region}/bundle`             tar of the master directory
 //! - `GET /v1/app/{region}`                       `{appVersion, appHash}` — the
 //!   shape the SekaiAPI AppHash updater's `url` source consumes
@@ -29,7 +30,7 @@ use serde::Deserialize;
 use tracing::{error, info};
 
 use super::Registry;
-use crate::api::internal::{build_master_tar, MasterUpdatedNotice};
+use crate::api::internal::{build_master_tar, file_sha256, MasterUpdatedNotice};
 use crate::config::ServerRegion;
 use crate::error::AppError;
 use crate::updater::apphash::AppInfo;
@@ -106,13 +107,77 @@ async fn health(State(registry): State<Shared>) -> Response {
     }))
 }
 
-async fn current(State(registry): State<Shared>, Path(region): Path<String>) -> Response {
+/// Strong ETag for a resource identified by a content digest.
+fn etag(digest: &str) -> String {
+    format!("\"{digest}\"")
+}
+
+/// Whether an `If-None-Match` header matches `etag` (exact or `*`).
+fn if_none_match(headers: &HeaderMap, etag: &str) -> bool {
+    headers
+        .get("if-none-match")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| {
+            v.split(',')
+                .map(|t| t.trim().trim_start_matches("W/"))
+                .any(|t| t == "*" || t == etag)
+        })
+        .unwrap_or(false)
+}
+
+fn http_date(time: std::time::SystemTime) -> String {
+    chrono::DateTime::<chrono::Utc>::from(time)
+        .format("%a, %d %b %Y %H:%M:%S GMT")
+        .to_string()
+}
+
+fn not_modified(etag: &str) -> Response {
+    (
+        StatusCode::NOT_MODIFIED,
+        [
+            ("etag", etag.to_string()),
+            ("cache-control", "no-cache".to_string()),
+        ],
+    )
+        .into_response()
+}
+
+async fn current(
+    State(registry): State<Shared>,
+    Path(region): Path<String>,
+    headers: HeaderMap,
+) -> Response {
     let region = match parse_region(&region) {
         Ok(r) => r,
         Err(e) => return e.into_response(),
     };
     match registry.state.current(region).await {
-        Ok(Some(manifest)) => json(&manifest),
+        Ok(Some(manifest)) => {
+            // The manifest's identity is its file set plus version, not the
+            // timestamp of the publish that last refreshed it.
+            let tag = etag(&format!(
+                "{}-{}",
+                super::state::content_hash(&manifest),
+                manifest.data_version
+            ));
+            if if_none_match(&headers, &tag) {
+                return not_modified(&tag);
+            }
+            match serde_json::to_string(&manifest) {
+                Ok(body) => (
+                    StatusCode::OK,
+                    [
+                        ("content-type", "application/json".to_string()),
+                        ("etag", tag),
+                        ("cache-control", "no-cache".to_string()),
+                        ("x-haruki-data-version", manifest.data_version.clone()),
+                    ],
+                    body,
+                )
+                    .into_response(),
+                Err(e) => AppError::ParseError(e.to_string()).into_response(),
+            }
+        }
         Ok(None) => {
             AppError::NotFound(format!("region {} has not been published", region.as_str()))
                 .into_response()
@@ -150,9 +215,13 @@ async fn history(
     }
 }
 
+/// One master file with a strong ETag (its SHA-256, the same digest the
+/// manifest lists) so consumers can revalidate with `If-None-Match` and
+/// fetch only files whose digest changed.
 async fn file(
     State(registry): State<Shared>,
     Path((region, name)): Path<(String, String)>,
+    headers: HeaderMap,
 ) -> Response {
     let region = match parse_region(&region) {
         Ok(r) => r,
@@ -166,15 +235,46 @@ async fn file(
         Err(e) => return e.into_response(),
     };
     let path = std::path::Path::new(&master_dir).join(&name);
+    let meta = match tokio::fs::metadata(&path).await {
+        Ok(m) if m.is_file() => m,
+        Ok(_) => return AppError::NotFound(format!("no master file {:?}", name)).into_response(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return AppError::NotFound(format!("no master file {:?}", name)).into_response()
+        }
+        Err(e) => return AppError::IoError(e.to_string()).into_response(),
+    };
+    let digest = {
+        let path = path.clone();
+        let meta = meta.clone();
+        match tokio::task::spawn_blocking(move || file_sha256(&path, &meta)).await {
+            Ok(Ok(d)) => d,
+            Ok(Err(e)) => return e.into_response(),
+            Err(e) => return AppError::Internal(format!("digest task: {e}")).into_response(),
+        }
+    };
+    let tag = etag(&digest);
+    if if_none_match(&headers, &tag) {
+        return not_modified(&tag);
+    }
+    let mut response_headers = vec![
+        ("content-type", "application/json".to_string()),
+        ("content-length", meta.len().to_string()),
+        ("etag", tag),
+        ("cache-control", "no-cache".to_string()),
+    ];
+    if let Ok(modified) = meta.modified() {
+        response_headers.push(("last-modified", http_date(modified)));
+    }
     match tokio::fs::File::open(&path).await {
         Ok(file) => {
             let stream = tokio_util::io::ReaderStream::new(file);
-            (
-                StatusCode::OK,
-                [("content-type", "application/json")],
-                axum::body::Body::from_stream(stream),
-            )
-                .into_response()
+            let mut response = axum::body::Body::from_stream(stream).into_response();
+            for (name, value) in response_headers {
+                if let Ok(value) = axum::http::HeaderValue::from_str(&value) {
+                    response.headers_mut().insert(name, value);
+                }
+            }
+            response
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             AppError::NotFound(format!("no master file {:?}", name)).into_response()
@@ -488,7 +588,44 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), 200);
+        let file_etag = resp.headers()["etag"].to_str().unwrap().to_string();
+        assert_eq!(
+            file_etag,
+            format!("\"{}\"", current["files"][0]["sha256"].as_str().unwrap())
+        );
+        assert_eq!(resp.headers()["content-length"], "10");
+        assert!(resp.headers().contains_key("last-modified"));
         assert_eq!(resp.text().await.unwrap(), "[{\"id\":1}]");
+        let resp = client
+            .get(format!("{base}/v1/master/jp/files/cards.json"))
+            .header("if-none-match", &file_etag)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 304);
+        assert!(resp.bytes().await.unwrap().is_empty());
+        let resp = client
+            .get(format!("{base}/v1/master/jp/files/cards.json"))
+            .header("if-none-match", "W/\"stale\", \"other\"")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        // The manifest revalidates the same way.
+        let resp = client
+            .get(format!("{base}/v1/master/jp/current"))
+            .send()
+            .await
+            .unwrap();
+        let manifest_etag = resp.headers()["etag"].to_str().unwrap().to_string();
+        assert_eq!(resp.headers()["x-haruki-data-version"], "5.6.1.11");
+        let resp = client
+            .get(format!("{base}/v1/master/jp/current"))
+            .header("if-none-match", &manifest_etag)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 304);
         for bad in [
             "missing.json",
             "..%2Fversion.json",
@@ -574,6 +711,22 @@ mod tests {
         assert_eq!(body["changed"], true);
         let (_, history) = get_json(&client, &format!("{base}/v1/master/jp/history")).await;
         assert_eq!(history.as_array().unwrap().len(), 2);
+        // Changed content: the old ETags no longer match on file or manifest.
+        let resp = client
+            .get(format!("{base}/v1/master/jp/files/cards.json"))
+            .header("if-none-match", &file_etag)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        assert_ne!(resp.headers()["etag"], file_etag.as_str());
+        let resp = client
+            .get(format!("{base}/v1/master/jp/current"))
+            .header("if-none-match", &manifest_etag)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
 
         // No syncer for jp: refresh and webhook report not found.
         let resp = client

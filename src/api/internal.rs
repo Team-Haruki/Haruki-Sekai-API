@@ -383,7 +383,8 @@ type DigestCache =
 static DIGEST_CACHE: std::sync::LazyLock<parking_lot::Mutex<DigestCache>> =
     std::sync::LazyLock::new(Default::default);
 
-fn file_sha256(path: &std::path::Path, meta: &std::fs::Metadata) -> Result<String, AppError> {
+/// SHA-256 of a master file, served from the (mtime, size)-validated cache.
+pub fn file_sha256(path: &std::path::Path, meta: &std::fs::Metadata) -> Result<String, AppError> {
     use sha2::Digest as _;
     let key = (meta.modified()?, meta.len());
     if let Some((mtime, len, digest)) = DIGEST_CACHE.lock().get(path) {
