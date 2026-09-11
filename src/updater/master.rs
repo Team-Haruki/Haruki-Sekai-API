@@ -40,9 +40,53 @@ pub struct AppIdentity {
 }
 
 impl AppIdentity {
-    fn is_known(&self) -> bool {
+    pub fn is_known(&self) -> bool {
         !self.app_version.trim().is_empty() || !self.app_hash.trim().is_empty()
     }
+}
+
+/// Overwrite the appVersion/appHash fields of the version file at `path`
+/// with `app` (non-empty fields only, appVersion normalized for the region).
+/// Returns whether the file changed. Callers must hold the region's version
+/// lock. Used when another node's identity is authoritative: the account
+/// node for a remote-account producer, the owner node for a syncer.
+pub(crate) async fn persist_app_identity(
+    region: ServerRegion,
+    path: &str,
+    app: &AppIdentity,
+) -> Result<bool, AppError> {
+    let mut existing: serde_json::Map<String, serde_json::Value> = match tokio::fs::read(path).await
+    {
+        Ok(data) => sonic_rs::from_slice(&data).unwrap_or_default(),
+        Err(_) => serde_json::Map::new(),
+    };
+    let mut changed = false;
+    if !app.app_version.trim().is_empty() {
+        let version = effective_app_version(region, &app.app_version);
+        if existing.get("appVersion").and_then(|v| v.as_str()) != Some(version.as_str()) {
+            existing.insert("appVersion".to_string(), serde_json::Value::String(version));
+            changed = true;
+        }
+    }
+    if !app.app_hash.trim().is_empty()
+        && existing.get("appHash").and_then(|v| v.as_str()) != Some(app.app_hash.as_str())
+    {
+        existing.insert(
+            "appHash".to_string(),
+            serde_json::Value::String(app.app_hash.clone()),
+        );
+        changed = true;
+    }
+    if !changed {
+        return Ok(false);
+    }
+    if let Some(parent) = Path::new(path).parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    let json =
+        sonic_rs::to_string_pretty(&existing).map_err(|e| AppError::ParseError(e.to_string()))?;
+    crate::client::helper::write_file_atomic(Path::new(path), json.as_bytes()).await?;
+    Ok(true)
 }
 
 /// What a remote login probe yields: the version metadata as a LoginResponse
@@ -498,45 +542,15 @@ impl MasterUpdater {
     /// values normally win the merge (they belong to the AppHashUpdater), so
     /// this is an explicit override, taken under the same version lock.
     async fn adopt_app_identity(&self, app: &AppIdentity) -> Result<(), AppError> {
-        let path = &self.client.config.version_path;
         let _guard = self.version_lock.lock().await;
-        let mut existing: serde_json::Map<String, serde_json::Value> =
-            match tokio::fs::read(path).await {
-                Ok(data) => sonic_rs::from_slice(&data).unwrap_or_default(),
-                Err(_) => serde_json::Map::new(),
-            };
-        let mut changed = false;
-        if !app.app_version.trim().is_empty() {
-            let version = effective_app_version(self.region, &app.app_version);
-            if existing.get("appVersion").and_then(|v| v.as_str()) != Some(version.as_str()) {
-                existing.insert("appVersion".to_string(), serde_json::Value::String(version));
-                changed = true;
-            }
-        }
-        if !app.app_hash.trim().is_empty()
-            && existing.get("appHash").and_then(|v| v.as_str()) != Some(app.app_hash.as_str())
-        {
-            existing.insert(
-                "appHash".to_string(),
-                serde_json::Value::String(app.app_hash.clone()),
+        if persist_app_identity(self.region, &self.client.config.version_path, app).await? {
+            info!(
+                "{} Adopting account node app identity: appVersion={} appHash={}",
+                self.region.as_str().to_uppercase(),
+                app.app_version,
+                app.app_hash.chars().take(16).collect::<String>()
             );
-            changed = true;
         }
-        if !changed {
-            return Ok(());
-        }
-        info!(
-            "{} Adopting account node app identity: appVersion={} appHash={}",
-            self.region.as_str().to_uppercase(),
-            app.app_version,
-            app.app_hash.chars().take(16).collect::<String>()
-        );
-        if let Some(parent) = Path::new(path).parent() {
-            tokio::fs::create_dir_all(parent).await?;
-        }
-        let json = sonic_rs::to_string_pretty(&existing)
-            .map_err(|e| AppError::ParseError(e.to_string()))?;
-        crate::client::helper::write_file_atomic(Path::new(path), json.as_bytes()).await?;
         Ok(())
     }
 

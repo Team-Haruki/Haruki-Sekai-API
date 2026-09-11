@@ -22,7 +22,9 @@ use tokio::io::AsyncWriteExt;
 use tracing::{error, info, warn};
 
 use super::git::GitHelper;
-use super::master::{is_safe_path_component, persist_version_file};
+use super::master::{
+    is_safe_path_component, persist_app_identity, persist_version_file, AppIdentity,
+};
 use crate::client::helper::{VersionHelper, VersionInfo};
 use crate::config::{Config, ServerRegion};
 use crate::error::AppError;
@@ -111,6 +113,24 @@ impl MasterSyncer {
 
         let merged = {
             let _vguard = self.version_lock.lock().await;
+            // The owner is authoritative for the app identity too: the bundle's
+            // appVersion/appHash are what its accounts logged in with, so they
+            // override whatever this node has on disk before the merge (which
+            // otherwise lets on-disk values win).
+            let owner_app = AppIdentity {
+                app_version: version.app_version.clone(),
+                app_hash: version.app_hash.clone(),
+            };
+            if owner_app.is_known()
+                && persist_app_identity(self.region, &self.version_path, &owner_app).await?
+            {
+                info!(
+                    "{} Adopting owner app identity: appVersion={} appHash={}",
+                    self.region.as_str().to_uppercase(),
+                    owner_app.app_version,
+                    owner_app.app_hash.chars().take(16).collect::<String>()
+                );
+            }
             persist_version_file(self.region, &self.version_path, &version).await?
         };
         if let Some(ref helper) = self.version_helper {
@@ -566,6 +586,12 @@ mod tests {
         let mut server_config: crate::config::ServerConfig = serde_yaml::from_str("{}").unwrap();
         server_config.master_dir = root.join("master").to_string_lossy().into_owned();
         server_config.version_path = root.join("version.json").to_string_lossy().into_owned();
+        // A stale local app identity must be replaced by the owner's.
+        std::fs::write(
+            root.join("version.json"),
+            r#"{"appVersion":"0.0.1","appHash":"stale","dataVersion":"1.0.0.0"}"#,
+        )
+        .unwrap();
         server_config.master_sync.source_url = url;
         server_config.master_sync.source_token = "token".to_string();
         config.servers.insert(ServerRegion::Cn, server_config);
@@ -577,6 +603,9 @@ mod tests {
         let local = syncer.load_local_version().await;
         assert_eq!(local.data_version, "2.0.0.1");
         assert_eq!(local.cdn_version, 2);
+        // Nuverse app versions are normalized to a zero patch level.
+        assert_eq!(local.app_version, "6.0.0");
+        assert_eq!(local.app_hash, "hash");
         assert!(!syncer.sync_once().await.unwrap());
 
         let guard = syncer.sync_lock.lock().await;
