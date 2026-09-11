@@ -267,7 +267,7 @@ pub struct MasterUpdater {
     pub asset_updater_servers: Vec<AssetUpdaterInfo>,
     http_client: reqwest::Client,
     update_lock: tokio::sync::Mutex<()>,
-    /// Serializes version-file writes with the AppHashUpdater for the same region
+    /// Serializes version-file writes with the app-identity webhook for the same region
     /// so their read-modify-writes do not clobber each other's fields.
     version_lock: Arc<tokio::sync::Mutex<()>>,
     db: Option<sea_orm::DatabaseConnection>,
@@ -539,8 +539,8 @@ impl MasterUpdater {
     /// Record the account node's app identity in this node's version file
     /// before the version merge, so the committed snapshot carries the
     /// appVersion/appHash the master was actually produced with. The on-disk
-    /// values normally win the merge (they belong to the AppHashUpdater), so
-    /// this is an explicit override, taken under the same version lock.
+    /// values normally win the merge (they are owned by the app-identity
+    /// webhook), so this is an explicit override, taken under the same lock.
     async fn adopt_app_identity(&self, app: &AppIdentity) -> Result<(), AppError> {
         let _guard = self.version_lock.lock().await;
         if persist_app_identity(self.region, &self.client.config.version_path, app).await? {
@@ -997,14 +997,14 @@ treating difference as an update",
 
     /// Persist the master/asset version fields, preserving whatever
     /// `appVersion`/`appHash` are currently on disk: those belong to the
-    /// AppHashUpdater, and our in-memory copy may be minutes stale (snapshotted
+    /// app-identity webhook, and our in-memory copy may be minutes stale (snapshotted
     /// before a long download), so overwriting them here would revert a
     /// concurrent app-hash update. Returns the merged state as written.
     async fn save_version(
         &self,
         version: &VersionInfo,
     ) -> Result<VersionInfo, crate::error::AppError> {
-        // Serialize with the AppHashUpdater so neither clobbers the other's fields.
+        // Serialize with the app-identity webhook so neither clobbers the other's fields.
         let _guard = self.version_lock.lock().await;
         persist_version_file(self.region, &self.client.config.version_path, version).await
     }
@@ -1137,7 +1137,7 @@ fn merge_version_state(
     existing: &mut serde_json::Map<String, serde_json::Value>,
     incoming: &VersionInfo,
 ) -> VersionInfo {
-    // AppHashUpdater owns these two fields, so the on-disk values win unless
+    // The app-identity webhook owns these two fields, so the on-disk values win unless
     // they are empty. appVersion is still normalized for Nuverse regions.
     let app_version = effective_app_version(
         region,

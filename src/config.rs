@@ -319,8 +319,12 @@ pub struct ServerConfig {
     pub enable_master_updater: bool,
     #[serde(default)]
     pub master_updater_cron: String,
+    /// Deprecated and ignored: the polling AppHash updater was removed. App
+    /// identity is pushed to `POST /internal/app-identity` instead (by the
+    /// registry or an operator's refresh script).
     #[serde(default)]
     pub enable_app_hash_updater: bool,
+    /// Deprecated and ignored (see `enable_app_hash_updater`).
     #[serde(default)]
     pub app_hash_updater_cron: String,
     /// Remote nodes that can serve this region's game API calls. A region with
@@ -364,6 +368,10 @@ pub struct RegistryConfig {
     /// The music_metas feed the registry maintains for its consumers.
     #[serde(default)]
     pub music_metas: MusicMetasConfig,
+    /// Account nodes that must learn a new app identity: `PUT /v1/app/{region}`
+    /// on the registry pushes it to each one's `POST /internal/app-identity`.
+    #[serde(default)]
+    pub account_nodes: Vec<MasterSyncPeer>,
 }
 
 /// Periodic pull of the regional `music_metas*.json` files (see
@@ -419,10 +427,12 @@ impl Default for RegistryConfig {
             state_dir: default_registry_state_dir(),
             subscribers: Vec::new(),
             music_metas: MusicMetasConfig::default(),
+            account_nodes: Vec::new(),
         }
     }
 }
 
+/// Deprecated and ignored: kept only so existing config files still parse.
 #[derive(Debug, Clone, Deserialize)]
 pub struct AppHashSource {
     #[serde(rename = "type")]
@@ -492,6 +502,26 @@ impl Default for GitConfig {
 }
 
 impl Config {
+    /// Settings from the removed polling AppHash updater that are still
+    /// present in the file; each is ignored and worth a startup warning.
+    pub fn deprecated_app_hash_settings(&self) -> Vec<String> {
+        let mut found = Vec::new();
+        if !self.apphash_sources.is_empty() {
+            found.push("apphash_sources".to_string());
+        }
+        let mut regions: Vec<_> = self
+            .servers
+            .iter()
+            .filter(|(_, s)| s.enable_app_hash_updater)
+            .map(|(r, _)| r.as_str())
+            .collect();
+        regions.sort();
+        for region in regions {
+            found.push(format!("servers.{region}.enable_app_hash_updater"));
+        }
+        found
+    }
+
     pub fn load() -> anyhow::Result<Self> {
         let config_path =
             env::var("CONFIG_PATH").unwrap_or_else(|_| "haruki-sekai-configs.yaml".to_string());
@@ -580,6 +610,8 @@ servers:
         assert_eq!(config.registry.state_dir, "./Data/registry");
         assert!(config.registry.token.is_empty());
         assert!(config.registry.music_metas.enabled);
+        assert!(config.registry.account_nodes.is_empty());
+        assert!(config.deprecated_app_hash_settings().is_empty());
         assert!(config.registry.music_metas.inject_omakase);
         assert_eq!(config.registry.music_metas.cron, "0 */30 * * * *");
         assert_eq!(config.git.username, "");

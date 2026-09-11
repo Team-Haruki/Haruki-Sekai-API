@@ -15,9 +15,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::api::internal::MasterManifest;
 use crate::client::helper::write_file_atomic;
+use crate::client::helper::AppInfo;
 use crate::config::ServerRegion;
 use crate::error::AppError;
-use crate::updater::apphash::AppInfo;
 
 /// One publish, as recorded in the history log.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

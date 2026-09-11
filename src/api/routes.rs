@@ -112,6 +112,7 @@ pub fn create_router(state: Arc<MainAppState>) -> Router {
         .route("/internal/sekai-image", post(internal::post_sekai_image))
         .route("/internal/login-probe", post(internal::post_login_probe))
         .route("/internal/game-stream", post(internal::post_game_stream))
+        .route("/internal/app-identity", post(internal::post_app_identity))
         .route(
             "/internal/master/{server}/version",
             get(internal::get_master_version),

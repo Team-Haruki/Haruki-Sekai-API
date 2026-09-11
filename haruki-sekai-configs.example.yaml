@@ -62,17 +62,19 @@ registry: # master data manager (`master_registry` binary); ignored by the API s
   subscribers: [] # peers to POST /internal/master-updated after a region is published
   # - url: "http://100.64.0.2:9999"
   #   token: "peer-internal-token"
+  account_nodes: [] # SekaiAPI nodes to push app identity to on PUT /v1/app/{region}
+  # - url: "http://100.76.159.97:9999"
+  #   token: "that node's backend.internal_token"
   music_metas: # the registry pulls music_metas*.json for consumers (served under /v1/metas)
     enabled: true
     cron: "0 */30 * * * *"
     inject_omakase: true # add the synthetic music_id 10000 rows consumers expect
     sources: {} # per-region URL overrides; "" disables a region (defaults: sekai-data.3-3.dev)
 
-apphash_sources: # sources for apphash, to update apphash values periodically
-  # - type: file
-  #   dir: "/path/to/your/local/apphash_json/directory"
-  - type: "url"
-    url: "https://apphash.provider.com/apphash_json"
+# App identity (appVersion/appHash) is no longer polled. Push it to this node
+# with `POST /internal/app-identity` (bearer backend.internal_token, body
+# {"server":"jp","appVersion":"...","appHash":"..."}) — the registry's
+# `PUT /v1/app/{region}` does that for every `registry.account_nodes` entry.
 
 asset_updater_servers: # Haruki Sekai Asset Updater server instances
   - url: "http://127.0.0.1:12345/update_asset"
@@ -95,8 +97,6 @@ servers:
     nuverse_schema_bundle_path: ""
     enable_master_updater: true # check for master data updates periodically
     master_updater_cron: "7 * * * * *" # cron expression, this mean "execute it at every minute at second 7"
-    enable_app_hash_updater: true # check for app hash updates periodically
-    app_hash_updater_cron: "30 * * * * *" # cron expression, this mean "execute it at every minute at second 30"
 
   en:
     enabled: false
@@ -114,8 +114,6 @@ servers:
     nuverse_schema_bundle_path: ""
     enable_master_updater: true # check for master data updates periodically
     master_updater_cron: "7 * * * * *" # cron expression, this mean "execute it at every minute at second 7"
-    enable_app_hash_updater: true # check for app hash updates periodically
-    app_hash_updater_cron: "30 * * * * *" # cron expression, this mean "execute it at every minute at second 30"
 
   tw:
     enabled: false
@@ -133,8 +131,6 @@ servers:
     nuverse_schema_bundle_path: "Data/structures/nuverse_schema_bundle.json"
     enable_master_updater: true # check for master data updates periodically
     master_updater_cron: "7 * * * * *" # cron expression, this mean "execute it at every minute at second 7"
-    enable_app_hash_updater: true # check for app hash updates periodically
-    app_hash_updater_cron: "30 * * * * *" # cron expression, this mean "execute it at every minute at second 30"
 
   kr:
     enabled: false
@@ -152,8 +148,6 @@ servers:
     nuverse_schema_bundle_path: "Data/structures/nuverse_schema_bundle.json"
     enable_master_updater: true # check for master data updates periodically
     master_updater_cron: "7 * * * * *" # cron expression, this mean "execute it at every minute at second 7"
-    enable_app_hash_updater: true # check for app hash updates periodically
-    app_hash_updater_cron: "30 * * * * *" # cron expression, this mean "execute it at every minute at second 30"
 
   cn:
     enabled: false
@@ -209,5 +203,3 @@ servers:
     nuverse_schema_bundle_path: "Data/structures/nuverse_schema_bundle.json"
     enable_master_updater: true # check for master data updates periodically
     master_updater_cron: "7 * * * * *" # cron expression, this mean "execute it at every minute at second 7"
-    enable_app_hash_updater: true # check for app hash updates periodically
-    app_hash_updater_cron: "30 * * * * *" # cron expression, this mean "execute it at every minute at second 30"
