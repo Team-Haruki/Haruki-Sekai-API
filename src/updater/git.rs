@@ -292,6 +292,11 @@ reconcile the mirror by hand — no commit was made and nothing was pushed",
         // Pushing to a credential-injected URL never advances the tracking ref,
         // so `@{u}..HEAD` would keep reporting the commit we just delivered as
         // unpushed and every later tick would push again. Advance it ourselves.
+        //
+        // A failure here is deliberately NOT fatal: the commit is already on the
+        // remote, so failing the call would report a delivered push as failed and
+        // trip the health alert. The cost of a stale tracking ref is one
+        // redundant (and now fetch-checked) push on the next tick.
         if let Some(head) = self.rev_parse(repo_path, "HEAD") {
             let updated = self
                 .git(repo_path)

@@ -122,10 +122,10 @@ async fn health(State(registry): State<Shared>) -> Response {
         if let Some(state) = git.as_ref() {
             if !state.ok {
                 problems.push(format!(
-                    "{} git push failed at {}: {}",
+                    "{} git push failed at {} ({})",
                     region.as_str(),
                     state.at,
-                    state.message.as_deref().unwrap_or("unknown error")
+                    state.reason.map(|r| r.as_str()).unwrap_or("unknown")
                 ));
             }
         }
