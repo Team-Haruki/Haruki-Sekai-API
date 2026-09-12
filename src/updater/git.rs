@@ -1,6 +1,7 @@
 use std::fmt::Write as _;
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::{Child, Command, Output, Stdio};
+use std::time::{Duration, Instant};
 
 use tracing::{info, warn};
 
@@ -12,6 +13,68 @@ use crate::error::AppError;
 /// working; only a stalled connection trips it.
 const HTTP_LOW_SPEED_LIMIT_BYTES: u32 = 1000;
 const HTTP_LOW_SPEED_SECS: u32 = 30;
+
+/// Hard wall-clock ceiling for one networked git command.
+///
+/// The low-speed knobs above only bound a transfer that has already started;
+/// they say nothing about connection setup, and git has no `http.connectTimeout`.
+/// Observed on CN08 2026-09-12: with the low-speed settings active, two of five
+/// repositories still failed with `Failed to connect to github.com:443 after
+/// 134635 ms` — over two minutes wedged in connect, holding the region's sync
+/// lock. This bounds the whole command regardless of which phase stalls.
+const NETWORK_COMMAND_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Poll interval while waiting on a networked git command.
+const NETWORK_COMMAND_POLL: Duration = Duration::from_millis(100);
+
+/// Run a networked git command under [`NETWORK_COMMAND_TIMEOUT`], killing it if
+/// the deadline passes.
+///
+/// `Command::output` waits forever, which is exactly the failure we are guarding
+/// against: a wedged connect holds the caller's sync lock with no upper bound.
+/// stdout/stderr stay piped and are collected after the child exits, so the
+/// caller still gets git's own error text when it fails normally.
+///
+/// The pipes are only drained after the child is reaped, so a command that
+/// writes more than the pipe buffer (64 KiB) before exiting would block. Every
+/// caller here runs with `--quiet` and produces far less than that.
+fn run_with_timeout(cmd: Command, what: &str) -> Result<Output, AppError> {
+    run_with_deadline(cmd, what, NETWORK_COMMAND_TIMEOUT)
+}
+
+fn run_with_deadline(mut cmd: Command, what: &str, limit: Duration) -> Result<Output, AppError> {
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child: Child = cmd
+        .spawn()
+        .map_err(|e| AppError::NetworkError(format!("Failed to run git {what}: {e}")))?;
+
+    let deadline = Instant::now() + limit;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(AppError::NetworkError(format!(
+                        "git {what} exceeded {}s and was aborted",
+                        limit.as_secs()
+                    )));
+                }
+                std::thread::sleep(NETWORK_COMMAND_POLL);
+            }
+            Err(e) => {
+                return Err(AppError::NetworkError(format!(
+                    "Failed to wait for git {what}: {e}"
+                )));
+            }
+        }
+    }
+
+    child
+        .wait_with_output()
+        .map_err(|e| AppError::NetworkError(format!("Failed to read git {what} output: {e}")))
+}
 
 #[derive(Clone)]
 pub struct GitHelper {
@@ -26,7 +89,11 @@ pub struct GitHelper {
 }
 
 impl GitHelper {
+    /// `proxy` is the node-wide setting; `config.proxy`, when present, wins —
+    /// including `Some("")`, which forces git direct while the rest of the node
+    /// keeps using the shared proxy.
     pub fn new(config: &GitConfig, proxy: Option<String>) -> Self {
+        let proxy = config.proxy.clone().or(proxy);
         Self {
             username: config.username.clone(),
             email: config.email.clone(),
@@ -106,9 +173,13 @@ impl GitHelper {
         self.with_http_options(&mut cmd);
         cmd.args(["fetch", "--quiet", "origin", branch])
             .env("GIT_TERMINAL_PROMPT", "0");
-        let fetched = cmd
-            .output()
-            .map_err(|e| AppError::NetworkError(format!("Failed to run git fetch: {}", e)))?;
+        let fetched = match run_with_timeout(cmd, "fetch") {
+            Ok(output) => output,
+            Err(e) => {
+                warn!("{e}; pushing anyway");
+                return Ok(());
+            }
+        };
         if !fetched.status.success() {
             warn!(
                 "git fetch failed before push ({}); pushing anyway",
@@ -199,7 +270,18 @@ reconcile the mirror by hand — no commit was made and nothing was pushed",
         let output = command
             .output()
             .map_err(|e| AppError::NetworkError(format!("Failed to run git {}: {}", action, e)))?;
+        self.check_status(output, action)
+    }
 
+    /// Same as [`Self::run`], but for commands that talk to the network: the
+    /// child is bounded by [`NETWORK_COMMAND_TIMEOUT`] instead of being allowed
+    /// to hang indefinitely.
+    fn run_networked(&self, command: Command, action: &str) -> Result<Output, AppError> {
+        let output = run_with_timeout(command, action)?;
+        self.check_status(output, action)
+    }
+
+    fn check_status(&self, output: Output, action: &str) -> Result<Output, AppError> {
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             let detail = stderr.trim();
@@ -312,7 +394,7 @@ reconcile the mirror by hand — no commit was made and nothing was pushed",
         cmd.args(["push", &push_target, &refspec])
             .env("GIT_TERMINAL_PROMPT", "0");
 
-        self.run(cmd, "push")?;
+        self.run_networked(cmd, "push")?;
 
         // Pushing to a credential-injected URL never advances the tracking ref,
         // so `@{u}..HEAD` would keep reporting the commit we just delivered as
@@ -441,6 +523,70 @@ mod tests {
         );
     }
 
+    fn run_with_timeout_for_test(
+        cmd: Command,
+        what: &str,
+        limit: Duration,
+    ) -> Result<Output, AppError> {
+        run_with_deadline(cmd, what, limit)
+    }
+
+    #[test]
+    fn git_proxy_override_wins_over_the_node_wide_setting() {
+        let mut config = GitConfig::default();
+        // Absent: inherit whatever the node passes in.
+        let helper = GitHelper::new(&config, Some("http://node:7890".to_string()));
+        assert_eq!(helper.proxy.as_deref(), Some("http://node:7890"));
+
+        // Empty string: force direct even though the node has a proxy. This is
+        // the case that keeps a git-only proxy from capturing other consumers.
+        config.proxy = Some(String::new());
+        let helper = GitHelper::new(&config, Some("http://node:7890".to_string()));
+        assert_eq!(helper.proxy.as_deref(), Some(""));
+        assert_eq!(
+            helper.http_options(),
+            vec![
+                "http.lowSpeedLimit=1000".to_string(),
+                "http.lowSpeedTime=30".to_string()
+            ],
+            "an empty override must not emit http.proxy"
+        );
+
+        // Set: override the node-wide value.
+        config.proxy = Some("http://git-only:7890".to_string());
+        let helper = GitHelper::new(&config, Some("http://node:7890".to_string()));
+        assert_eq!(helper.proxy.as_deref(), Some("http://git-only:7890"));
+    }
+
+    #[test]
+    fn networked_commands_are_bounded_by_a_wall_clock_timeout() {
+        // `sleep` stands in for a git child wedged in connect: the low-speed
+        // knobs never fire because no transfer ever starts.
+        let mut cmd = Command::new("sleep");
+        cmd.arg("30");
+        let started = Instant::now();
+        let err = run_with_timeout_for_test(cmd, "stall", Duration::from_millis(300))
+            .expect_err("a command past its deadline must be aborted");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the abort must not wait for the child to finish on its own"
+        );
+        assert!(
+            err.to_string().contains("aborted"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn networked_commands_still_return_output_when_they_finish() {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "printf hello"]);
+        let out = run_with_timeout_for_test(cmd, "echo", Duration::from_secs(10))
+            .expect("a fast command must succeed");
+        assert!(out.status.success());
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "hello");
+    }
+
     #[test]
     fn creates_helper_from_git_config() {
         let config = GitConfig {
@@ -452,6 +598,7 @@ mod tests {
             signing_format: GitSigningFormat::Ssh,
             signing_key: "key".to_string(),
             signing_program: "ssh-keygen".to_string(),
+            proxy: None,
         };
         let helper = GitHelper::new(&config, Some("http://proxy".to_string()));
 

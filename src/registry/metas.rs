@@ -101,9 +101,14 @@ impl MusicMetasManager {
                 "Haruki-Master-Registry/{}",
                 env!("CARGO_PKG_VERSION")
             ));
-        if !config.proxy.is_empty() {
+        // `music_metas.proxy` wins over the node-wide setting when present,
+        // including an empty string, which forces this fetch direct. Keeps a
+        // proxy that exists only for git from becoming a dependency of the
+        // metas feed.
+        let proxy = settings.proxy.as_deref().unwrap_or(config.proxy.as_str());
+        if !proxy.is_empty() {
             builder = builder.proxy(
-                reqwest::Proxy::all(&config.proxy)
+                reqwest::Proxy::all(proxy)
                     .map_err(|e| AppError::NetworkError(format!("proxy: {e}")))?,
             );
         }
