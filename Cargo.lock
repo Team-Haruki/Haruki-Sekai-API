@@ -1547,6 +1547,7 @@ dependencies = [
  "hex",
  "indexmap",
  "jsonwebtoken",
+ "libc",
  "notify",
  "num_enum",
  "opendal",

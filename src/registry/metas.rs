@@ -101,11 +101,33 @@ impl MusicMetasManager {
                 "Haruki-Master-Registry/{}",
                 env!("CARGO_PKG_VERSION")
             ));
-        if !config.proxy.is_empty() {
-            builder = builder.proxy(
-                reqwest::Proxy::all(&config.proxy)
-                    .map_err(|e| AppError::NetworkError(format!("proxy: {e}")))?,
-            );
+        // `music_metas.proxy` wins over the node-wide setting when present,
+        // including an empty string, which forces this fetch direct. Keeps a
+        // proxy that exists only for git from becoming a dependency of the
+        // metas feed.
+        // Three states, matching `GitHelper`:
+        //   `music_metas.proxy` absent + top-level empty -> leave the builder
+        //       alone (reqwest may still honour HTTP_PROXY from the env; this is
+        //       the historical behaviour and is left untouched),
+        //   resolved to an empty string by an explicit override -> `no_proxy()`,
+        //       because reqwest reads HTTP_PROXY/HTTPS_PROXY by default and
+        //       "not configured" is therefore not the same as "direct",
+        //   resolved to a URL -> use it.
+        match settings.proxy.as_deref() {
+            Some("") => builder = builder.no_proxy(),
+            Some(proxy) => {
+                builder = builder.proxy(
+                    reqwest::Proxy::all(proxy)
+                        .map_err(|e| AppError::NetworkError(format!("proxy: {e}")))?,
+                );
+            }
+            None if !config.proxy.is_empty() => {
+                builder = builder.proxy(
+                    reqwest::Proxy::all(&config.proxy)
+                        .map_err(|e| AppError::NetworkError(format!("proxy: {e}")))?,
+                );
+            }
+            None => {}
         }
         let http = builder
             .build()

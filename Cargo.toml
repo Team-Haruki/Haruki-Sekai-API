@@ -50,3 +50,7 @@ lto = "thin"
 codegen-units = 1
 panic = "abort"
 strip = true
+
+[target.'cfg(unix)'.dependencies]
+# Only for killing a timed-out git process group (kill(-pgid)); std has no API.
+libc = "0.2"

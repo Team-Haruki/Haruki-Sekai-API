@@ -160,6 +160,12 @@ pub struct GitConfig {
     pub signing_key: String,
     #[serde(default)]
     pub signing_program: String,
+    /// Proxy override for git's networked commands. Absent inherits the
+    /// top-level `proxy`; an empty string forces a direct connection even when
+    /// the top-level proxy is set. Lets a node route git through a proxy
+    /// without dragging every other outbound consumer along with it.
+    #[serde(default)]
+    pub proxy: Option<String>,
 }
 
 /// A remote Haruki Sekai API node that can serve this region's game API calls
@@ -389,6 +395,13 @@ pub struct MusicMetasConfig {
     /// Per-region upstream URL overrides; an empty string disables a region.
     #[serde(default)]
     pub sources: HashMap<ServerRegion, String>,
+    /// Proxy override for the music_metas fetch. Absent inherits the top-level
+    /// `proxy`; an empty string forces a direct connection. A node that needs a
+    /// proxy only for git (CN08 reaches github.com unreliably but sekai-data
+    /// directly) sets this to `''` so a dead proxy node cannot take the metas
+    /// feed down with it.
+    #[serde(default)]
+    pub proxy: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -406,6 +419,7 @@ impl Default for MusicMetasConfig {
             cron: default_music_metas_cron(),
             inject_omakase: true,
             sources: HashMap::new(),
+            proxy: None,
         }
     }
 }
@@ -497,6 +511,7 @@ impl Default for GitConfig {
             signing_format: GitSigningFormat::default(),
             signing_key: "".to_string(),
             signing_program: "".to_string(),
+            proxy: None,
         }
     }
 }
