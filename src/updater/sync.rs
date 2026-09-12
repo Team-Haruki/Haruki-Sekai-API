@@ -62,6 +62,20 @@ pub struct MasterSyncer {
     /// Set when the last DB ingest failed so the next trigger retries even
     /// with an unchanged version (same contract as MasterUpdater).
     ingest_failed: AtomicBool,
+    /// Outcome of the last git push attempt, so an operator-facing endpoint can
+    /// report a mirror that stopped moving. A failed push is otherwise invisible:
+    /// publishing continues and only a log line records it.
+    git_state: parking_lot::Mutex<Option<GitPushState>>,
+}
+
+/// What happened the last time this region's mirror was pushed.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitPushState {
+    pub ok: bool,
+    pub at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
 }
 
 impl MasterSyncer {
@@ -277,6 +291,20 @@ trigger): {e:#}",
         self.ingest_failed.store(!ok, Ordering::Relaxed);
     }
 
+    /// The last git push outcome for this region, `None` before the first
+    /// attempt or when this node does not push at all.
+    pub fn git_state(&self) -> Option<GitPushState> {
+        self.git_state.lock().clone()
+    }
+
+    fn record_git_state(&self, ok: bool, message: Option<String>) {
+        *self.git_state.lock() = Some(GitPushState {
+            ok,
+            at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            message,
+        });
+    }
+
     async fn git_push(&self, data_version: &str) {
         let Some(ref git_helper) = self.git_helper else {
             return;
@@ -290,10 +318,19 @@ trigger): {e:#}",
         })
         .await;
         match push {
-            Ok(Ok(true)) => info!("{} Git pushed synced changes successfully", region_upper),
-            Ok(Ok(false)) => {}
-            Ok(Err(e)) => error!("{} Git push after sync failed: {}", region_upper, e),
-            Err(e) => error!("{} Git push task after sync failed: {}", region_upper, e),
+            Ok(Ok(true)) => {
+                info!("{} Git pushed synced changes successfully", region_upper);
+                self.record_git_state(true, None);
+            }
+            Ok(Ok(false)) => self.record_git_state(true, Some("nothing to push".to_string())),
+            Ok(Err(e)) => {
+                error!("{} Git push after sync failed: {}", region_upper, e);
+                self.record_git_state(false, Some(e.to_string()));
+            }
+            Err(e) => {
+                error!("{} Git push task after sync failed: {}", region_upper, e);
+                self.record_git_state(false, Some(e.to_string()));
+            }
         }
     }
 }
@@ -420,6 +457,7 @@ pub fn build_syncers(
                 version_lock,
                 sync_lock: tokio::sync::Mutex::new(()),
                 ingest_failed: AtomicBool::new(false),
+                git_state: parking_lot::Mutex::new(None),
             }),
         );
     }
@@ -615,7 +653,10 @@ mod tests {
         assert!(!syncer.sync_once().await.unwrap());
         drop(guard);
         syncer.ingest().await;
+        assert!(syncer.git_state().is_none(), "no push attempted yet");
         syncer.git_push("2.0.0.1").await;
+        // Without a git helper the push is a no-op and records nothing.
+        assert!(syncer.git_state().is_none());
         server.abort();
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -646,6 +687,7 @@ mod tests {
             version_lock: Arc::new(tokio::sync::Mutex::new(())),
             sync_lock: tokio::sync::Mutex::new(()),
             ingest_failed: AtomicBool::new(false),
+            git_state: parking_lot::Mutex::new(None),
         };
         assert_eq!(syncer.load_local_version().await.data_version, "");
         assert!(syncer.fetch_remote_version().await.is_err());
