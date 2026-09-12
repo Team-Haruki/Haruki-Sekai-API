@@ -15,6 +15,10 @@ concurrency:
 jobs:
   analyze:
     name: Analyze
+    # Dependabot pull requests run with the dependabot secrets scope, which does
+    # not include SONAR_TOKEN, so the scan can only ever fail on them. Skipping
+    # keeps dependency bumps mergeable; main-branch analysis is unaffected.
+    if: github.actor != 'dependabot[bot]'
     runs-on: ubuntu-latest
     permissions:
       contents: read
