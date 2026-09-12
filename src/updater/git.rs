@@ -38,28 +38,97 @@ const NETWORK_COMMAND_POLL: Duration = Duration::from_millis(100);
 /// The pipes are only drained after the child is reaped, so a command that
 /// writes more than the pipe buffer (64 KiB) before exiting would block. Every
 /// caller here runs with `--quiet` and produces far less than that.
+/// How long to wait for a killed process group to be reaped before giving up.
+/// SIGKILL is not refusable, so this only guards against a child wedged in an
+/// uninterruptible syscall; we must not block the caller either way.
+const NETWORK_COMMAND_REAP_TIMEOUT: Duration = Duration::from_secs(5);
+
 fn run_with_timeout(cmd: Command, what: &str) -> Result<Output, AppError> {
     run_with_deadline(cmd, what, NETWORK_COMMAND_TIMEOUT)
 }
 
+/// Kill a timed-out child and everything it spawned.
+///
+/// `git fetch` / `git push` do the network work in a `git-remote-https`
+/// grandchild, which is the process actually wedged in connect. `Child::kill`
+/// signals only the direct child, so the grandchild would survive with the
+/// socket still open. The child is spawned into its own process group (see
+/// `run_with_deadline`), so one `kill(-pgid)` takes the whole tree.
+///
+/// Returns once the direct child is reaped or [`NETWORK_COMMAND_REAP_TIMEOUT`]
+/// passes, so a failure to reap cannot hang the caller either.
+fn terminate_group(child: &mut Child) {
+    #[cfg(unix)]
+    {
+        let pgid = child.id() as i32;
+        // SAFETY: plain kill(2); a negative pid addresses the process group,
+        // which is this child's own group because it was spawned with
+        // `process_group(0)`. Never targets our own group.
+        unsafe {
+            libc::kill(-pgid, libc::SIGKILL);
+        }
+    }
+    // Also signal the direct child: covers non-unix targets and the case where
+    // the group kill failed (for example the child already exited and its pid
+    // was recycled as a group id we no longer own).
+    let _ = child.kill();
+
+    let reap_by = Instant::now() + NETWORK_COMMAND_REAP_TIMEOUT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) | Err(_) => return,
+            Ok(None) => {
+                if Instant::now() >= reap_by {
+                    warn!(
+                        "git child {} did not exit within {}s of SIGKILL; leaving it",
+                        child.id(),
+                        NETWORK_COMMAND_REAP_TIMEOUT.as_secs()
+                    );
+                    return;
+                }
+                std::thread::sleep(NETWORK_COMMAND_POLL);
+            }
+        }
+    }
+}
+
 fn run_with_deadline(mut cmd: Command, what: &str, limit: Duration) -> Result<Output, AppError> {
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        // Own process group so a timeout can take the whole git process tree.
+        cmd.process_group(0);
+    }
     let mut child: Child = cmd
         .spawn()
         .map_err(|e| AppError::NetworkError(format!("Failed to run git {what}: {e}")))?;
 
+    // Drain both pipes on their own threads. Polling `try_wait` without reading
+    // would let a child that fills a pipe buffer (64 KiB) block on write and
+    // never exit, so a command that would have succeeded gets killed at the
+    // deadline instead.
+    fn drain<R: std::io::Read + Send + 'static>(
+        stream: Option<R>,
+    ) -> std::thread::JoinHandle<Vec<u8>> {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            if let Some(mut stream) = stream {
+                let _ = stream.read_to_end(&mut buf);
+            }
+            buf
+        })
+    }
+    let stdout_reader = drain(child.stdout.take());
+    let stderr_reader = drain(child.stderr.take());
+
     let deadline = Instant::now() + limit;
-    loop {
+    let status = loop {
         match child.try_wait() {
-            Ok(Some(_)) => break,
+            Ok(Some(status)) => break Some(status),
             Ok(None) => {
                 if Instant::now() >= deadline {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Err(AppError::NetworkError(format!(
-                        "git {what} exceeded {}s and was aborted",
-                        limit.as_secs()
-                    )));
+                    break None;
                 }
                 std::thread::sleep(NETWORK_COMMAND_POLL);
             }
@@ -69,11 +138,27 @@ fn run_with_deadline(mut cmd: Command, what: &str, limit: Duration) -> Result<Ou
                 )));
             }
         }
-    }
+    };
 
-    child
-        .wait_with_output()
-        .map_err(|e| AppError::NetworkError(format!("Failed to read git {what} output: {e}")))
+    let Some(status) = status else {
+        terminate_group(&mut child);
+        // The readers are deliberately not joined here: if anything in the tree
+        // outlived the kill it would still hold the write end, and joining would
+        // reintroduce the very hang this function exists to prevent. They end on
+        // EOF and are not needed for the error.
+        return Err(AppError::NetworkError(format!(
+            "git {what} exceeded {}s and was aborted",
+            limit.as_secs()
+        )));
+    };
+
+    let stdout = stdout_reader.join().unwrap_or_default();
+    let stderr = stderr_reader.join().unwrap_or_default();
+    Ok(Output {
+        status,
+        stdout,
+        stderr,
+    })
 }
 
 #[derive(Clone)]
@@ -228,10 +313,14 @@ reconcile the mirror by hand — no commit was made and nothing was pushed",
     /// given window. They do not punish a slow-but-progressing transfer.
     fn http_options(&self) -> Vec<String> {
         let mut options = Vec::new();
-        if let Some(proxy) = self.proxy.as_deref() {
-            if !proxy.is_empty() {
-                options.push(format!("http.proxy={}", proxy));
-            }
+        match self.proxy.as_deref() {
+            Some(proxy) if !proxy.is_empty() => options.push(format!("http.proxy={proxy}")),
+            // An explicitly empty proxy means "force direct". Emitting an empty
+            // `http.proxy` is what actually achieves that: git otherwise falls
+            // back to `http_proxy`/`https_proxy` from the environment, which on
+            // a node that proxies docker pulls is set process-wide.
+            Some(_) => options.push("http.proxy=".to_string()),
+            None => {}
         }
         options.push(format!("http.lowSpeedLimit={}", HTTP_LOW_SPEED_LIMIT_BYTES));
         options.push(format!("http.lowSpeedTime={}", HTTP_LOW_SPEED_SECS));
@@ -517,9 +606,13 @@ mod tests {
         let mut empty_proxy = helper("");
         empty_proxy.proxy = Some(String::new());
         assert_eq!(
-            empty_proxy.http_options().len(),
-            2,
-            "an empty proxy is not passed"
+            empty_proxy.http_options(),
+            vec![
+                "http.proxy=".to_string(),
+                "http.lowSpeedLimit=1000".to_string(),
+                "http.lowSpeedTime=30".to_string()
+            ],
+            "an explicit empty proxy must override any ambient http_proxy env var"
         );
     }
 
@@ -546,10 +639,11 @@ mod tests {
         assert_eq!(
             helper.http_options(),
             vec![
+                "http.proxy=".to_string(),
                 "http.lowSpeedLimit=1000".to_string(),
                 "http.lowSpeedTime=30".to_string()
             ],
-            "an empty override must not emit http.proxy"
+            "forcing direct must be explicit so an ambient http_proxy cannot win"
         );
 
         // Set: override the node-wide value.
@@ -585,6 +679,53 @@ mod tests {
             .expect("a fast command must succeed");
         assert!(out.status.success());
         assert_eq!(String::from_utf8_lossy(&out.stdout), "hello");
+    }
+
+    /// CodeRabbit review on PR #90: polling `try_wait` without reading the pipes
+    /// lets a chatty child block on write and get killed at the deadline even
+    /// though it would have finished.
+    #[test]
+    fn output_larger_than_a_pipe_buffer_does_not_trip_the_deadline() {
+        // 512 KiB on each stream, well past the 64 KiB pipe buffer.
+        let mut cmd = Command::new("sh");
+        cmd.args([
+            "-c",
+            "yes abcdefghijklmnopqrstuvwxyz | head -c 524288;              yes abcdefghijklmnopqrstuvwxyz | head -c 524288 >&2",
+        ]);
+        let out = run_with_timeout_for_test(cmd, "chatty", Duration::from_secs(20))
+            .expect("a command that only writes a lot must not be aborted");
+        assert!(out.status.success());
+        assert_eq!(out.stdout.len(), 524288, "stdout was truncated");
+        assert_eq!(out.stderr.len(), 524288, "stderr was truncated");
+    }
+
+    /// CodeRabbit review on PR #90: git does the network work in a
+    /// `git-remote-https` grandchild, so killing only the direct child leaves
+    /// the stuck process alive with its socket open.
+    #[cfg(unix)]
+    #[test]
+    fn a_timeout_kills_descendants_not_just_the_direct_child() {
+        let marker = std::env::temp_dir().join(format!(
+            "haruki-git-timeout-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        let _ = std::fs::remove_file(&marker);
+        // The direct child exits immediately; the grandchild outlives it and
+        // would create the marker unless the whole group is killed.
+        let script = format!("( sleep 3; touch {} ) & sleep 30", marker.display());
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", &script]);
+        run_with_timeout_for_test(cmd, "descendants", Duration::from_millis(300))
+            .expect_err("the command must time out");
+
+        std::thread::sleep(Duration::from_secs(5));
+        let survived = marker.exists();
+        let _ = std::fs::remove_file(&marker);
+        assert!(
+            !survived,
+            "a descendant outlived the timeout and kept running"
+        );
     }
 
     #[test]
