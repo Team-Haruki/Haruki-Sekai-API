@@ -68,14 +68,43 @@ pub struct MasterSyncer {
     git_state: parking_lot::Mutex<Option<GitPushState>>,
 }
 
-/// What happened the last time this region's mirror was pushed.
+/// What happened the last time this region's mirror was pushed. `reason` is a
+/// closed set rather than the git error text: this is reported by `/health`,
+/// and git's stderr carries remote URLs and local paths. The full error is in
+/// the log line emitted next to it.
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GitPushState {
     pub ok: bool,
     pub at: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub message: Option<String>,
+    pub reason: Option<GitPushFailure>,
+}
+
+/// Why a push did not land, in terms an operator can act on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GitPushFailure {
+    /// The mirror carries commits this clone does not have; reconcile by hand.
+    RemoteDiverged,
+    /// Transport, credentials or the git invocation itself failed.
+    PushFailed,
+}
+
+impl GitPushFailure {
+    fn of(error: &AppError) -> Self {
+        match error {
+            AppError::UpstreamData(message) if message.contains("diverged") => Self::RemoteDiverged,
+            _ => Self::PushFailed,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::RemoteDiverged => "remote_diverged",
+            Self::PushFailed => "push_failed",
+        }
+    }
 }
 
 impl MasterSyncer {
@@ -96,7 +125,20 @@ impl MasterSyncer {
         let local = self.load_local_version().await;
         let need = need_sync(&remote, &local);
         let retry_ingest = !need && self.ingest_failed.load(Ordering::Relaxed);
-        if !need && !retry_ingest {
+        // A failed push must be retried at the CURRENT version: the version file
+        // is persisted before the push, so without this the mirror would stay
+        // behind until some later upstream release happened to come along —
+        // exactly the freeze this change set exists to end.
+        let retry_push = !need && self.git_push_failed();
+        if !need && !retry_ingest && !retry_push {
+            return Ok(false);
+        }
+        if retry_push && !retry_ingest {
+            warn!(
+                "{} Previous git push failed; retrying at the current version...",
+                self.region.as_str().to_uppercase()
+            );
+            self.git_push(&local.data_version).await;
             return Ok(false);
         }
         if retry_ingest {
@@ -297,11 +339,18 @@ trigger): {e:#}",
         self.git_state.lock().clone()
     }
 
-    fn record_git_state(&self, ok: bool, message: Option<String>) {
+    fn git_push_failed(&self) -> bool {
+        self.git_state
+            .lock()
+            .as_ref()
+            .is_some_and(|state| !state.ok)
+    }
+
+    fn record_git_state(&self, ok: bool, reason: Option<GitPushFailure>) {
         *self.git_state.lock() = Some(GitPushState {
             ok,
             at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-            message,
+            reason,
         });
     }
 
@@ -322,14 +371,14 @@ trigger): {e:#}",
                 info!("{} Git pushed synced changes successfully", region_upper);
                 self.record_git_state(true, None);
             }
-            Ok(Ok(false)) => self.record_git_state(true, Some("nothing to push".to_string())),
+            Ok(Ok(false)) => self.record_git_state(true, None),
             Ok(Err(e)) => {
                 error!("{} Git push after sync failed: {}", region_upper, e);
-                self.record_git_state(false, Some(e.to_string()));
+                self.record_git_state(false, Some(GitPushFailure::of(&e)));
             }
             Err(e) => {
                 error!("{} Git push task after sync failed: {}", region_upper, e);
-                self.record_git_state(false, Some(e.to_string()));
+                self.record_git_state(false, Some(GitPushFailure::PushFailed));
             }
         }
     }
@@ -654,9 +703,21 @@ mod tests {
         drop(guard);
         syncer.ingest().await;
         assert!(syncer.git_state().is_none(), "no push attempted yet");
+        assert!(!syncer.git_push_failed());
         syncer.git_push("2.0.0.1").await;
         // Without a git helper the push is a no-op and records nothing.
         assert!(syncer.git_state().is_none());
+
+        // A recorded failure makes the next trigger retry the push even though
+        // the version has not moved, and clears once the push lands.
+        syncer.record_git_state(false, Some(GitPushFailure::RemoteDiverged));
+        assert!(syncer.git_push_failed());
+        assert!(
+            !syncer.sync_once().await.unwrap(),
+            "retry pushes, applies nothing"
+        );
+        syncer.record_git_state(true, None);
+        assert!(!syncer.git_push_failed());
         server.abort();
         std::fs::remove_dir_all(root).unwrap();
     }
