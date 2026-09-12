@@ -452,6 +452,15 @@ mod tests {
         ));
     }
 
+    /// Give a scratch repository a deterministic identity and no commit signing,
+    /// so the test does not depend on the machine's global git configuration.
+    fn set_identity(repo: &std::path::Path) {
+        let repo = repo.to_str().unwrap();
+        run_git(&["-C", repo, "config", "user.name", "test"]);
+        run_git(&["-C", repo, "config", "user.email", "test@example.test"]);
+        run_git(&["-C", repo, "config", "commit.gpgsign", "false"]);
+    }
+
     fn run_git_out(args: &[&str]) -> String {
         let output = Command::new("git").args(args).output().unwrap();
         assert!(
@@ -479,8 +488,12 @@ mod tests {
         let remote = root.join("remote.git");
         let work = root.join("work");
         std::fs::create_dir_all(&root).unwrap();
-        run_git(&["init", "--bare", remote.to_str().unwrap()]);
+        run_git(&["init", "--bare", "-b", "main", remote.to_str().unwrap()]);
         run_git(&["init", "-b", "main", work.to_str().unwrap()]);
+        // Do not inherit the runner's git identity or default-branch setting:
+        // `git stash`/`git merge` below create commits, and CI runners have
+        // neither a global identity nor init.defaultBranch=main.
+        set_identity(&work);
         run_git(&[
             "-C",
             work.to_str().unwrap(),
@@ -534,20 +547,17 @@ mod tests {
         run_git(&[
             "clone",
             "-q",
+            "--branch",
+            "main",
             remote.to_str().unwrap(),
             other.to_str().unwrap(),
         ]);
+        set_identity(&other);
         std::fs::write(other.join("manual.json"), "{\"by\":\"hand\"}").unwrap();
         run_git(&["-C", other.to_str().unwrap(), "add", "-A"]);
         run_git(&[
             "-C",
             other.to_str().unwrap(),
-            "-c",
-            "user.name=operator",
-            "-c",
-            "user.email=op@example.test",
-            "-c",
-            "commit.gpgsign=false",
             "commit",
             "-q",
             "-m",
@@ -584,12 +594,6 @@ mod tests {
         run_git(&[
             "-C",
             work.to_str().unwrap(),
-            "-c",
-            "user.name=bot",
-            "-c",
-            "user.email=bot@example.test",
-            "-c",
-            "commit.gpgsign=false",
             "merge",
             "-q",
             "--no-edit",
