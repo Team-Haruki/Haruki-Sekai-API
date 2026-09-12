@@ -7,6 +7,12 @@ use tracing::{info, warn};
 use crate::config::{GitConfig, GitSigningFormat};
 use crate::error::AppError;
 
+/// Abort a network transfer that stays under this many bytes per second for
+/// [`HTTP_LOW_SPEED_SECS`]. Generous enough that a genuinely slow link keeps
+/// working; only a stalled connection trips it.
+const HTTP_LOW_SPEED_LIMIT_BYTES: u32 = 1000;
+const HTTP_LOW_SPEED_SECS: u32 = 30;
+
 #[derive(Clone)]
 pub struct GitHelper {
     pub username: String,
@@ -97,7 +103,7 @@ impl GitHelper {
     /// push is attempted and will surface its own error.
     fn check_remote_not_ahead(&self, repo_path: &str, branch: &str) -> Result<(), AppError> {
         let mut cmd = self.git(repo_path);
-        self.with_proxy(&mut cmd);
+        self.with_http_options(&mut cmd);
         cmd.args(["fetch", "--quiet", "origin", branch])
             .env("GIT_TERMINAL_PROMPT", "0");
         let fetched = cmd
@@ -140,11 +146,30 @@ reconcile the mirror by hand — no commit was made and nothing was pushed",
             .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
     }
 
-    fn with_proxy(&self, cmd: &mut Command) {
+    /// `-c` settings for every git command that talks to the network: the
+    /// configured proxy, plus a low-speed abort.
+    ///
+    /// git has no total timeout, and a stalled HTTPS transfer hangs forever —
+    /// observed on 2026-09-12, where a `git fetch` to GitHub sat with an
+    /// established connection and an unacknowledged send queue for minutes,
+    /// holding the region's sync lock the whole time. The low-speed knobs are
+    /// git's own answer: abort once throughput stays under the limit for the
+    /// given window. They do not punish a slow-but-progressing transfer.
+    fn http_options(&self) -> Vec<String> {
+        let mut options = Vec::new();
         if let Some(proxy) = self.proxy.as_deref() {
             if !proxy.is_empty() {
-                cmd.arg("-c").arg(format!("http.proxy={}", proxy));
+                options.push(format!("http.proxy={}", proxy));
             }
+        }
+        options.push(format!("http.lowSpeedLimit={}", HTTP_LOW_SPEED_LIMIT_BYTES));
+        options.push(format!("http.lowSpeedTime={}", HTTP_LOW_SPEED_SECS));
+        options
+    }
+
+    fn with_http_options(&self, cmd: &mut Command) {
+        for option in self.http_options() {
+            cmd.arg("-c").arg(option);
         }
     }
 
@@ -283,7 +308,7 @@ reconcile the mirror by hand — no commit was made and nothing was pushed",
         let refspec = format!("refs/heads/{branch}:refs/heads/{branch}");
 
         let mut cmd = self.git(repo_path);
-        self.with_proxy(&mut cmd);
+        self.with_http_options(&mut cmd);
         cmd.args(["push", &push_target, &refspec])
             .env("GIT_TERMINAL_PROMPT", "0");
 
@@ -384,6 +409,36 @@ mod tests {
             signing_program: String::new(),
             proxy: None,
         }
+    }
+
+    #[test]
+    fn network_commands_carry_a_stall_abort_and_the_proxy() {
+        let plain = helper("");
+        assert_eq!(
+            plain.http_options(),
+            vec![
+                "http.lowSpeedLimit=1000".to_string(),
+                "http.lowSpeedTime=30".to_string()
+            ],
+            "every networked git call must be able to give up on a stalled transfer"
+        );
+        let mut proxied = helper("");
+        proxied.proxy = Some("http://127.0.0.1:7890".to_string());
+        assert_eq!(
+            proxied.http_options(),
+            vec![
+                "http.proxy=http://127.0.0.1:7890".to_string(),
+                "http.lowSpeedLimit=1000".to_string(),
+                "http.lowSpeedTime=30".to_string()
+            ]
+        );
+        let mut empty_proxy = helper("");
+        empty_proxy.proxy = Some(String::new());
+        assert_eq!(
+            empty_proxy.http_options().len(),
+            2,
+            "an empty proxy is not passed"
+        );
     }
 
     #[test]
