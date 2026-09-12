@@ -2,7 +2,7 @@ use std::fmt::Write as _;
 use std::path::Path;
 use std::process::{Command, Output};
 
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::config::{GitConfig, GitSigningFormat};
 use crate::error::AppError;
@@ -42,6 +42,13 @@ impl GitHelper {
             )));
         }
 
+        // Learn the remote's position BEFORE committing. Pushing without this is
+        // how a hand-made commit on the mirror silently froze every later update:
+        // the push was rejected, the error was logged, and the caller carried on
+        // publishing as if the mirror had moved.
+        let branch = self.current_branch(repo_path)?;
+        self.check_remote_not_ahead(repo_path, &branch)?;
+
         if !self.has_changes(repo_path)? {
             if !self.has_unpushed_commits(repo_path)? {
                 info!("No changes to commit or push");
@@ -60,9 +67,85 @@ impl GitHelper {
             info!("Committed changes: {}", commit_msg);
         }
 
-        self.push(repo_path)?;
+        self.push(repo_path, &branch)?;
         info!("Pushed changes successfully");
         Ok(true)
+    }
+
+    /// The checked-out branch name.
+    fn current_branch(&self, repo_path: &str) -> Result<String, AppError> {
+        let head = self.run(
+            {
+                let mut c = self.git(repo_path);
+                c.args(["symbolic-ref", "--short", "HEAD"]);
+                c
+            },
+            "symbolic-ref",
+        )?;
+        Ok(String::from_utf8_lossy(&head.stdout).trim().to_string())
+    }
+
+    /// Fetch the remote branch and refuse to proceed when it carries commits
+    /// this clone does not have (someone edited the mirror directly, or another
+    /// node is pushing the same repository). A plain `git push` would be
+    /// rejected as a non-fast-forward and the caller would only see a generic
+    /// failure; this names the cause and, crucially, fires BEFORE a local commit
+    /// is created, so the working tree is left reconcilable instead of stacking
+    /// an unpushable commit on top of a diverged history.
+    ///
+    /// A fetch failure (offline, dead proxy) is NOT treated as divergence — the
+    /// push is attempted and will surface its own error.
+    fn check_remote_not_ahead(&self, repo_path: &str, branch: &str) -> Result<(), AppError> {
+        let mut cmd = self.git(repo_path);
+        self.with_proxy(&mut cmd);
+        cmd.args(["fetch", "--quiet", "origin", branch])
+            .env("GIT_TERMINAL_PROMPT", "0");
+        let fetched = cmd
+            .output()
+            .map_err(|e| AppError::NetworkError(format!("Failed to run git fetch: {}", e)))?;
+        if !fetched.status.success() {
+            warn!(
+                "git fetch failed before push ({}); pushing anyway",
+                self.redact(String::from_utf8_lossy(&fetched.stderr).trim())
+            );
+            return Ok(());
+        }
+
+        // FETCH_HEAD is the remote tip we just read; an ancestor of HEAD means we
+        // are strictly ahead (the normal case) or equal.
+        let ancestor = self
+            .git(repo_path)
+            .args(["merge-base", "--is-ancestor", "FETCH_HEAD", "HEAD"])
+            .output()
+            .map_err(|e| AppError::NetworkError(format!("Failed to run git merge-base: {}", e)))?;
+        if ancestor.status.success() {
+            return Ok(());
+        }
+        let remote = self.rev_parse(repo_path, "FETCH_HEAD").unwrap_or_default();
+        let local = self.rev_parse(repo_path, "HEAD").unwrap_or_default();
+        Err(AppError::UpstreamData(format!(
+            "remote {} has diverged from this clone (remote {}, local {}); \
+reconcile the mirror by hand — no commit was made and nothing was pushed",
+            branch,
+            short(&remote),
+            short(&local),
+        )))
+    }
+
+    fn rev_parse(&self, repo_path: &str, rev: &str) -> Option<String> {
+        let output = self.git(repo_path).args(["rev-parse", rev]).output().ok()?;
+        output
+            .status
+            .success()
+            .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
+    }
+
+    fn with_proxy(&self, cmd: &mut Command) {
+        if let Some(proxy) = self.proxy.as_deref() {
+            if !proxy.is_empty() {
+                cmd.arg("-c").arg(format!("http.proxy={}", proxy));
+            }
+        }
     }
 
     fn git(&self, repo_path: &str) -> Command {
@@ -181,17 +264,7 @@ impl GitHelper {
         Ok(())
     }
 
-    fn push(&self, repo_path: &str) -> Result<(), AppError> {
-        let head = self.run(
-            {
-                let mut c = self.git(repo_path);
-                c.args(["symbolic-ref", "--short", "HEAD"]);
-                c
-            },
-            "symbolic-ref",
-        )?;
-        let branch = String::from_utf8_lossy(&head.stdout).trim().to_string();
-
+    fn push(&self, repo_path: &str, branch: &str) -> Result<(), AppError> {
         let push_target = if self.password.is_empty() {
             "origin".to_string()
         } else {
@@ -210,16 +283,47 @@ impl GitHelper {
         let refspec = format!("refs/heads/{branch}:refs/heads/{branch}");
 
         let mut cmd = self.git(repo_path);
-        if let Some(proxy) = self.proxy.as_deref() {
-            if !proxy.is_empty() {
-                cmd.arg("-c").arg(format!("http.proxy={}", proxy));
-            }
-        }
+        self.with_proxy(&mut cmd);
         cmd.args(["push", &push_target, &refspec])
             .env("GIT_TERMINAL_PROMPT", "0");
 
         self.run(cmd, "push")?;
+
+        // Pushing to a credential-injected URL never advances the tracking ref,
+        // so `@{u}..HEAD` would keep reporting the commit we just delivered as
+        // unpushed and every later tick would push again. Advance it ourselves.
+        if let Some(head) = self.rev_parse(repo_path, "HEAD") {
+            let updated = self
+                .git(repo_path)
+                .args([
+                    "update-ref",
+                    &format!("refs/remotes/origin/{branch}"),
+                    &head,
+                ])
+                .output();
+            match updated {
+                Ok(output) if output.status.success() => {}
+                Ok(output) => warn!(
+                    "Pushed, but failed to advance refs/remotes/origin/{}: {}",
+                    branch,
+                    self.redact(String::from_utf8_lossy(&output.stderr).trim())
+                ),
+                Err(e) => warn!(
+                    "Pushed, but failed to advance refs/remotes/origin/{}: {}",
+                    branch, e
+                ),
+            }
+        }
         Ok(())
+    }
+}
+
+/// First 8 characters of an object id, for error messages.
+fn short(oid: &str) -> &str {
+    if oid.len() > 8 {
+        &oid[..8]
+    } else {
+        oid
     }
 }
 
@@ -348,6 +452,17 @@ mod tests {
         ));
     }
 
+    fn run_git_out(args: &[&str]) -> String {
+        let output = Command::new("git").args(args).output().unwrap();
+        assert!(
+            output.status.success(),
+            "git {:?}: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap()
+    }
+
     fn run_git(args: &[&str]) {
         let output = Command::new("git").args(args).output().unwrap();
         assert!(
@@ -382,18 +497,107 @@ mod tests {
 
         std::fs::write(work.join("master.json"), "{\"v\":2}").unwrap();
         assert!(git.push_changes(work.to_str().unwrap(), "1.0.1").unwrap());
-        let log = Command::new("git")
+        let remote_log = |remote: &std::path::Path| {
+            let out = Command::new("git")
+                .args([
+                    "--git-dir",
+                    remote.to_str().unwrap(),
+                    "log",
+                    "--format=%s",
+                    "main",
+                ])
+                .output()
+                .unwrap();
+            String::from_utf8(out.stdout).unwrap()
+        };
+        assert!(remote_log(&remote).contains("Sekai master data version 1.0.1"));
+
+        // The tracking ref advanced, so a delivered commit is not re-pushed.
+        let tracked = Command::new("git")
             .args([
-                "--git-dir",
-                remote.to_str().unwrap(),
-                "log",
-                "--format=%s",
-                "main",
+                "-C",
+                work.to_str().unwrap(),
+                "rev-parse",
+                "refs/remotes/origin/main",
             ])
             .output()
             .unwrap();
-        let log = String::from_utf8(log.stdout).unwrap();
-        assert!(log.contains("Sekai master data version 1.0.1"));
+        assert!(tracked.status.success());
+        assert_eq!(
+            String::from_utf8_lossy(&tracked.stdout).trim(),
+            run_git_out(&["-C", work.to_str().unwrap(), "rev-parse", "HEAD"]).trim()
+        );
+
+        // A commit made directly on the mirror must stop the next push instead of
+        // stacking an unpushable commit — and must leave the change uncommitted.
+        let other = root.join("other");
+        run_git(&[
+            "clone",
+            "-q",
+            remote.to_str().unwrap(),
+            other.to_str().unwrap(),
+        ]);
+        std::fs::write(other.join("manual.json"), "{\"by\":\"hand\"}").unwrap();
+        run_git(&["-C", other.to_str().unwrap(), "add", "-A"]);
+        run_git(&[
+            "-C",
+            other.to_str().unwrap(),
+            "-c",
+            "user.name=operator",
+            "-c",
+            "user.email=op@example.test",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-q",
+            "-m",
+            "[Fix] Update app version",
+        ]);
+        run_git(&[
+            "-C",
+            other.to_str().unwrap(),
+            "push",
+            "-q",
+            "origin",
+            "main",
+        ]);
+
+        std::fs::write(work.join("master.json"), "{\"v\":3}").unwrap();
+        let head_before = run_git_out(&["-C", work.to_str().unwrap(), "rev-parse", "HEAD"]);
+        let err = git
+            .push_changes(work.to_str().unwrap(), "1.0.2")
+            .expect_err("a diverged mirror must not be pushed over");
+        assert!(
+            matches!(&err, AppError::UpstreamData(message) if message.contains("diverged")),
+            "unexpected error: {err:?}"
+        );
+        assert_eq!(
+            run_git_out(&["-C", work.to_str().unwrap(), "rev-parse", "HEAD"]),
+            head_before,
+            "no commit may be created while the remote is ahead"
+        );
+        assert!(!remote_log(&remote).contains("Sekai master data version 1.0.2"));
+        assert!(remote_log(&remote).contains("[Fix] Update app version"));
+
+        // After reconciling by hand the normal path resumes.
+        run_git(&["-C", work.to_str().unwrap(), "stash", "push", "-q", "-u"]);
+        run_git(&[
+            "-C",
+            work.to_str().unwrap(),
+            "-c",
+            "user.name=bot",
+            "-c",
+            "user.email=bot@example.test",
+            "-c",
+            "commit.gpgsign=false",
+            "merge",
+            "-q",
+            "--no-edit",
+            "FETCH_HEAD",
+        ]);
+        run_git(&["-C", work.to_str().unwrap(), "stash", "pop", "-q"]);
+        assert!(git.push_changes(work.to_str().unwrap(), "1.0.2").unwrap());
+        assert!(remote_log(&remote).contains("Sekai master data version 1.0.2"));
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -401,9 +605,10 @@ mod tests {
     fn existing_non_repository_surfaces_redacted_git_error() {
         let root = std::env::temp_dir().join(format!("haruki_not_git_{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
+        // The branch lookup now runs first, so that is where a non-repository fails.
         assert!(matches!(
             helper("secret").push_changes(root.to_str().unwrap(), "1"),
-            Err(AppError::NetworkError(message)) if message.contains("git status failed")
+            Err(AppError::NetworkError(message)) if message.contains("git symbolic-ref failed")
         ));
         std::fs::remove_dir_all(root).unwrap();
     }

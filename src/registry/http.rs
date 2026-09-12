@@ -109,22 +109,40 @@ fn json<T: serde::Serialize>(value: &T) -> Response {
     }
 }
 
+/// Health, shaped for an external monitor: `status` is `degraded` (never a
+/// non-200, so a monitor can still read the body) when a region's mirror push
+/// failed. A failed push is otherwise silent — publishing continues and the
+/// mirror simply stops moving.
 async fn health(State(registry): State<Shared>) -> Response {
     let mut regions = serde_json::Map::new();
+    let mut problems: Vec<String> = Vec::new();
     for region in registry.regions() {
         let current = registry.state.current(region).await.ok().flatten();
+        let git = registry.syncers.get(&region).and_then(|s| s.git_state());
+        if let Some(state) = git.as_ref() {
+            if !state.ok {
+                problems.push(format!(
+                    "{} git push failed at {}: {}",
+                    region.as_str(),
+                    state.at,
+                    state.message.as_deref().unwrap_or("unknown error")
+                ));
+            }
+        }
         regions.insert(
             region.as_str().to_string(),
             serde_json::json!({
                 "dataVersion": current.as_ref().map(|m| m.data_version.clone()),
                 "publishedAt": current.as_ref().map(|m| m.generated_at.clone()),
                 "synced": registry.syncers.contains_key(&region),
+                "gitPush": git,
             }),
         );
     }
     json(&serde_json::json!({
-        "status": "ok",
+        "status": if problems.is_empty() { "ok" } else { "degraded" },
         "version": env!("CARGO_PKG_VERSION"),
+        "problems": problems,
         "regions": regions,
     }))
 }
