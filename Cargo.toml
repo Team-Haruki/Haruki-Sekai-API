@@ -28,7 +28,7 @@ hex = "0.4"
 sha2 = "0.10"
 base64 = "0.23"
 serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
-jsonwebtoken = { version = "10", features = ["aws_lc_rs"] }
+jsonwebtoken = { version = "11", features = ["aws_lc_rs"] }
 sea-orm = { version = "2.0.0-rc.40", features = ["sqlx-sqlite", "sqlx-mysql", "sqlx-postgres", "runtime-tokio-rustls", "macros"] }
 redis = { version = "1", features = ["tokio-comp", "connection-manager"] }
 tokio-cron-scheduler = "0.15"
