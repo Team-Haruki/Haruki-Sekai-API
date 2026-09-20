@@ -431,9 +431,21 @@ impl MasterUpdater {
             );
             None
         })?;
-        self.login_with_version_refresh(&session)
-            .await
-            .map(|response| (Some(session), response, None))
+        let _api_guard = session.lock_api().await;
+        let login = self.login_with_version_refresh(&session).await?;
+        let metadata = if self.region == ServerRegion::Cn {
+            match self.client.fetch_cn_version_metadata(&session).await {
+                Ok(metadata) => metadata,
+                Err(e) => {
+                    error!("CN Failed to fetch login metadata: {}", e);
+                    return None;
+                }
+            }
+        } else {
+            login
+        };
+        drop(_api_guard);
+        Some((Some(session), metadata, None))
     }
 
     async fn login_with_version_refresh(&self, session: &AccountSession) -> Option<LoginResponse> {

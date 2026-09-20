@@ -168,6 +168,10 @@ pub async fn post_login_probe(
         },
         Err(e) => Err(e),
     };
+    let login = match login {
+        Ok(_) if region == ServerRegion::Cn => client.fetch_cn_version_metadata(&session).await,
+        other => other,
+    };
     let probe = match login {
         Ok(login) => {
             // Report the identity this login actually used (post-426 refresh

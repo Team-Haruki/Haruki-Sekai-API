@@ -752,6 +752,59 @@ impl SekaiClient {
         Ok(login_resp)
     }
 
+    /// Fetch the CN login metadata used by the master updater. CN 6.4 moved
+    /// data/asset/CDN versions out of the access-token response and into this
+    /// endpoint. This is a metadata probe, not an additional authentication
+    /// step, so normal account login and game API calls do not use it.
+    pub async fn fetch_cn_version_metadata(
+        &self,
+        session: &AccountSession,
+    ) -> Result<LoginResponse, AppError> {
+        if self.region != ServerRegion::Cn {
+            return Err(AppError::InvalidServerRegion(
+                self.region.as_str().to_string(),
+            ));
+        }
+
+        let url = format!(
+            "{}/api/user/{}/login",
+            self.config.api_url,
+            session.user_id()
+        );
+        let mut req = self.http_client.post(&url);
+        let metadata_headers: Vec<(String, String)> = {
+            let headers = self.headers.lock();
+            headers
+                .iter()
+                .filter(|(key, _)| {
+                    !matches!(
+                        key.to_lowercase().as_str(),
+                        "x-request-id" | "x-data-version" | "x-asset-version"
+                    )
+                })
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect()
+        };
+        for (key, value) in metadata_headers {
+            req = req.header(key, value);
+        }
+        if let Some(token) = session.get_session_token() {
+            req = req.header("X-Session-Token", token);
+        }
+        req = req.header("X-Request-Id", Uuid::new_v4().to_string());
+
+        let empty_payload: HashMap<String, String> = HashMap::new();
+        let resp = req
+            .body(self.cryptor.pack(&empty_payload)?)
+            .send()
+            .await
+            .map_err(|e| AppError::NetworkError(e.to_string()))?;
+        self.update_session_token(session, &resp);
+        let metadata: LoginResponse = self.handle_response(resp).await?;
+        self.update_version_headers_from_login(&metadata);
+        Ok(metadata)
+    }
+
     #[tracing::instrument(skip(self, params), fields(region = ?self.region))]
     pub async fn get_game_api(
         &self,
@@ -1691,6 +1744,13 @@ mod tests {
         let nuverse_session = session(ServerRegion::Tw, "0");
         nuverse.login(&nuverse_session).await.unwrap();
         assert_eq!(nuverse_session.user_id(), "777");
+
+        let (cn, cn_root) = make_client(ServerRegion::Cn, &login_url).await;
+        let cn_session = session(ServerRegion::Cn, "12");
+        cn.login(&cn_session).await.unwrap();
+        let metadata = cn.fetch_cn_version_metadata(&cn_session).await.unwrap();
+        assert_eq!(metadata.data_version, "d2");
+        assert_eq!(cn.headers.lock().get("X-Data-Version").unwrap(), "d2");
         login_server.abort();
 
         let (game_url, game_server) = spawn_server(StaticResponse {
@@ -1718,7 +1778,7 @@ mod tests {
         assert_eq!(raw.status(), StatusCode::OK);
         game_server.abort();
 
-        for root in [cp_root, nuverse_root, game_root] {
+        for root in [cp_root, nuverse_root, cn_root, game_root] {
             std::fs::remove_dir_all(root).unwrap();
         }
     }
