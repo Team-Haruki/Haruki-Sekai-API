@@ -24,8 +24,8 @@ src/
     image.rs               – Image/blob proxies (MySekai, housing/profile-card
                              thumbnails, custom music score) via RegionRouter
     internal.rs            – Node-to-node /internal/* API (sekai-api relay, login probe,
-                             game byte stream, master version/bundle, update webhook);
-                             gated by backend.internal_token
+                             game byte stream, master version/bundle, update webhook,
+                             app-identity push); gated by backend.internal_token
   client/
     sekai_client.rs        – Core game client (login, encrypted API calls, retry)
     account.rs             – CP and Nuverse account types, SekaiAccount trait
@@ -43,12 +43,25 @@ src/
                              remote-account), app hash, master sync poll
     master.rs              – MasterUpdater: version check, download, git push, DB ingest
     sync.rs                – MasterSyncer: pull master bundles from an owner node
-                             (webhook-triggered, cron fallback)
-    git.rs                 – GitHelper: stage, commit, push via git2
+                             (webhook-triggered, cron fallback); records the last git
+                             push outcome
+    git.rs                 – GitHelper: stage, commit, push via git2; fetches before
+                             every push and refuses to commit when the remote diverged
+    master_stream.rs       – Table-by-table streaming decode of a downloaded master
+                             payload (rows streamed one at a time)
     apphash.rs             – AppHashUpdater: poll file/URL sources for new app hashes
-  models/                  – ~92 auto-generated game data model files
+  registry/
+    service.rs             – MasterRegistry: per-region pull via MasterSyncer, git push,
+                             ingest, per-region manifest publication
+    http.rs                – Registry HTTP surface (pointers, digest-addressed blobs and
+                             manifests, /health, app identity, subscriber fan-out)
+    metas.rs               – music_metas feed (omakase rows injected)
+    state.rs               – Per-region registry state (contentHash + gitCommit)
+  models/                  – ~92 auto-generated game data model files (never hand-edit;
+                             regenerate them from the source data)
   bin/
     run_ingest.rs          – Standalone CLI for master data ingestion
+    master_registry.rs     – Master data manager (registry), runs on the same config file
     bench_profile.rs       – Per-stage latency benchmark for the profile proxy path
 tools/
   ent_generator/           – Rust tool that reads src/models/ and generates:
@@ -59,6 +72,7 @@ tools/
 docs/
   nuverse-schema-guide.md  – Nuverse schema assets: layout, field naming, update workflow
 Data/master/               – Regional master data JSON files (jp, en, tw, kr, cn)
+Data/registry/             – Registry JSON state (per-region manifests)
 Data/structures/           – Committed Nuverse schema assets (nuverse_schema_bundle.json, *.avsc)
 schema_info.json           – Authoritative DB schema used by ingest engine
 haruki-sekai-configs.example.yaml – Configuration template
@@ -96,6 +110,8 @@ haruki-sekai-configs.example.yaml – Configuration template
   the region's master pipeline locally but borrows a peer's accounts for the
   login probe and (CP) the encrypted master-split fetch, relayed as untouched
   bytes via `/internal/game-stream`
+- App identity is not polled on a node: it arrives via `POST /internal/app-identity`
+  (`src/api/internal.rs`)
 
 ### Master Data Pipeline
 1. `MasterUpdater` checks game server for new data version
@@ -104,6 +120,25 @@ haruki-sekai-configs.example.yaml – Configuration template
 4. Optionally pushes to git repository
 5. Optionally ingests into PostgreSQL via `IngestionEngine`
 6. `IngestionEngine` maps JSON filenames → table names using `schema_info.json`
+
+- Downloaded payloads are decoded table by table with rows streamed (`master_stream.rs`),
+  so the producer's peak memory is bounded by one row rather than the whole payload.
+  Keep new master consumers on that path — never `unpack_ordered` a whole master
+- Ingestion streams row batches; `master_database.ingest_concurrency` bounds its memory
+
+### Master Registry
+- The `master_registry` binary is the authoritative master data source other projects
+  consume: it pulls each region from its owner via `MasterSyncer`, owns git push and
+  ingest, and publishes per-region manifests (`Data/registry/` JSON state, `contentHash`
+  + `gitCommit`)
+- It also maintains the music_metas feed (`metas.rs`, omakase rows injected), serves the
+  app identity (`GET /v1/app/{region}`; `PUT` stores an override and pushes it to
+  `registry.account_nodes`), and fans `master-updated` notices out to
+  `registry.subscribers`
+- `/health` reports `status: degraded` when the last git push failed
+- CDN contract: pointers (`current`, `files/{name}`, `music_metas.json`, `app`) are
+  `no-cache` + ETag; digest-addressed `blob/{sha256}` and `manifests/{hash}` are
+  immutable — never serve changing bytes under a digest URL
 
 ### Schema System
 - `schema_info.json` defines table names, column types, and unique keys
@@ -168,6 +203,18 @@ cargo run
 # Run master data ingestion
 cargo run --bin run_ingest
 
+# Run the master data manager (registry) on the same config file
+cargo run --bin master_registry
+
+# Tests, a single test, and the ones needing external services
+cargo test
+cargo test <test_name>
+cargo test -- --ignored
+
+# Lint and format
+cargo clippy
+cargo fmt
+
 # Run ent_generator (from tools/ent_generator/)
 cd tools/ent_generator && cargo run
 
@@ -202,6 +249,10 @@ docker build --build-arg VERSION=v1.0.0 -t haruki-sekai-api .
 - Ingestion is transactional: DELETE existing region data, then batch INSERT (1000 rows per batch)
 
 ### Modifying Config
+The config file is `haruki-sekai-configs.yaml`, located via the `CONFIG_PATH` env var
+(defaults to the current directory). Per-region server entries hold AES keys (hex),
+account directories, master data paths and cron schedules.
+
 1. Add field to relevant struct in `src/config.rs` with `#[serde(default = "...")]`
 2. Add default function if needed
 3. Update `haruki-sekai-configs.example.yaml`
