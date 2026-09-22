@@ -63,11 +63,12 @@ Without that header, auth returned an encrypted `403 session_error`. Keep these
 values in the private deployment configuration. Revalidate them against KR after
 its upgrade; sharing the protocol does not establish that its credentials match.
 
-TW's CDN master still uses its pre-6.4 AES key/IV. Configure that pair as
-`master_aes_key_hex` and `master_aes_iv_hex`, separately from the new API cipher.
-Both fields must be set together; leaving both empty preserves the existing
-behavior of using the API cipher. Verify the CDN cipher separately during KR's
-upgrade, even if its API accepts the same identity as CN/TW.
+TW CDN 274 (data 6.4.0.2) still used its pre-6.4 AES key/IV, so it required
+`master_aes_key_hex` and `master_aes_iv_hex` separately from the new API cipher.
+Later on 2026-09-22, CDN 275 (data 6.4.0.3) switched to the new API cipher;
+clear both master overrides for that payload. Both override fields must be set
+together; leaving both empty uses the API cipher. Verify the CDN cipher separately
+during KR's upgrade, even if its API accepts the same identity as CN/TW.
 
 Keep region-specific bundles in separate directories when regions upgrade at
 different times. CN 6.4 assets are in `Data/structures/6.4.0/`; switching a region's
