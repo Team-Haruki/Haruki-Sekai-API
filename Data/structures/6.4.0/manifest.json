@@ -1,0 +1,10 @@
+{
+  "gameVersion": "6.4.0",
+  "sourceRegion": "cn",
+  "provenance": "CN iOS 6.4.0 DummyDll, generated 2026-09-22",
+  "sha256": {
+    "master.avsc": "9976f93c102f17204763cb764d70b20679bbfee81aa271fece3bcc7d55fdeceb",
+    "suite.avsc": "0f58a0fb86eac890ed99417d34ec4948aa08644a9dc7873fa58408232d6471aa",
+    "nuverse_schema_bundle.json": "842e95652502b9edf87a4719fd128e82763c4688f796fa3975fe4593c098814e"
+  }
+}

@@ -433,16 +433,20 @@ impl MasterUpdater {
         })?;
         let _api_guard = session.lock_api().await;
         let login = self.login_with_version_refresh(&session).await?;
-        let metadata = if self.region == ServerRegion::Cn {
-            match self.client.fetch_cn_version_metadata(&session).await {
-                Ok(metadata) => metadata,
-                Err(e) => {
-                    error!("CN Failed to fetch login metadata: {}", e);
-                    return None;
-                }
+        let metadata = match self
+            .client
+            .resolve_login_version_metadata(&session, login)
+            .await
+        {
+            Ok(metadata) => metadata,
+            Err(e) => {
+                error!(
+                    "{} Failed to fetch login metadata: {}",
+                    self.region.as_str().to_uppercase(),
+                    e
+                );
+                return None;
             }
-        } else {
-            login
         };
         drop(_api_guard);
         Some((Some(session), metadata, None))
@@ -799,7 +803,16 @@ treating difference as an update",
         cipher_path: &Path,
         master_dir: &str,
     ) -> Result<usize, AppError> {
-        let cryptor = self.client.cryptor.clone();
+        let config = &self.client.config;
+        let cryptor = if config.master_aes_key_hex.is_empty() && config.master_aes_iv_hex.is_empty()
+        {
+            self.client.cryptor.clone()
+        } else {
+            crate::crypto::SekaiCryptor::from_hex(
+                &config.master_aes_key_hex,
+                &config.master_aes_iv_hex,
+            )?
+        };
         let schema = if self.region.is_cp_server() {
             None
         } else {
@@ -1679,6 +1692,44 @@ mod tests {
         ));
         server.abort();
         let _ = std::fs::remove_file(&dest);
+    }
+
+    #[tokio::test]
+    async fn restores_master_with_separate_cipher_and_rejects_partial_override() {
+        let root = temp_dir();
+        let mut updater =
+            make_updater(ServerRegion::Tw, "http://127.0.0.1:1", &root, Vec::new()).await;
+        let client = Arc::get_mut(&mut updater.client).unwrap();
+        client.config.master_aes_key_hex = IV.to_string();
+        client.config.master_aes_iv_hex = KEY.to_string();
+        let master_cipher = crate::crypto::SekaiCryptor::from_hex(IV, KEY).unwrap();
+        let body = master_cipher
+            .pack(&serde_json::json!({"cards": [{"id": 640}]}))
+            .unwrap();
+        assert!(client.cryptor.unpack::<serde_json::Value>(&body).is_err());
+        let cipher = root.join("master.bin");
+        std::fs::write(&cipher, body).unwrap();
+        let master = root.join("master");
+        std::fs::create_dir_all(&master).unwrap();
+        updater
+            .decode_master_payload(&cipher, master.to_str().unwrap())
+            .await
+            .unwrap();
+        let cards: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(master.join("cards.json")).unwrap()).unwrap();
+        assert_eq!(cards[0]["id"], 640);
+        Arc::get_mut(&mut updater.client)
+            .unwrap()
+            .config
+            .master_aes_iv_hex
+            .clear();
+        assert!(matches!(
+            updater
+                .decode_master_payload(&cipher, master.to_str().unwrap())
+                .await,
+            Err(AppError::CryptoError(_))
+        ));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]

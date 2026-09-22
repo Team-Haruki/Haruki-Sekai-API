@@ -752,15 +752,30 @@ impl SekaiClient {
         Ok(login_resp)
     }
 
-    /// Fetch the CN login metadata used by the master updater. CN 6.4 moved
+    pub async fn resolve_login_version_metadata(
+        &self,
+        session: &AccountSession,
+        login: LoginResponse,
+    ) -> Result<LoginResponse, AppError> {
+        if self.region.is_cp_server()
+            || (!login.data_version.is_empty()
+                && !login.asset_version.is_empty()
+                && login.cdn_version > 0)
+        {
+            return Ok(login);
+        }
+        self.fetch_nuverse_version_metadata(session).await
+    }
+
+    /// Fetch the Nuverse login metadata used by the master updater. CN/TW 6.4 moved
     /// data/asset/CDN versions out of the access-token response and into this
     /// endpoint. This is a metadata probe, not an additional authentication
     /// step, so normal account login and game API calls do not use it.
-    pub async fn fetch_cn_version_metadata(
+    pub async fn fetch_nuverse_version_metadata(
         &self,
         session: &AccountSession,
     ) -> Result<LoginResponse, AppError> {
-        if self.region != ServerRegion::Cn {
+        if self.region.is_cp_server() {
             return Err(AppError::InvalidServerRegion(
                 self.region.as_str().to_string(),
             ));
@@ -1716,6 +1731,71 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn resolves_split_nuverse_metadata_without_changing_legacy_logins() {
+        async fn metadata_handler(
+            headers: axum::http::HeaderMap,
+            body: axum::body::Bytes,
+        ) -> AxumResponse<Body> {
+            assert_eq!(headers["x-session-token"], "auth-token");
+            assert!(!headers.contains_key("x-data-version"));
+            assert!(!headers.contains_key("x-asset-version"));
+            let payload: serde_json::Value = SekaiCryptor::from_hex(KEY, IV)
+                .unwrap()
+                .unpack(&body)
+                .unwrap();
+            assert_eq!(payload, json!({}));
+            AxumResponse::builder()
+                .header("content-type", "application/octet-stream")
+                .header("x-session-token", "metadata-token")
+                .body(Body::from(encrypted(json!({
+                    "dataVersion": "6.4.0.2", "assetVersion": "6.4.0", "cdnVersion": 274
+                }))))
+                .unwrap()
+        }
+        let app = Router::new().route(
+            "/api/user/{id}/login",
+            axum::routing::post(metadata_handler),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        for region in [ServerRegion::Cn, ServerRegion::Tw, ServerRegion::Kr] {
+            let (client, root) = make_client(region, &url).await;
+            let account = session(region, "123");
+            account.set_session_token(Some("auth-token".into()));
+            let login = serde_json::from_value(json!({"sessionToken": "auth-token"})).unwrap();
+            let result = client
+                .resolve_login_version_metadata(&account, login)
+                .await
+                .unwrap();
+            assert_eq!(result.cdn_version, 274);
+            assert_eq!(result.data_version, "6.4.0.2");
+            assert_eq!(
+                account.get_session_token().as_deref(),
+                Some("metadata-token")
+            );
+            assert_eq!(client.headers.lock()["X-Data-Version"], "6.4.0.2");
+            std::fs::remove_dir_all(root).unwrap();
+        }
+        server.abort();
+        for region in [ServerRegion::Tw, ServerRegion::Kr, ServerRegion::Jp] {
+            let (client, root) = make_client(region, "http://127.0.0.1:1").await;
+            let account = session(region, "123");
+            let login = serde_json::from_value(json!({
+                "dataVersion": "old-data", "assetVersion": "old-asset",
+                "cdnVersion": if region.is_cp_server() { 0 } else { 200 }
+            }))
+            .unwrap();
+            let result = client
+                .resolve_login_version_metadata(&account, login)
+                .await
+                .unwrap();
+            assert_eq!(result.data_version, "old-data");
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[tokio::test]
     async fn logs_in_and_drives_cp_and_nuverse_calls() {
         let login = json!({
             "sessionToken": "login-token",
@@ -1748,7 +1828,10 @@ mod tests {
         let (cn, cn_root) = make_client(ServerRegion::Cn, &login_url).await;
         let cn_session = session(ServerRegion::Cn, "12");
         cn.login(&cn_session).await.unwrap();
-        let metadata = cn.fetch_cn_version_metadata(&cn_session).await.unwrap();
+        let metadata = cn
+            .fetch_nuverse_version_metadata(&cn_session)
+            .await
+            .unwrap();
         assert_eq!(metadata.data_version, "d2");
         assert_eq!(cn.headers.lock().get("X-Data-Version").unwrap(), "d2");
         login_server.abort();

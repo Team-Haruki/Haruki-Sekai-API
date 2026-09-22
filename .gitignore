@@ -43,3 +43,9 @@ Data/structures/*
 !Data/structures/master.avsc
 !Data/structures/nuverse_schema_bundle.json
 !Data/structures/suite.avsc
+
+# Versioned Nuverse schemas
+!Data/structures/6.0.0/
+!Data/structures/6.0.0/**
+!Data/structures/6.4.0/
+!Data/structures/6.4.0/**

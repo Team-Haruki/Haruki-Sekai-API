@@ -169,8 +169,8 @@ pub async fn post_login_probe(
         Err(e) => Err(e),
     };
     let login = match login {
-        Ok(_) if region == ServerRegion::Cn => client.fetch_cn_version_metadata(&session).await,
-        other => other,
+        Ok(login) => client.resolve_login_version_metadata(&session, login).await,
+        Err(e) => Err(e),
     };
     let probe = match login {
         Ok(login) => {

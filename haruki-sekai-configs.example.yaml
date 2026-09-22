@@ -126,11 +126,14 @@ servers:
       # fill in other headers as needed
     aes_key_hex: ""
     aes_iv_hex: ""
+    # Set both when the CDN master uses a different cipher from the game API.
+    master_aes_key_hex: ""
+    master_aes_iv_hex: ""
     account_dir: ""
     master_dir: ""
     version_path: ""
     nuverse_master_data_url: ""
-    nuverse_schema_bundle_path: "Data/structures/nuverse_schema_bundle.json"
+    nuverse_schema_bundle_path: "Data/structures/6.4.0/nuverse_schema_bundle.json"
     enable_master_updater: true # check for master data updates periodically
     master_updater_cron: "7 * * * * *" # cron expression, this mean "execute it at every minute at second 7"
 
@@ -143,11 +146,13 @@ servers:
       # fill in other headers as needed
     aes_key_hex: ""
     aes_iv_hex: ""
+    master_aes_key_hex: "" # optional pair; otherwise uses the game API cipher
+    master_aes_iv_hex: ""
     account_dir: ""
     master_dir: ""
     version_path: ""
     nuverse_master_data_url: ""
-    nuverse_schema_bundle_path: "Data/structures/nuverse_schema_bundle.json"
+    nuverse_schema_bundle_path: "Data/structures/6.0.0/nuverse_schema_bundle.json"
     enable_master_updater: true # check for master data updates periodically
     master_updater_cron: "7 * * * * *" # cron expression, this mean "execute it at every minute at second 7"
 
@@ -202,6 +207,6 @@ servers:
     master_dir: ""
     version_path: ""
     nuverse_master_data_url: ""
-    nuverse_schema_bundle_path: "Data/structures/nuverse_schema_bundle.json"
+    nuverse_schema_bundle_path: "Data/structures/6.4.0/nuverse_schema_bundle.json"
     enable_master_updater: true # check for master data updates periodically
     master_updater_cron: "7 * * * * *" # cron expression, this mean "execute it at every minute at second 7"

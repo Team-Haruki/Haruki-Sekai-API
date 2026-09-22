@@ -973,6 +973,22 @@ mod tests {
     }
 
     #[test]
+    fn loads_both_versioned_schema_sets() {
+        for version in ["6.0.0", "6.4.0"] {
+            let root = format!("Data/structures/{version}");
+            let data = std::fs::read(format!("{root}/nuverse_schema_bundle.json")).unwrap();
+            let store = NuverseSchemaStore::from_slice(&data).unwrap();
+            assert!(store.master.len() > 200);
+            for name in ["master.avsc", "suite.avsc"] {
+                let value: serde_json::Value =
+                    serde_json::from_slice(&std::fs::read(format!("{root}/{name}")).unwrap())
+                        .unwrap();
+                assert!(value.as_array().unwrap().len() > 200);
+            }
+        }
+    }
+
+    #[test]
     fn loads_generated_dummy_dll_bundle() {
         let data = std::fs::read("Data/structures/nuverse_schema_bundle.json").unwrap();
         let store = NuverseSchemaStore::from_slice(&data).unwrap();

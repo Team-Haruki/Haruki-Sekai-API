@@ -321,6 +321,11 @@ pub struct ServerConfig {
     pub aes_key_hex: String,
     #[serde(default)]
     pub aes_iv_hex: String,
+    /// Optional master-payload key/IV pair; empty values use the API cipher.
+    #[serde(default)]
+    pub master_aes_key_hex: String,
+    #[serde(default)]
+    pub master_aes_iv_hex: String,
     #[serde(default)]
     pub enable_master_updater: bool,
     #[serde(default)]
