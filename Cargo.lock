@@ -1533,7 +1533,7 @@ dependencies = [
 
 [[package]]
 name = "haruki-sekai-api"
-version = "6.20.4"
+version = "6.21.0"
 dependencies = [
  "aes 0.9.3",
  "anyhow",
