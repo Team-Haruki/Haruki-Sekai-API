@@ -42,6 +42,21 @@ fn unique_key_override(table_name: &str) -> Option<serde_json::Value> {
     keys.map(|k| serde_json::json!(k))
 }
 
+/// Non-unique indexes Haruki-Cloud adds by hand on top of the generated schema, keyed
+/// like `unique_key_override`. Emitting them here keeps a regenerated Cloud schema
+/// identical to the hand-edited one. Column names are DB names (`id` is the ent PK,
+/// not the game id); they only reach the Go output, never `schema_info.json`.
+fn secondary_index_override(table_name: &str) -> Vec<Vec<&'static str>> {
+    match table_name {
+        // Cloud loads a region's difficulties per music.
+        "musicdifficultie" => vec![vec!["server_region", "music_id"]],
+        // No game_id; Cloud reads a whole region ordered by the ent PK, which is the
+        // insert order and therefore the display order of a box's contents.
+        "resourceboxdetail" => vec![vec!["server_region", "id"]],
+        _ => Vec::new(),
+    }
+}
+
 /// Reads a Rust model file and extracts the root struct name from `pub type XXX = Vec<YYY>;`.
 /// Returns (table_name_lowercase, root_struct_name) or None if no root type alias is found.
 fn extract_root_type(file_content: &str) -> Option<(String, String)> {
@@ -71,6 +86,7 @@ fn generate_ent_go_schema(
     table_name: &str,
     columns: &[String],
     unique_keys_json: &serde_json::Value,
+    secondary_indexes: &[Vec<&str>],
 ) -> String {
     let mut fields_code = Vec::new();
     let mut needs_json_import = false;
@@ -81,7 +97,14 @@ fn generate_ent_go_schema(
         fields_code.push(field);
         needs_json_import |= uses_json;
     }
-    let index_lines = generate_index_lines(unique_keys_json);
+    let mut index_lines = generate_index_lines(unique_keys_json);
+    index_lines.extend(secondary_indexes.iter().map(|keys| {
+        let quoted = keys
+            .iter()
+            .map(|key| format!("\"{}\"", key))
+            .collect::<Vec<_>>();
+        format!("\t\tindex.Fields({}),", quoted.join(", "))
+    }));
     let has_indexes = !index_lines.is_empty();
     let imports = generate_imports(needs_json_import, has_indexes);
 
@@ -214,22 +237,45 @@ fn extract_struct_fields(file_content: &str, struct_name: &str) -> Vec<(String, 
 
     let struct_body = &file_content[start..end];
 
-    // Parse `pub field_name: Type` lines
+    // Parse `pub field_name: Type,` declarations. rustfmt wraps a long one after the
+    // colon (`pub name:\n    Option<Vec<T>>,`), so continuation lines are joined
+    // until the declaration ends with a comma.
     let field_re = Regex::new(r"pub (\w+)\s*:\s*(.+?)\s*,?\s*$").unwrap();
     let mut fields = Vec::new();
+    let mut pending: Option<String> = None;
 
     for line in struct_body.lines() {
         let trimmed = line.trim();
-        if trimmed.starts_with("pub ") {
-            if let Some(caps) = field_re.captures(trimmed) {
-                let name = caps.get(1).unwrap().as_str().to_string();
-                let typ = caps.get(2).unwrap().as_str().trim().to_string();
-                fields.push((name, typ));
+        let declaration = match pending.take() {
+            Some(mut open) => {
+                open.push(' ');
+                open.push_str(trimmed);
+                open
             }
+            None if trimmed.starts_with("pub ") => trimmed.to_string(),
+            None => continue,
+        };
+        if !declaration.ends_with(',') {
+            pending = Some(declaration);
+            continue;
         }
+        push_field(&field_re, &declaration, &mut fields);
+    }
+    if let Some(declaration) = pending {
+        push_field(&field_re, &declaration, &mut fields);
     }
 
     fields
+}
+
+fn push_field(field_re: &Regex, declaration: &str, fields: &mut Vec<(String, String)>) {
+    if let Some(caps) = field_re.captures(declaration) {
+        let name = caps.get(1).unwrap().as_str().to_string();
+        let typ = caps.get(2).unwrap().as_str().trim().to_string();
+        if !typ.is_empty() {
+            fields.push((name, typ));
+        }
+    }
 }
 
 /// Extracts names of simple enums (all unit variants, no data) from a Rust source file.
@@ -370,9 +416,16 @@ fn process_model(path: &Path, ent_path: &Path) -> Option<serde_json::Value> {
             serde_json::json!([])
         }
     });
+    let secondary_indexes = secondary_index_override(&table_name);
     let table_name = pluralize_table_name(&table_name);
     let schema_name = derive_schema_name(&root_struct);
-    let go_code = generate_ent_go_schema(&schema_name, &table_name, &columns, &unique_keys);
+    let go_code = generate_ent_go_schema(
+        &schema_name,
+        &table_name,
+        &columns,
+        &unique_keys,
+        &secondary_indexes,
+    );
     fs::write(ent_path.join(format!("{}.go", table_name)), go_code)
         .expect("Failed to write Go schema file");
     println!(
@@ -436,5 +489,89 @@ fn pluralize_table_name(name: &str) -> String {
         format!("{}ies", &name[..name.len() - 1])
     } else {
         format!("{}s", name)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extracts_fields_wrapped_by_rustfmt() {
+        let source = r#"
+pub struct SampleElement {
+    pub card_rarity_type: Option<String>,
+
+    pub world_bloom_support_deck_character_bonuses:
+        Option<Vec<WorldBloomSupportDeckCharacterBonus>>,
+
+    pub bonus_rate: Option<f64>,
+    pub last: Option<i64>
+}
+"#;
+        let fields = extract_struct_fields(source, "SampleElement");
+        assert_eq!(
+            fields,
+            vec![
+                ("card_rarity_type".to_string(), "Option<String>".to_string()),
+                (
+                    "world_bloom_support_deck_character_bonuses".to_string(),
+                    "Option<Vec<WorldBloomSupportDeckCharacterBonus>>".to_string()
+                ),
+                ("bonus_rate".to_string(), "Option<f64>".to_string()),
+                ("last".to_string(), "Option<i64>".to_string()),
+            ]
+        );
+        let simple_enums = std::collections::HashSet::new();
+        let (columns, has_id) = build_columns(&fields, &simple_enums);
+        assert!(!has_id);
+        assert_eq!(
+            columns[1],
+            "world_bloom_support_deck_character_bonuses:json.RawMessage"
+        );
+        assert_eq!(columns[2], "bonus_rate:float64");
+    }
+
+    #[test]
+    fn pluralizes_like_the_ingest_engine_expects() {
+        assert_eq!(pluralize_table_name("omikuji"), "omikujis");
+        assert_eq!(pluralize_table_name("musiccategorie"), "musiccategories");
+        assert_eq!(
+            pluralize_table_name("streaminglivecategory"),
+            "streaminglivecategories"
+        );
+        assert_eq!(pluralize_table_name("cards"), "cards");
+        assert_eq!(pluralize_table_name("box"), "boxes");
+    }
+
+    #[test]
+    fn secondary_indexes_reach_the_go_schema_but_not_unique_keys() {
+        let unique = serde_json::json!([["id", "server_region"]]);
+        let go = generate_ent_go_schema(
+            "Musicdifficultie",
+            "musicdifficulties",
+            &[
+                "game_id:int64".to_string(),
+                "server_region:string".to_string(),
+            ],
+            &unique,
+            &secondary_index_override("musicdifficultie"),
+        );
+        assert!(go.contains("index.Fields(\"game_id\", \"server_region\").Unique(),"));
+        assert!(go.contains("index.Fields(\"server_region\", \"music_id\"),"));
+        assert!(secondary_index_override("cards").is_empty());
+        let go = generate_ent_go_schema(
+            "Resourceboxdetail",
+            "resourceboxdetails",
+            &[
+                "resource_box_id:int64".to_string(),
+                "server_region:string".to_string(),
+            ],
+            &serde_json::json!([]),
+            &secondary_index_override("resourceboxdetail"),
+        );
+        assert!(!go.contains(".Unique()"));
+        assert!(go.contains("index.Fields(\"server_region\", \"id\"),"));
+        assert!(go.contains("entgo.io/ent/schema/index"));
     }
 }

@@ -34,5 +34,6 @@ func (Musicdifficultie) Annotations() []schema.Annotation {
 func (Musicdifficultie) Indexes() []ent.Index {
 	return []ent.Index{
 		index.Fields("game_id", "server_region").Unique(),
+		index.Fields("server_region", "music_id"),
 	}
 }
