@@ -22,4 +22,6 @@ pub struct MysekaihousingcompetitionElement {
     pub background_image_assetbundle_file_name: Option<String>,
 
     pub back_number_accent_color_code: Option<String>,
+
+    pub mysekai_housing_competition_review_rank_id: Option<i64>,
 }

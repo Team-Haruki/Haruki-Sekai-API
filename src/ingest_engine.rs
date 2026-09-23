@@ -102,6 +102,13 @@ impl IngestionEngine {
         if let Some(tbl) = self.file_to_table.get(&with_es) {
             return Some(tbl.clone());
         }
+        // The generator pluralizes a singular `…y` alias to `…ies`
+        // (`streamingLiveCategory` -> `streaminglivecategories`).
+        if let Some(stem) = normalized.strip_suffix('y') {
+            if let Some(tbl) = self.file_to_table.get(&format!("{stem}ies")) {
+                return Some(tbl.clone());
+            }
+        }
         None
     }
 
@@ -172,6 +179,11 @@ impl IngestionEngine {
             None => return Ok(()),
         };
 
+        // Legacy hard skip kept on purpose: these tables were dropped from
+        // the schema long ago and their files are never ingested. Note the
+        // generator would name a future characterProfiles model
+        // `characterprofiles` (not in this list) but a virtualItems model
+        // `virtualitems` (in it) — remove the entry before adding that model.
         if matches!(
             table_name.as_str(),
             "character_profiles" | "virtual_items" | "virtualitems"
@@ -1141,6 +1153,265 @@ mod tests {
         assert_eq!(row.try_get::<i64>("", "n").unwrap(), 2);
         assert_eq!(row.try_get::<i64>("", "achievements").unwrap(), 1);
         assert_eq!(row.try_get::<i64>("", "max_id").unwrap(), 2);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn resolves_phase2_files_and_singular_y_stems_only() {
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+        let engine = IngestionEngine::new(db).await.unwrap();
+        for (file, table) in [
+            (
+                "customProfileCharacterIconResources",
+                "customprofilecharactericonresources",
+            ),
+            (
+                "customProfileCollectionResources",
+                "customprofilecollectionresources",
+            ),
+            ("customProfileEtcResources", "customprofileetcresources"),
+            (
+                "customProfileGeneralBackgroundResources",
+                "customprofilegeneralbackgroundresources",
+            ),
+            (
+                "customProfileMaterialResources",
+                "customprofilematerialresources",
+            ),
+            (
+                "customProfileMemberStandingPictureResources",
+                "customprofilememberstandingpictureresources",
+            ),
+            (
+                "customProfilePlayerInfoResources",
+                "customprofileplayerinforesources",
+            ),
+            ("customProfileShapeResources", "customprofileshaperesources"),
+            (
+                "customProfileStoryBackgroundResources",
+                "customprofilestorybackgroundresources",
+            ),
+            ("customProfileTextColors", "customprofiletextcolors"),
+            ("customProfileTextFonts", "customprofiletextfonts"),
+            (
+                "customProfileUserInterfaceIconResources",
+                "customprofileuserinterfaceiconresources",
+            ),
+            ("omikujis", "omikujis"),
+            ("unitStoryEpisodeGroups", "unitstoryepisodegroups"),
+            ("musicCategories", "musiccategories"),
+            // A singular `…y` stem reaches its `…ies` table.
+            ("musicCategory", "musiccategories"),
+            ("cardRarity", "cardrarities"),
+        ] {
+            assert_eq!(
+                engine.resolve_table_name(file).as_deref(),
+                Some(table),
+                "{file}"
+            );
+        }
+        // No table exists for these, so the y->ies rule must not invent one.
+        assert!(engine.resolve_table_name("streamingLiveCategory").is_none());
+        assert!(engine
+            .resolve_table_name("mysekaiStaminaRecovery")
+            .is_none());
+        // Single-object master: adding a `mysekaicolorfulpasses` table would bind it
+        // through the `+es` rule and fail the file, so it must stay unmapped.
+        assert!(engine.resolve_table_name("mysekaiColorfulPass").is_none());
+        assert!(engine.resolve_table_name("compactCostume3ds").is_none());
+        let default_key = vec![vec!["id".to_string(), "server_region".to_string()]];
+        for table in [
+            "customprofiletextfonts",
+            "customprofilecollectionresources",
+            "omikujis",
+            "unitstoryepisodegroups",
+            "musiccategories",
+        ] {
+            let (columns, keys) = &engine.schema_map[table];
+            assert!(columns.contains_key("game_id"), "{table}");
+            assert_eq!(keys, &default_key, "{table}");
+        }
+        for column in [
+            "world_bloom_support_deck_character_bonuses",
+            "world_bloom_support_deck_master_rank_bonuses",
+            "world_bloom_support_deck_skill_level_bonuses",
+        ] {
+            assert_eq!(
+                engine.schema_map["worldbloomsupportdeckbonuses"].0[column],
+                "json.RawMessage"
+            );
+        }
+    }
+
+    /// Every schema_info table is reached by exactly one file stem per region
+    /// (from the registry manifests in `testdata/master_file_stems.json`), and no
+    /// unmapped stem is pulled onto an unrelated table by the plural rules.
+    #[tokio::test]
+    async fn every_schema_table_resolves_from_exactly_one_real_file_stem() {
+        #[derive(serde::Deserialize)]
+        struct Fixture {
+            files: std::collections::BTreeMap<String, String>,
+        }
+        let fixture: Fixture =
+            serde_json::from_str(include_str!("testdata/master_file_stems.json")).unwrap();
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+        let engine = IngestionEngine::new(db).await.unwrap();
+        // Tables whose file is absent from some regions.
+        let partial: HashMap<&str, &[&str]> = HashMap::from([
+            ("custommusicscoretags", &["jp"][..]),
+            ("customprofilecharactericonresources", &["jp"][..]),
+            ("customprofilematerialresources", &["jp"][..]),
+            ("customprofileuserinterfaceiconresources", &["jp"][..]),
+            ("musiccategories", &["jp"][..]),
+            ("mysekaihousingcompetitions", &["jp", "tw", "kr", "cn"][..]),
+            ("resourceboxdetails", &["tw", "kr", "cn"][..]),
+        ]);
+        for region in ["jp", "en", "tw", "kr", "cn"] {
+            let mut resolved: HashMap<String, Vec<&str>> = HashMap::new();
+            for (stem, regions) in &fixture.files {
+                if !regions.split(',').any(|r| r == region) {
+                    continue;
+                }
+                assert!(
+                    !stem.starts_with("compact") || engine.resolve_table_name(stem).is_none(),
+                    "{region}/{stem} is a dict-of-columns file and must stay unmapped"
+                );
+                if let Some(table) = engine.resolve_table_name(stem) {
+                    resolved.entry(table).or_default().push(stem);
+                }
+            }
+            for (table, stems) in &resolved {
+                assert_eq!(stems.len(), 1, "{region}: {table} <- {stems:?}");
+                let expected_stem = table.replace('_', "");
+                assert_eq!(
+                    stems[0].to_lowercase().replace('_', ""),
+                    expected_stem,
+                    "{region}: {table} resolved from an unexpected stem"
+                );
+            }
+            for table in engine.schema_map.keys() {
+                let expected = partial
+                    .get(table.as_str())
+                    .is_none_or(|regions| regions.contains(&region));
+                assert_eq!(
+                    resolved.contains_key(table),
+                    expected,
+                    "{region}: {table} presence"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn ingests_new_columns_and_phase2_tables_across_region_shapes() {
+        use sea_orm::Statement;
+        let mut opt = ConnectOptions::new("sqlite::memory:".to_string());
+        opt.max_connections(1);
+        let db = Database::connect(opt).await.unwrap();
+        for ddl in [
+            "CREATE TABLE playerframegroups (game_id INTEGER, seq INTEGER, name TEXT, \
+             assetbundle_name TEXT, player_frame_type TEXT, edit_count INTEGER, \
+             server_region TEXT)",
+            "CREATE TABLE worldbloomsupportdeckbonuses (card_rarity_type TEXT, \
+             world_bloom_support_deck_character_bonuses TEXT, \
+             world_bloom_support_deck_master_rank_bonuses TEXT, \
+             world_bloom_support_deck_skill_level_bonuses TEXT, server_region TEXT)",
+            "CREATE TABLE customprofiletextfonts (game_id INTEGER, name TEXT, font_name TEXT, \
+             assetbundle_name TEXT, server_region TEXT)",
+            "CREATE TABLE musiccategories (game_id INTEGER, music_id INTEGER, \
+             music_category_name TEXT, music_asset_variant_id INTEGER, published_at INTEGER, \
+             server_region TEXT)",
+        ] {
+            db.execute_unprepared(ddl).await.unwrap();
+        }
+        let engine = IngestionEngine::new(db.clone()).await.unwrap();
+        let root = std::env::temp_dir().join(format!("haruki_ingest_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        // JP row carries the new keys, the second (Nuverse-shaped) row does not.
+        std::fs::write(
+            root.join("playerFrameGroups.json"),
+            r#"[{"id":1,"seq":1,"name":"a","assetbundleName":"x","playerFrameType":"single","editCount":0},
+                {"assetbundleName":"y","id":2,"name":"b","seq":2}]"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("worldBloomSupportDeckBonuses.json"),
+            r#"[{"cardRarityType":"rarity_1",
+                 "worldBloomSupportDeckCharacterBonuses":[{"bonusRate":5.5,"id":10101,
+                   "worldBloomSupportDeckCharacterType":"specific"}],
+                 "worldBloomSupportDeckMasterRankBonuses":[{"bonusRate":0.0,"id":10101,"masterRank":0}],
+                 "worldBloomSupportDeckSkillLevelBonuses":[]}]"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("customProfileTextFonts.json"),
+            r#"[{"id":1,"name":"ピュア１","fontName":"FOT-RodinNTLGPro-DB","assetbundleName":"custom_profile/font"},
+                {"fontName":"NotoSansCJKtc-Medium","id":2,"name":"純真1"}]"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("musicCategories.json"),
+            r#"[{"id":1,"musicId":1,"musicCategoryName":"mv"},
+                {"id":2,"musicId":1,"musicCategoryName":"original","musicAssetVariantId":47701,
+                 "publishedAt":1788404400000}]"#,
+        )
+        .unwrap();
+        // Single-object sibling without a table: skipped, must not fail the run.
+        std::fs::write(
+            root.join("mysekaiColorfulPass.json"),
+            r#"{"id":1,"expireDays":30}"#,
+        )
+        .unwrap();
+        engine
+            .ingest_master_data(root.to_str().unwrap(), "jp")
+            .await
+            .unwrap();
+
+        let query = |sql: &'static str| {
+            let db = db.clone();
+            async move {
+                db.query_one_raw(Statement::from_string(db.get_database_backend(), sql))
+                    .await
+                    .unwrap()
+                    .unwrap()
+            }
+        };
+        let row = query(
+            "SELECT COUNT(*) AS n, SUM(player_frame_type IS NULL) AS null_types, \
+             MIN(edit_count) AS min_edit FROM playerframegroups WHERE server_region = 'jp'",
+        )
+        .await;
+        assert_eq!(row.try_get::<i64>("", "n").unwrap(), 2);
+        assert_eq!(row.try_get::<i64>("", "null_types").unwrap(), 1);
+        assert_eq!(row.try_get::<i64>("", "min_edit").unwrap(), 0);
+        let row = query(
+            "SELECT world_bloom_support_deck_character_bonuses AS c, \
+             world_bloom_support_deck_skill_level_bonuses AS s \
+             FROM worldbloomsupportdeckbonuses WHERE server_region = 'jp'",
+        )
+        .await;
+        let character: Value =
+            serde_json::from_str(&row.try_get::<String>("", "c").unwrap()).unwrap();
+        assert_eq!(character[0]["bonusRate"], json!(5.5));
+        assert_eq!(row.try_get::<String>("", "s").unwrap(), "[]");
+        let row = query(
+            "SELECT COUNT(*) AS n, SUM(assetbundle_name IS NULL) AS null_ab \
+             FROM customprofiletextfonts WHERE server_region = 'jp'",
+        )
+        .await;
+        assert_eq!(row.try_get::<i64>("", "n").unwrap(), 2);
+        assert_eq!(row.try_get::<i64>("", "null_ab").unwrap(), 1);
+        let row = query(
+            "SELECT COUNT(*) AS n, MAX(music_asset_variant_id) AS variant, \
+             MAX(published_at) AS published FROM musiccategories WHERE server_region = 'jp'",
+        )
+        .await;
+        assert_eq!(row.try_get::<i64>("", "n").unwrap(), 2);
+        assert_eq!(row.try_get::<i64>("", "variant").unwrap(), 47701);
+        assert_eq!(
+            row.try_get::<i64>("", "published").unwrap(),
+            1_788_404_400_000
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 }

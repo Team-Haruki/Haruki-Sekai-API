@@ -9,29 +9,27 @@ import (
 	"entgo.io/ent/schema/index"
 )
 
-type Playerframe struct {
+type Customprofiletextfont struct {
 	ent.Schema
 }
 
-func (Playerframe) Fields() []ent.Field {
+func (Customprofiletextfont) Fields() []ent.Field {
 	return []ent.Field{
 		field.Int64("game_id").Optional(),
-		field.Int64("seq").Optional(),
-		field.Int64("player_frame_group_id").Optional(),
-		field.String("description").Optional(),
-		field.Int64("game_character_id").Optional(),
-		field.Int64("parts_count").Optional(),
+		field.String("name").Optional(),
+		field.String("font_name").Optional(),
+		field.String("assetbundle_name").Optional(),
 		field.String("server_region"),
 	}
 }
 
-func (Playerframe) Annotations() []schema.Annotation {
+func (Customprofiletextfont) Annotations() []schema.Annotation {
 	return []schema.Annotation{
-		entsql.Annotation{Table: "playerframes"},
+		entsql.Annotation{Table: "customprofiletextfonts"},
 	}
 }
 
-func (Playerframe) Indexes() []ent.Index {
+func (Customprofiletextfont) Indexes() []ent.Index {
 	return []ent.Index{
 		index.Fields("game_id", "server_region").Unique(),
 	}

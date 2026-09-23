@@ -67,6 +67,12 @@ pub struct GachaElement {
     pub gacha_freebie_group_id: Option<i64>,
 
     pub daily_spin_limit: Option<i64>,
+
+    pub is_select_character: Option<bool>,
+
+    pub gacha_character_bonus_group_id: Option<i64>,
+
+    pub rate_choice_gacha_wish_group_id: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -185,6 +191,12 @@ pub enum LotteryType {
     CategorizedWish,
 
     Normal,
+
+    #[serde(rename = "rate_choice_first")]
+    RateChoiceFirst,
+
+    #[serde(rename = "rate_choice_second")]
+    RateChoiceSecond,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -273,4 +285,12 @@ pub enum GachaType {
     Gift,
 
     Normal,
+
+    Return,
+
+    Subeginner,
+
+    Sunormal,
+
+    Sureturn,
 }

@@ -25,4 +25,6 @@ pub struct LimitedtimemusicElement {
     pub start_at: Option<i64>,
 
     pub end_at: Option<i64>,
+
+    pub collaboration_mode_id: Option<i64>,
 }

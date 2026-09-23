@@ -39,6 +39,8 @@ func (Music) Fields() []ent.Field {
 		field.Bool("is_full_length").Optional(),
 		field.Int64("music_collaboration_id").Optional(),
 		field.JSON("infos", json.RawMessage{}).Optional(),
+		field.Int64("sec_for_music_score_maker").Optional(),
+		field.Bool("is_available_for_music_score_maker").Optional(),
 		field.String("server_region"),
 	}
 }

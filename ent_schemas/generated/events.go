@@ -36,6 +36,7 @@ func (Event) Fields() []ent.Field {
 		field.JSON("event_ranking_reward_ranges", json.RawMessage{}).Optional(),
 		field.String("event_point_assetbundle_name").Optional(),
 		field.Int64("standby_screen_display_start_at").Optional(),
+		field.Int64("event_break_time_id").Optional(),
 		field.String("server_region"),
 	}
 }

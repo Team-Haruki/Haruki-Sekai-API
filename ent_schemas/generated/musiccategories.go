@@ -9,29 +9,28 @@ import (
 	"entgo.io/ent/schema/index"
 )
 
-type Playerframe struct {
+type Musiccategorie struct {
 	ent.Schema
 }
 
-func (Playerframe) Fields() []ent.Field {
+func (Musiccategorie) Fields() []ent.Field {
 	return []ent.Field{
 		field.Int64("game_id").Optional(),
-		field.Int64("seq").Optional(),
-		field.Int64("player_frame_group_id").Optional(),
-		field.String("description").Optional(),
-		field.Int64("game_character_id").Optional(),
-		field.Int64("parts_count").Optional(),
+		field.Int64("music_id").Optional(),
+		field.String("music_category_name").Optional(),
+		field.Int64("music_asset_variant_id").Optional(),
+		field.Int64("published_at").Optional(),
 		field.String("server_region"),
 	}
 }
 
-func (Playerframe) Annotations() []schema.Annotation {
+func (Musiccategorie) Annotations() []schema.Annotation {
 	return []schema.Annotation{
-		entsql.Annotation{Table: "playerframes"},
+		entsql.Annotation{Table: "musiccategories"},
 	}
 }
 
-func (Playerframe) Indexes() []ent.Index {
+func (Musiccategorie) Indexes() []ent.Index {
 	return []ent.Index{
 		index.Fields("game_id", "server_region").Unique(),
 	}

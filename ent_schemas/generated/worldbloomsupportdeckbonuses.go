@@ -2,6 +2,8 @@
 package schema
 
 import (
+	"encoding/json"
+
 	"entgo.io/ent"
 	"entgo.io/ent/dialect/entsql"
 	"entgo.io/ent/schema"
@@ -16,6 +18,9 @@ type Worldbloomsupportdeckbonuse struct {
 func (Worldbloomsupportdeckbonuse) Fields() []ent.Field {
 	return []ent.Field{
 		field.String("card_rarity_type").Optional(),
+		field.JSON("world_bloom_support_deck_character_bonuses", json.RawMessage{}).Optional(),
+		field.JSON("world_bloom_support_deck_master_rank_bonuses", json.RawMessage{}).Optional(),
+		field.JSON("world_bloom_support_deck_skill_level_bonuses", json.RawMessage{}).Optional(),
 		field.String("server_region"),
 	}
 }

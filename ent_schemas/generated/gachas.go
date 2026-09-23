@@ -42,6 +42,9 @@ func (Gacha) Fields() []ent.Field {
 		field.Int64("gacha_bonus_item_receivable_reward_group_id").Optional(),
 		field.Int64("gacha_freebie_group_id").Optional(),
 		field.Int64("daily_spin_limit").Optional(),
+		field.Bool("is_select_character").Optional(),
+		field.Int64("gacha_character_bonus_group_id").Optional(),
+		field.Int64("rate_choice_gacha_wish_group_id").Optional(),
 		field.String("server_region"),
 	}
 }
