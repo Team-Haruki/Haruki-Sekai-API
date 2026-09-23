@@ -1007,4 +1007,140 @@ mod tests {
             .is_ok());
         std::fs::remove_dir_all(root).unwrap();
     }
+
+    #[tokio::test]
+    async fn resolves_master_table_gap_files_and_their_unique_keys() {
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+        let engine = IngestionEngine::new(db).await.unwrap();
+        for (file, table) in [
+            ("characterMissionV2s", "charactermissionv2s"),
+            ("bondsHonorWords", "bondshonorwords"),
+            (
+                "worldBloomChapterRankingRewardRanges",
+                "worldbloomchapterrankingrewardranges",
+            ),
+            ("resourceBoxDetails", "resourceboxdetails"),
+            ("materials", "materials"),
+            ("practiceTickets", "practicetickets"),
+            ("skillPracticeTickets", "skillpracticetickets"),
+            ("characterMissionV2ExJsons", "charactermissionv2exjsons"),
+            ("characterMissionV2AreaItems", "charactermissionv2areaitems"),
+        ] {
+            assert_eq!(
+                engine.resolve_table_name(file).as_deref(),
+                Some(table),
+                "{file}"
+            );
+        }
+        // Dict-of-columns layout the row parser cannot read: must stay unmapped.
+        assert!(engine
+            .resolve_table_name("compactResourceBoxDetails")
+            .is_none());
+
+        let default_key = vec![vec!["id".to_string(), "server_region".to_string()]];
+        for table in [
+            "charactermissionv2s",
+            "bondshonorwords",
+            "worldbloomchapterrankingrewardranges",
+            "materials",
+            "practicetickets",
+            "skillpracticetickets",
+            "charactermissionv2exjsons",
+            "charactermissionv2areaitems",
+        ] {
+            let (columns, keys) = &engine.schema_map[table];
+            assert!(columns.contains_key("game_id"), "{table}");
+            assert_eq!(keys, &default_key, "{table}");
+        }
+        // Nuverse resourceBoxDetails rows have no id/seq, so no unique key is declared.
+        let (columns, keys) = &engine.schema_map["resourceboxdetails"];
+        assert!(!columns.contains_key("game_id"));
+        assert!(keys.is_empty());
+    }
+
+    #[tokio::test]
+    async fn ingests_master_table_gap_fixtures_across_region_shapes() {
+        use sea_orm::Statement;
+        let mut opt = ConnectOptions::new("sqlite::memory:".to_string());
+        opt.max_connections(1);
+        let db = Database::connect(opt).await.unwrap();
+        db.execute_unprepared(
+            "CREATE TABLE resourceboxdetails (resource_box_id INTEGER, resource_quantity INTEGER, \
+             resource_id INTEGER, resource_box_purpose TEXT, resource_level INTEGER, \
+             resource_type TEXT, server_region TEXT)",
+        )
+        .await
+        .unwrap();
+        db.execute_unprepared(
+            "CREATE TABLE charactermissionv2s (game_id INTEGER, character_mission_type TEXT, \
+             character_id INTEGER, parameter_group_id INTEGER, sentence TEXT, \
+             progress_sentence TEXT, is_achievement_mission INTEGER, server_region TEXT)",
+        )
+        .await
+        .unwrap();
+        let engine = IngestionEngine::new(db.clone()).await.unwrap();
+        let root = std::env::temp_dir().join(format!("haruki_ingest_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+
+        // CN shape: flat rows without id/seq, nullable resourceId/resourceLevel.
+        std::fs::write(
+            root.join("resourceBoxDetails.json"),
+            r#"[{"resourceBoxId":1,"resourceQuantity":1,"resourceId":1,
+                 "resourceBoxPurpose":"ad_reward","resourceLevel":null,
+                 "resourceType":"ad_reward_random_box"},
+                {"resourceBoxId":2,"resourceQuantity":100,"resourceId":null,
+                 "resourceBoxPurpose":"shop_item","resourceLevel":null,"resourceType":"jewel"}]"#,
+        )
+        .unwrap();
+        // Dict-of-columns sibling with no schema entry: skipped before parsing, so its
+        // non-array layout must not fail the run.
+        std::fs::write(
+            root.join("compactResourceBoxDetails.json"),
+            r#"{"__ENUM__":{"resourceType":["jewel"]},"resourceBoxId":[1],"resourceType":[0]}"#,
+        )
+        .unwrap();
+        // CP key order first, Nuverse key order second.
+        std::fs::write(
+            root.join("characterMissionV2s.json"),
+            r#"[{"id":1,"characterMissionType":"play_live","characterId":1,"parameterGroupId":1,
+                 "sentence":"s","progressSentence":"p","isAchievementMission":false},
+                {"characterId":2,"characterMissionType":"waiting_room_ex","id":2,
+                 "isAchievementMission":true,"parameterGroupId":3,"progressSentence":"p",
+                 "sentence":"s"}]"#,
+        )
+        .unwrap();
+        engine
+            .ingest_master_data(root.to_str().unwrap(), "cn")
+            .await
+            .unwrap();
+
+        let query = |sql: String| {
+            let db = db.clone();
+            async move {
+                db.query_one_raw(Statement::from_string(db.get_database_backend(), sql))
+                    .await
+                    .unwrap()
+                    .unwrap()
+            }
+        };
+        let row = query(
+            "SELECT COUNT(*) AS n, SUM(resource_id IS NULL) AS null_ids, \
+             SUM(resource_quantity) AS qty FROM resourceboxdetails WHERE server_region = 'cn'"
+                .to_string(),
+        )
+        .await;
+        assert_eq!(row.try_get::<i64>("", "n").unwrap(), 2);
+        assert_eq!(row.try_get::<i64>("", "null_ids").unwrap(), 1);
+        assert_eq!(row.try_get::<i64>("", "qty").unwrap(), 101);
+        let row = query(
+            "SELECT COUNT(*) AS n, SUM(is_achievement_mission) AS achievements, \
+             MAX(game_id) AS max_id FROM charactermissionv2s WHERE server_region = 'cn'"
+                .to_string(),
+        )
+        .await;
+        assert_eq!(row.try_get::<i64>("", "n").unwrap(), 2);
+        assert_eq!(row.try_get::<i64>("", "achievements").unwrap(), 1);
+        assert_eq!(row.try_get::<i64>("", "max_id").unwrap(), 2);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }
