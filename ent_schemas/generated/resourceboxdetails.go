@@ -6,6 +6,7 @@ import (
 	"entgo.io/ent/dialect/entsql"
 	"entgo.io/ent/schema"
 	"entgo.io/ent/schema/field"
+	"entgo.io/ent/schema/index"
 )
 
 type Resourceboxdetail struct {
@@ -27,5 +28,11 @@ func (Resourceboxdetail) Fields() []ent.Field {
 func (Resourceboxdetail) Annotations() []schema.Annotation {
 	return []schema.Annotation{
 		entsql.Annotation{Table: "resourceboxdetails"},
+	}
+}
+
+func (Resourceboxdetail) Indexes() []ent.Index {
+	return []ent.Index{
+		index.Fields("server_region", "id"),
 	}
 }
