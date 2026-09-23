@@ -32,6 +32,10 @@ jobs:
 
       - name: Cache Rust artifacts
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: |
+            . -> target
+            tools/ent_generator -> target
 
       - name: Check formatting
         run: cargo fmt --all -- --check
@@ -43,4 +47,20 @@ jobs:
         run: cargo clippy --locked --all-targets -- -D warnings
 
       - name: Run tests
+        run: cargo test --locked
+
+      - name: Check ent_generator formatting
+        working-directory: tools/ent_generator
+        run: cargo fmt --all -- --check
+
+      - name: Check ent_generator build
+        working-directory: tools/ent_generator
+        run: cargo check --locked --all-targets
+
+      - name: Run ent_generator Clippy
+        working-directory: tools/ent_generator
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Run ent_generator tests
+        working-directory: tools/ent_generator
         run: cargo test --locked
