@@ -55,6 +55,8 @@ pub struct EventElement {
     pub event_point_assetbundle_name: Option<EventPointAssetbundleName>,
 
     pub standby_screen_display_start_at: Option<i64>,
+
+    pub event_break_time_id: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -61,6 +61,10 @@ pub struct MusicElement {
     pub music_collaboration_id: Option<i64>,
 
     pub infos: Option<Vec<Info>>,
+
+    pub sec_for_music_score_maker: Option<i64>,
+
+    pub is_available_for_music_score_maker: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

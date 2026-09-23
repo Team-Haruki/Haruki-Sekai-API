@@ -25,4 +25,8 @@ pub struct PlayerframegroupElement {
     pub name: Option<String>,
 
     pub assetbundle_name: Option<String>,
+
+    pub player_frame_type: Option<String>,
+
+    pub edit_count: Option<i64>,
 }

@@ -19,6 +19,7 @@ func (Limitedtimemusic) Fields() []ent.Field {
 		field.Int64("music_id").Optional(),
 		field.Int64("start_at").Optional(),
 		field.Int64("end_at").Optional(),
+		field.Int64("collaboration_mode_id").Optional(),
 		field.String("server_region"),
 	}
 }

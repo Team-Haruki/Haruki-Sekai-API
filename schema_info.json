@@ -475,6 +475,241 @@
   },
   {
     "columns": [
+      "custom_profile_resource_type:string",
+      "game_id:int64",
+      "seq:int64",
+      "name:string",
+      "pronunciation:string",
+      "resource_load_type:string",
+      "resource_load_val:string",
+      "file_name:string",
+      "server_region:string"
+    ],
+    "name": "customprofilecharactericonresources",
+    "unique_keys": [
+      [
+        "id",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "custom_profile_resource_type:string",
+      "game_id:int64",
+      "seq:int64",
+      "name:string",
+      "pronunciation:string",
+      "resource_load_type:string",
+      "resource_load_val:string",
+      "file_name:string",
+      "custom_profile_resource_collection_type:string",
+      "group_id:int64",
+      "server_region:string"
+    ],
+    "name": "customprofilecollectionresources",
+    "unique_keys": [
+      [
+        "id",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "custom_profile_resource_type:string",
+      "game_id:int64",
+      "seq:int64",
+      "name:string",
+      "pronunciation:string",
+      "resource_load_type:string",
+      "resource_load_val:string",
+      "file_name:string",
+      "server_region:string"
+    ],
+    "name": "customprofileetcresources",
+    "unique_keys": [
+      [
+        "id",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "custom_profile_resource_type:string",
+      "game_id:int64",
+      "seq:int64",
+      "name:string",
+      "pronunciation:string",
+      "resource_load_type:string",
+      "resource_load_val:string",
+      "file_name:string",
+      "server_region:string"
+    ],
+    "name": "customprofilegeneralbackgroundresources",
+    "unique_keys": [
+      [
+        "id",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "custom_profile_resource_type:string",
+      "game_id:int64",
+      "seq:int64",
+      "name:string",
+      "pronunciation:string",
+      "resource_load_type:string",
+      "resource_load_val:string",
+      "file_name:string",
+      "server_region:string"
+    ],
+    "name": "customprofilematerialresources",
+    "unique_keys": [
+      [
+        "id",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "custom_profile_resource_type:string",
+      "game_id:int64",
+      "seq:int64",
+      "name:string",
+      "pronunciation:string",
+      "resource_load_type:string",
+      "resource_load_val:string",
+      "file_name:string",
+      "character_id:int64",
+      "server_region:string"
+    ],
+    "name": "customprofilememberstandingpictureresources",
+    "unique_keys": [
+      [
+        "id",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "custom_profile_resource_type:string",
+      "game_id:int64",
+      "seq:int64",
+      "name:string",
+      "pronunciation:string",
+      "resource_load_type:string",
+      "resource_load_val:string",
+      "file_name:string",
+      "group_id:int64",
+      "server_region:string"
+    ],
+    "name": "customprofileplayerinforesources",
+    "unique_keys": [
+      [
+        "id",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "custom_profile_resource_type:string",
+      "game_id:int64",
+      "seq:int64",
+      "name:string",
+      "pronunciation:string",
+      "resource_load_type:string",
+      "resource_load_val:string",
+      "file_name:string",
+      "server_region:string"
+    ],
+    "name": "customprofileshaperesources",
+    "unique_keys": [
+      [
+        "id",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "custom_profile_resource_type:string",
+      "game_id:int64",
+      "seq:int64",
+      "name:string",
+      "pronunciation:string",
+      "resource_load_type:string",
+      "resource_load_val:string",
+      "file_name:string",
+      "server_region:string"
+    ],
+    "name": "customprofilestorybackgroundresources",
+    "unique_keys": [
+      [
+        "id",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "game_id:int64",
+      "seq:int64",
+      "color_code:string",
+      "server_region:string"
+    ],
+    "name": "customprofiletextcolors",
+    "unique_keys": [
+      [
+        "id",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "game_id:int64",
+      "name:string",
+      "font_name:string",
+      "assetbundle_name:string",
+      "server_region:string"
+    ],
+    "name": "customprofiletextfonts",
+    "unique_keys": [
+      [
+        "id",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "custom_profile_resource_type:string",
+      "game_id:int64",
+      "seq:int64",
+      "name:string",
+      "pronunciation:string",
+      "resource_load_type:string",
+      "resource_load_val:string",
+      "file_name:string",
+      "server_region:string"
+    ],
+    "name": "customprofileuserinterfaceiconresources",
+    "unique_keys": [
+      [
+        "id",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
       "game_id:int64",
       "card_id:int64",
       "event_id:int64",
@@ -599,6 +834,7 @@
       "event_ranking_reward_ranges:json.RawMessage",
       "event_point_assetbundle_name:string",
       "standby_screen_display_start_at:int64",
+      "event_break_time_id:int64",
       "server_region:string"
     ],
     "name": "events",
@@ -689,6 +925,9 @@
       "gacha_bonus_item_receivable_reward_group_id:int64",
       "gacha_freebie_group_id:int64",
       "daily_spin_limit:int64",
+      "is_select_character:bool",
+      "gacha_character_bonus_group_id:int64",
+      "rate_choice_gacha_wish_group_id:int64",
       "server_region:string"
     ],
     "name": "gachas",
@@ -826,6 +1065,7 @@
       "music_id:int64",
       "start_at:int64",
       "end_at:int64",
+      "collaboration_mode_id:int64",
       "server_region:string"
     ],
     "name": "limitedtimemusics",
@@ -896,6 +1136,23 @@
     "columns": [
       "game_id:int64",
       "music_id:int64",
+      "music_category_name:string",
+      "music_asset_variant_id:int64",
+      "published_at:int64",
+      "server_region:string"
+    ],
+    "name": "musiccategories",
+    "unique_keys": [
+      [
+        "id",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "game_id:int64",
+      "music_id:int64",
       "music_difficulty:string",
       "play_level:int64",
       "total_note_count:int64",
@@ -934,6 +1191,8 @@
       "is_full_length:bool",
       "music_collaboration_id:int64",
       "infos:json.RawMessage",
+      "sec_for_music_score_maker:int64",
+      "is_available_for_music_score_maker:bool",
       "server_region:string"
     ],
     "name": "musics",
@@ -1403,6 +1662,7 @@
       "aggregate_at:int64",
       "background_image_assetbundle_file_name:string",
       "back_number_accent_color_code:string",
+      "mysekai_housing_competition_review_rank_id:int64",
       "server_region:string"
     ],
     "name": "mysekaihousingcompetitions",
@@ -1623,6 +1883,35 @@
   {
     "columns": [
       "game_id:int64",
+      "omikuji_group_id:int64",
+      "unit:string",
+      "fortune_type:string",
+      "summary:string",
+      "title1:string",
+      "description1:string",
+      "title2:string",
+      "description2:string",
+      "title3:string",
+      "description3:string",
+      "unit_assetbundle_name:string",
+      "fortune_assetbundle_name:string",
+      "omikuji_cover_assetbundle_name:string",
+      "unit_file_path:string",
+      "fortune_file_path:string",
+      "omikuji_cover_file_path:string",
+      "server_region:string"
+    ],
+    "name": "omikujis",
+    "unique_keys": [
+      [
+        "id",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "game_id:int64",
       "seq:int64",
       "name:string",
       "server_region:string"
@@ -1641,6 +1930,8 @@
       "seq:int64",
       "name:string",
       "assetbundle_name:string",
+      "player_frame_type:string",
+      "edit_count:int64",
       "server_region:string"
     ],
     "name": "playerframegroups",
@@ -1658,6 +1949,7 @@
       "player_frame_group_id:int64",
       "description:string",
       "game_character_id:int64",
+      "parts_count:int64",
       "server_region:string"
     ],
     "name": "playerframes",
@@ -1799,6 +2091,23 @@
   {
     "columns": [
       "game_id:int64",
+      "unit:string",
+      "unit_episode_category:string",
+      "outline:string",
+      "assetbundle_name:string",
+      "server_region:string"
+    ],
+    "name": "unitstoryepisodegroups",
+    "unique_keys": [
+      [
+        "id",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "game_id:int64",
       "virtual_live_type:string",
       "virtual_live_platform:string",
       "seq:int64",
@@ -1890,6 +2199,9 @@
   {
     "columns": [
       "card_rarity_type:string",
+      "world_bloom_support_deck_character_bonuses:json.RawMessage",
+      "world_bloom_support_deck_master_rank_bonuses:json.RawMessage",
+      "world_bloom_support_deck_skill_level_bonuses:json.RawMessage",
       "server_region:string"
     ],
     "name": "worldbloomsupportdeckbonuses",

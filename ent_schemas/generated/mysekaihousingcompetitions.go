@@ -24,6 +24,7 @@ func (Mysekaihousingcompetition) Fields() []ent.Field {
 		field.Int64("aggregate_at").Optional(),
 		field.String("background_image_assetbundle_file_name").Optional(),
 		field.String("back_number_accent_color_code").Optional(),
+		field.Int64("mysekai_housing_competition_review_rank_id").Optional(),
 		field.String("server_region"),
 	}
 }

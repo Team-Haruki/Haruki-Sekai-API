@@ -9,29 +9,28 @@ import (
 	"entgo.io/ent/schema/index"
 )
 
-type Playerframegroup struct {
+type Unitstoryepisodegroup struct {
 	ent.Schema
 }
 
-func (Playerframegroup) Fields() []ent.Field {
+func (Unitstoryepisodegroup) Fields() []ent.Field {
 	return []ent.Field{
 		field.Int64("game_id").Optional(),
-		field.Int64("seq").Optional(),
-		field.String("name").Optional(),
+		field.String("unit").Optional(),
+		field.String("unit_episode_category").Optional(),
+		field.String("outline").Optional(),
 		field.String("assetbundle_name").Optional(),
-		field.String("player_frame_type").Optional(),
-		field.Int64("edit_count").Optional(),
 		field.String("server_region"),
 	}
 }
 
-func (Playerframegroup) Annotations() []schema.Annotation {
+func (Unitstoryepisodegroup) Annotations() []schema.Annotation {
 	return []schema.Annotation{
-		entsql.Annotation{Table: "playerframegroups"},
+		entsql.Annotation{Table: "unitstoryepisodegroups"},
 	}
 }
 
-func (Playerframegroup) Indexes() []ent.Index {
+func (Unitstoryepisodegroup) Indexes() []ent.Index {
 	return []ent.Index{
 		index.Fields("game_id", "server_region").Unique(),
 	}

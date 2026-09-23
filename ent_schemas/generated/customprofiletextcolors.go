@@ -9,29 +9,26 @@ import (
 	"entgo.io/ent/schema/index"
 )
 
-type Playerframe struct {
+type Customprofiletextcolor struct {
 	ent.Schema
 }
 
-func (Playerframe) Fields() []ent.Field {
+func (Customprofiletextcolor) Fields() []ent.Field {
 	return []ent.Field{
 		field.Int64("game_id").Optional(),
 		field.Int64("seq").Optional(),
-		field.Int64("player_frame_group_id").Optional(),
-		field.String("description").Optional(),
-		field.Int64("game_character_id").Optional(),
-		field.Int64("parts_count").Optional(),
+		field.String("color_code").Optional(),
 		field.String("server_region"),
 	}
 }
 
-func (Playerframe) Annotations() []schema.Annotation {
+func (Customprofiletextcolor) Annotations() []schema.Annotation {
 	return []schema.Annotation{
-		entsql.Annotation{Table: "playerframes"},
+		entsql.Annotation{Table: "customprofiletextcolors"},
 	}
 }
 
-func (Playerframe) Indexes() []ent.Index {
+func (Customprofiletextcolor) Indexes() []ent.Index {
 	return []ent.Index{
 		index.Fields("game_id", "server_region").Unique(),
 	}

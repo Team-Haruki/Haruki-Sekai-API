@@ -27,4 +27,6 @@ pub struct PlayerframeElement {
     pub description: Option<String>,
 
     pub game_character_id: Option<i64>,
+
+    pub parts_count: Option<i64>,
 }
