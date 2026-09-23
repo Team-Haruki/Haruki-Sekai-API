@@ -34,6 +34,9 @@ fn unique_key_override(table_name: &str) -> Option<serde_json::Value> {
         ]]),
         // ngwords: data has genuine duplicates, no unique key possible
         "ngword" => Some(vec![]),
+        // resourceBoxDetails (Nuverse regions only): rows carry neither id nor seq and
+        // duplicate on every column but resource_quantity, so no unique key is declared
+        "resourceboxdetail" => Some(vec![]),
         _ => None,
     };
     keys.map(|k| serde_json::json!(k))

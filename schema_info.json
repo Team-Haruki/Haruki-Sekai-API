@@ -112,6 +112,24 @@
     "columns": [
       "game_id:int64",
       "seq:int64",
+      "bonds_group_id:int64",
+      "assetbundle_name:string",
+      "name:string",
+      "description:string",
+      "server_region:string"
+    ],
+    "name": "bondshonorwords",
+    "unique_keys": [
+      [
+        "id",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "game_id:int64",
+      "seq:int64",
       "name:string",
       "recovery_value:int64",
       "asset_bundle_name:string",
@@ -307,6 +325,39 @@
   {
     "columns": [
       "game_id:int64",
+      "character_mission_type:string",
+      "area_item_id:int64",
+      "character_id:int64",
+      "unit:string",
+      "server_region:string"
+    ],
+    "name": "charactermissionv2areaitems",
+    "unique_keys": [
+      [
+        "id",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "game_id:int64",
+      "character_mission_ex_type:string",
+      "character_mission_type:string",
+      "resource_type:string",
+      "server_region:string"
+    ],
+    "name": "charactermissionv2exjsons",
+    "unique_keys": [
+      [
+        "id",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "game_id:int64",
       "seq:int64",
       "requirement:int64",
       "exp:int64",
@@ -318,6 +369,25 @@
       [
         "game_id",
         "seq",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "game_id:int64",
+      "character_mission_type:string",
+      "character_id:int64",
+      "parameter_group_id:int64",
+      "sentence:string",
+      "progress_sentence:string",
+      "is_achievement_mission:bool",
+      "server_region:string"
+    ],
+    "name": "charactermissionv2s",
+    "unique_keys": [
+      [
+        "id",
         "server_region"
       ]
     ]
@@ -783,6 +853,26 @@
       [
         "card_rarity_type",
         "master_rank",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "game_id:int64",
+      "seq:int64",
+      "name:string",
+      "flavor_text:string",
+      "can_use:bool",
+      "material_type:string",
+      "flavor_text2:string",
+      "change_flavor_text_at:int64",
+      "server_region:string"
+    ],
+    "name": "materials",
+    "unique_keys": [
+      [
+        "id",
         "server_region"
       ]
     ]
@@ -1580,6 +1670,36 @@
   },
   {
     "columns": [
+      "game_id:int64",
+      "name:string",
+      "exp:int64",
+      "flavor_text:string",
+      "character_id:int64",
+      "server_region:string"
+    ],
+    "name": "practicetickets",
+    "unique_keys": [
+      [
+        "id",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "resource_box_id:int64",
+      "resource_quantity:int64",
+      "resource_id:int64",
+      "resource_box_purpose:string",
+      "resource_level:int64",
+      "resource_type:string",
+      "server_region:string"
+    ],
+    "name": "resourceboxdetails",
+    "unique_keys": []
+  },
+  {
+    "columns": [
       "resource_box_purpose:string",
       "game_id:int64",
       "resource_box_type:string",
@@ -1610,6 +1730,23 @@
       "server_region:string"
     ],
     "name": "shopitems",
+    "unique_keys": [
+      [
+        "id",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "game_id:int64",
+      "name:string",
+      "exp:int64",
+      "flavor_text:string",
+      "character_id:int64",
+      "server_region:string"
+    ],
+    "name": "skillpracticetickets",
     "unique_keys": [
       [
         "id",
@@ -1688,6 +1825,25 @@
       "server_region:string"
     ],
     "name": "virtuallives",
+    "unique_keys": [
+      [
+        "id",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "game_id:int64",
+      "event_id:int64",
+      "game_character_id:int64",
+      "from_rank:int64",
+      "to_rank:int64",
+      "is_to_rank_border:bool",
+      "resource_box_id:int64",
+      "server_region:string"
+    ],
+    "name": "worldbloomchapterrankingrewardranges",
     "unique_keys": [
       [
         "id",
