@@ -1,6 +1,6 @@
 [package]
 name = "haruki-sekai-api"
-version = "6.20.4"
+version = "6.21.0"
 edition = "2021"
 authors = ["Haruki Dev Team"]
 description = "Haruki Sekai API - Rust Edition"
