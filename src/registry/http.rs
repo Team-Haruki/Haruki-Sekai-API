@@ -779,7 +779,8 @@ fn write_bundle(
         let mut header = tar::Header::new_gnu();
         header.set_entry_type(tar::EntryType::Regular);
         header.set_size(size);
-        header.set_mode(0o644);
+        // Master data is public; 0644 is what the synced worktree files carry.
+        header.set_mode(0o644); // NOSONAR
         header.set_mtime(mtime);
         header
     };

@@ -278,11 +278,11 @@ impl FsBlobStore {
         if actual != sha256 {
             return Ok(None);
         }
-        match std::fs::File::open(path) {
+        match tokio::fs::File::open(path).await {
             Ok(file) => Ok(Some(Blob {
                 size: meta.len(),
                 modified: meta.modified().ok(),
-                body: BlobBody::File(file),
+                body: BlobBody::File(file.into_std().await),
             })),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(e.into()),
