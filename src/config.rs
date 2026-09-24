@@ -407,6 +407,13 @@ pub struct RegistryConfig {
     /// Directory for manifests, publish history and app-identity overrides.
     #[serde(default = "default_registry_state_dir")]
     pub state_dir: String,
+    /// Database for the registry state (manifests, snapshots, publish history,
+    /// app-identity overrides, music_metas pointers), e.g. a PostgreSQL DSN.
+    /// Empty keeps the JSON files under `state_dir`. On first start with an
+    /// empty database the files are imported (and left in place). music_metas
+    /// blobs stay under `state_dir` either way.
+    #[serde(default)]
+    pub state_dsn: String,
     /// Peers to notify (`POST <url>/internal/master-updated`) after a region
     /// is published.
     #[serde(default)]
@@ -479,6 +486,7 @@ impl Default for RegistryConfig {
             port: default_registry_port(),
             token: String::new(),
             state_dir: default_registry_state_dir(),
+            state_dsn: String::new(),
             subscribers: Vec::new(),
             music_metas: MusicMetasConfig::default(),
             account_nodes: Vec::new(),

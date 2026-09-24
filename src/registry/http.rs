@@ -847,6 +847,94 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn database_state_serves_the_same_responses_as_files() {
+        let root = temp_dir();
+        let mut config = base_config(&root, "secret");
+        config.registry.music_metas.enabled = false;
+        let config = Arc::new(config);
+        std::fs::write(root.join("master/cards.json"), "[{\"id\":1}]").unwrap();
+        write_version(&root, "5.6.1.11");
+        let files = Arc::new(Registry::new(config.clone(), HashMap::new()));
+        files.publish_missing().await;
+        files
+            .state
+            .set_app_identity(
+                ServerRegion::Jp,
+                &AppInfo {
+                    app_version: "5.7.0".to_string(),
+                    app_hash: "override".to_string(),
+                },
+            )
+            .await
+            .unwrap();
+        let dsn = format!("sqlite://{}?mode=rwc", root.join("state.db").display());
+        let state = super::super::state::RegistryState::connect(&config.registry.state_dir, &dsn)
+            .await
+            .unwrap();
+        let database = Arc::new(Registry::with_state(config, HashMap::new(), state));
+        // Publishing again at startup is a no-op: the imported current exists.
+        database.publish_missing().await;
+        let (file_base, file_server) = serve(router(files)).await;
+        let (db_base, db_server) = serve(router(database)).await;
+        let client = reqwest::Client::new();
+
+        let (_, current) = get_json(&client, &format!("{file_base}/v1/master/jp/current")).await;
+        let hash = current["contentHash"].as_str().unwrap().to_string();
+        for path in [
+            "/v1/master/jp/current".to_string(),
+            format!("/v1/master/jp/manifests/{hash}"),
+            "/v1/master/jp/history".to_string(),
+            "/v1/master/kr/current".to_string(),
+            "/v1/app/jp".to_string(),
+        ] {
+            let a = client
+                .get(format!("{file_base}{path}"))
+                .send()
+                .await
+                .unwrap();
+            let b = client.get(format!("{db_base}{path}")).send().await.unwrap();
+            assert_eq!(a.status(), b.status(), "{path}");
+            for header in ["etag", "cache-control", "content-type"] {
+                assert_eq!(
+                    a.headers().get(header),
+                    b.headers().get(header),
+                    "{path} {header}"
+                );
+            }
+            assert_eq!(a.bytes().await.unwrap(), b.bytes().await.unwrap(), "{path}");
+        }
+        let blob = current["files"][0]["sha256"].as_str().unwrap();
+        let resp = client
+            .get(format!("{db_base}/v1/master/jp/blob/{blob}"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let resp = client
+            .get(format!("{db_base}/v1/master/jp/current"))
+            .header("if-none-match", current_etag(&client, &file_base).await)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 304);
+        file_server.abort();
+        db_server.abort();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    async fn current_etag(client: &reqwest::Client, base: &str) -> String {
+        client
+            .get(format!("{base}/v1/master/jp/current"))
+            .send()
+            .await
+            .unwrap()
+            .headers()["etag"]
+            .to_str()
+            .unwrap()
+            .to_string()
+    }
+
+    #[tokio::test]
     async fn serves_manifest_files_bundle_and_app_identity_with_token_gating() {
         let root = temp_dir();
         let config = Arc::new(base_config(&root, "secret"));

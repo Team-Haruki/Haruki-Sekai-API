@@ -37,7 +37,8 @@ src/
     sekai_cryptor.rs       – AES-128-CBC encryption with MessagePack serialization
   db/
     mod.rs                 – init_db, init_master_db, init_redis
-    entity/                – SeaORM entities: sekai_users, sekai_user_servers
+    entity/                – SeaORM entities: sekai_users, sekai_user_servers,
+                             registry_state, registry_publish_history
   updater/
     scheduler.rs           – Cron jobs: cookie refresh, master update (local or
                              remote-account), app hash, master sync poll
@@ -59,7 +60,9 @@ src/
     http.rs                – Registry HTTP surface (pointers, digest-addressed blobs and
                              manifests, /health, app identity, subscriber fan-out)
     metas.rs               – music_metas feed (omakase rows injected)
-    state.rs               – Per-region registry state (contentHash + gitCommit)
+    state.rs               – Per-region registry state (manifests, snapshots, history,
+                             app identity, metas pointers): JSON files, or a database
+                             when `registry.state_dsn` is set (one-time file import)
   models/                  – ~92 auto-generated game data model files (never hand-edit;
                              regenerate them from the source data)
   bin/
@@ -75,7 +78,7 @@ tools/
 docs/
   nuverse-schema-guide.md  – Nuverse schema assets: layout, field naming, update workflow
 Data/master/               – Regional master data JSON files (jp, en, tw, kr, cn)
-Data/registry/             – Registry JSON state (per-region manifests)
+Data/registry/             – Registry JSON state (per-region manifests); music_metas blobs
 Data/structures/           – Committed Nuverse schema assets (nuverse_schema_bundle.json, *.avsc)
 schema_info.json           – Authoritative DB schema used by ingest engine
 haruki-sekai-configs.example.yaml – Configuration template
@@ -138,8 +141,16 @@ haruki-sekai-configs.example.yaml – Configuration template
 ### Master Registry
 - The `master_registry` binary is the authoritative master data source other projects
   consume: it pulls each region from its owner via `MasterSyncer`, owns git push and
-  ingest, and publishes per-region manifests (`Data/registry/` JSON state, `contentHash`
-  + `gitCommit`)
+  ingest, and publishes per-region manifests (`contentHash` + `gitCommit`). State lives
+  in `Data/registry/` JSON files, or in the `registry_state` / `registry_publish_history`
+  tables when `registry.state_dsn` is set (files imported once into empty tables, kept).
+  Run exactly one registry per state database (import/publish are not multi-writer safe;
+  current manifests, app identity and metas pointers are cached in memory and refreshed
+  only by that instance's own writes). Tables are created `IF NOT EXISTS`; there is no
+  migration path, so a column change needs hand-written DDL. Rolling back to files: stop
+  the registry, delete `<state_dir>/manifests/*/current.json` (startup `publish_missing`
+  skips regions that already have a current, which would serve the pre-DB manifest), clear
+  `state_dsn`, restart
 - It also maintains the music_metas feed (`metas.rs`, omakase rows injected), serves the
   app identity (`GET /v1/app/{region}`; `PUT` stores an override and pushes it to
   `registry.account_nodes`), and fans `master-updated` notices out to

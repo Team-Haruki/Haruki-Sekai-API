@@ -67,6 +67,54 @@ pub async fn init_master_db(config: &DatabaseConfig) -> Result<DatabaseConnectio
     Ok(db)
 }
 
+/// Connect to the registry state database (`registry.state_dsn`) and create
+/// its tables when missing. Any SeaORM backend works; PostgreSQL is the
+/// production target (the value columns are JSONB there).
+pub async fn init_registry_state_db(dsn: &str) -> Result<DatabaseConnection, AppError> {
+    if dsn.trim().is_empty() {
+        return Err(AppError::DatabaseError(
+            "Registry state DSN is empty".to_string(),
+        ));
+    }
+    let mut opts = ConnectOptions::new(dsn.trim());
+    opts.max_connections(4)
+        .min_connections(1)
+        .connect_timeout(std::time::Duration::from_secs(30))
+        .acquire_timeout(std::time::Duration::from_secs(30))
+        .sqlx_logging(false);
+    let db = Database::connect(opts).await.map_err(|e| {
+        AppError::DatabaseError(format!(
+            "Failed to connect to registry state database: {}",
+            e
+        ))
+    })?;
+    let schema = Schema::new(db.get_database_backend());
+    let stmt = schema
+        .create_table_from_entity(entity::RegistryStateEntry)
+        .if_not_exists()
+        .to_owned();
+    db.execute(&stmt)
+        .await
+        .map_err(|e| AppError::DatabaseError(format!("Failed to create registry_state: {}", e)))?;
+    let stmt = schema
+        .create_table_from_entity(entity::RegistryPublishHistory)
+        .if_not_exists()
+        .to_owned();
+    db.execute(&stmt).await.map_err(|e| {
+        AppError::DatabaseError(format!("Failed to create registry_publish_history: {}", e))
+    })?;
+    for mut stmt in schema.create_index_from_entity(entity::RegistryPublishHistory) {
+        db.execute(stmt.if_not_exists()).await.map_err(|e| {
+            AppError::DatabaseError(format!(
+                "Failed to create registry_publish_history index: {}",
+                e
+            ))
+        })?;
+    }
+    info!("Registry state database initialized successfully (SeaORM)");
+    Ok(db)
+}
+
 /// Percent-encode a URL userinfo component so passwords containing URL-special
 /// characters (@ / # : etc.) do not corrupt the redis:// connection URL.
 fn percent_encode(s: &str) -> String {
