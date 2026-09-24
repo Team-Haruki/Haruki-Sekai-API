@@ -77,8 +77,8 @@ pub async fn init_registry_state_db(dsn: &str) -> Result<DatabaseConnection, App
         ));
     }
     let mut opts = ConnectOptions::new(dsn.trim());
-    // Blob reads (`registry.blob_store: pg`) share the pool; they are bounded
-    // separately so state writes always find a connection.
+    // Blob row queries (`registry.blob_store: pg`) share the pool and are
+    // capped at 4 at once (`registry::blobs`), leaving connections for state writes.
     opts.max_connections(8)
         .min_connections(1)
         .connect_timeout(std::time::Duration::from_secs(30))

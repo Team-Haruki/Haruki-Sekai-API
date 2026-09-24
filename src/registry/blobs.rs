@@ -63,6 +63,12 @@ const GC_BATCH: usize = 500;
 /// most ~1.5 MB, plus a 1 MiB decoder window until the body is sent): high
 /// enough that slow clients cannot starve the rest, ~40 MB worst case.
 pub const READ_CONCURRENCY: usize = 16;
+/// Longest wait for a read slot; past it the read fails like a database
+/// error (current files are then served from disk).
+const READ_WAIT: Duration = Duration::from_secs(10);
+/// Blob row queries at once: below the state pool size (8) so publishes,
+/// touches and GC always find a connection.
+const QUERY_CONCURRENCY: usize = 4;
 
 /// How [`BlobStore::store_manifest`] treats a file it cannot store.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -336,6 +342,7 @@ impl BlobStore for FsBlobStore {
 pub struct DbBlobStore {
     db: DatabaseConnection,
     reads: Arc<Semaphore>,
+    queries: Semaphore,
     grace: Duration,
     gc_lock: tokio::sync::Mutex<()>,
 }
@@ -345,22 +352,30 @@ impl DbBlobStore {
         Self {
             db,
             reads: Arc::new(Semaphore::new(READ_CONCURRENCY)),
+            queries: Semaphore::new(QUERY_CONCURRENCY),
             grace,
             gc_lock: tokio::sync::Mutex::new(()),
         }
     }
 
     async fn fetch(&self, sha256: &str) -> Result<Option<Blob>, AppError> {
-        let permit = self
-            .reads
-            .clone()
-            .acquire_owned()
+        // Slow clients hold a slot until their body is sent: bound the wait
+        // so they cannot stall every other read.
+        let permit = tokio::time::timeout(READ_WAIT, self.reads.clone().acquire_owned())
             .await
-            .map_err(|e| AppError::Internal(format!("blob read permit: {e}")))?;
-        let Some(row) = registry_blob::Entity::find_by_id(sha256.to_string())
-            .one(&self.db)
-            .await?
-        else {
+            .map_err(|_| AppError::Internal("blob read slot: timed out".to_string()))?
+            .map_err(|e| AppError::Internal(format!("blob read slot: {e}")))?;
+        let row = {
+            let _query = self
+                .queries
+                .acquire()
+                .await
+                .map_err(|e| AppError::Internal(format!("blob query slot: {e}")))?;
+            registry_blob::Entity::find_by_id(sha256.to_string())
+                .one(&self.db)
+                .await?
+        };
+        let Some(row) = row else {
             return Ok(None);
         };
         if row.encoding != ENCODING_ZSTD {

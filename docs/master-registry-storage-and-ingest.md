@@ -124,14 +124,17 @@ would stop being identical to the fs store's.
   with the fs store's digest check. The bundle falls back to the directory tar
   while any blob is missing.
 - **Memory.** At most 16 blob responses are in flight at once
-  (`READ_CONCURRENCY`, a semaphore held for the whole stream, so slow clients
-  cannot starve the others). The 37 MB file stores as 0.85 MB, so the largest
+  (`READ_CONCURRENCY`, a semaphore held for the whole stream). A read waits
+  at most 10 s for a slot, so slow clients cannot stall the others; after
+  that, a current file is served from disk, and any other read fails with an
+  error. The 37 MB file stores as 0.85 MB, so the largest
   blob is about 1.3 MB, and each decoder has a 1 MiB window. The worst case is
   therefore about 40 MB. The bundle
   is written by a blocking task into a bounded channel of eight 64 KiB chunks,
   one blob at a time, with no temp file. The state pool grew from 4 to 8
-  connections. A blob holds a connection only for its single-row fetch (a
-  few ms), not while the body streams. No extra
+  connections. At most 4 blob row queries run at once, so state writes always
+  find a connection. A blob holds a connection only for its single-row fetch,
+  not while the body streams. No extra
   server-side cache is added: blob URLs are immutable and EdgeOne caches them,
   `files/` is revalidated with 304s, and decompressing 1.5 MB takes about 2 ms.
 
