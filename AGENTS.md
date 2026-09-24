@@ -49,6 +49,9 @@ src/
                              every push and refuses to commit when the remote diverged
     master_stream.rs       – Table-by-table streaming decode of a downloaded master
                              payload (rows streamed one at a time)
+    prune.rs               – Stale master file pruning after a complete dump/bundle:
+                             protect list, ratio + absolute cap guards, producer-side
+                             two-consecutive-dumps rule (pending set outside the worktree)
     apphash.rs             – AppHashUpdater: poll file/URL sources for new app hashes
   registry/
     service.rs             – MasterRegistry: per-region pull via MasterSyncer, git push,
@@ -125,6 +128,12 @@ haruki-sekai-configs.example.yaml – Configuration template
   so the producer's peak memory is bounded by one row rather than the whole payload.
   Keep new master consumers on that path — never `unpack_ordered` a whole master
 - Ingestion streams row batches; `master_database.ingest_concurrency` bounds its memory
+- After a complete dump (every split decoded) or a complete bundle unpack, `*.json` files the
+  dump did not produce are deleted before ingest and git push (`updater/prune.rs`); a failed or
+  partial run never prunes. The producer deletes only after two consecutive complete dumps miss
+  a table; both sides honour `BUILTIN_PROTECTED_TABLES` + `prune_protect`, `prune_min_ratio` and
+  `prune_max_files`. Keep the protect list in sync with consumers' required tables. Ingest leaves
+  the DB rows of a pruned table in place
 
 ### Master Registry
 - The `master_registry` binary is the authoritative master data source other projects

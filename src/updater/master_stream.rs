@@ -140,6 +140,8 @@ pub struct MasterTableWriter<'a> {
     open: Option<RowFile>,
     written: usize,
     skipped: usize,
+    /// File names (`<table>.json`) this writer put in place.
+    produced: HashSet<String>,
 }
 
 struct RowFile {
@@ -164,6 +166,7 @@ impl<'a> MasterTableWriter<'a> {
             open: None,
             written: 0,
             skipped: 0,
+            produced: HashSet::new(),
         }
     }
 
@@ -173,6 +176,12 @@ impl<'a> MasterTableWriter<'a> {
 
     pub fn skipped(&self) -> usize {
         self.skipped
+    }
+
+    /// Take the names of the files written so far (`<table>.json`), the
+    /// dump's file set for stale-file pruning.
+    pub fn take_produced(&mut self) -> HashSet<String> {
+        std::mem::take(&mut self.produced)
     }
 
     fn check_key(&mut self, key: &str) -> Result<(), AppError> {
@@ -194,6 +203,7 @@ impl<'a> MasterTableWriter<'a> {
         self.check_key(key)?;
         write_master_table(self.master_dir, key, value)?;
         self.written += 1;
+        self.produced.insert(format!("{}.json", key));
         Ok(())
     }
 }
@@ -289,6 +299,7 @@ impl MasterSink for MasterTableWriter<'_> {
         }
         result?;
         self.written += 1;
+        self.produced.insert(format!("{}.json", key));
         Ok(())
     }
 
@@ -544,6 +555,17 @@ mod tests {
         assert!(root.join("widgetItemsObj.json").exists());
         assert_eq!(writer.written(), 5);
         assert_eq!(writer.skipped(), 1);
+        let mut produced: Vec<String> = writer.take_produced().into_iter().collect();
+        produced.sort();
+        assert_eq!(
+            produced,
+            [
+                "compactWidgetItems.json",
+                "widgetItems.json",
+                "widgetItems2.json",
+                "widgetItemsObj.json"
+            ]
+        );
         drop(writer);
         assert!(std::fs::read_dir(&root).unwrap().all(|e| !e
             .unwrap()

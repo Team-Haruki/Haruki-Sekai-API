@@ -733,8 +733,10 @@ treating difference as an update",
         );
         let master_dir = &self.client.config.master_dir;
         tokio::fs::create_dir_all(master_dir).await?;
-        self.download_master_files(session, login, master_dir)
+        let produced = self
+            .download_master_files(session, login, master_dir)
             .await?;
+        self.prune_stale_files(master_dir, produced).await?;
         self.ingest_master_files(master_dir).await;
         info!(
             "{} Master data updated",
@@ -747,13 +749,15 @@ treating difference as an update",
     /// Nuverse: the single CDN blob) into a staging directory and decode each
     /// one table by table into `master_dir`. Only one payload is staged at a
     /// time and the in-memory footprint is bounded by the largest table.
+    /// Returns the names of every file the update wrote (union over splits).
     async fn download_master_files(
         &self,
         session: Option<&AccountSession>,
         login: &LoginResponse,
         master_dir: &str,
-    ) -> Result<(), AppError> {
+    ) -> Result<std::collections::HashSet<String>, AppError> {
         let staging = StagingDir::new(self.region)?;
+        let mut produced = std::collections::HashSet::new();
         if self.region.is_cp_server() {
             let paths: Vec<String> = login
                 .suite_master_split_path
@@ -778,7 +782,7 @@ treating difference as an update",
                     self.download_cp_master_split(session, api_path, &cipher)
                         .await?;
                 }
-                self.decode_master_payload(&cipher, master_dir).await?;
+                produced.extend(self.decode_master_payload(&cipher, master_dir).await?);
                 let _ = tokio::fs::remove_file(&cipher).await;
             }
         } else {
@@ -788,21 +792,21 @@ treating difference as an update",
             );
             let cipher = staging.file("nuverse.bin");
             self.download_nuverse_master(&url, &cipher).await?;
-            self.decode_master_payload(&cipher, master_dir).await?;
+            produced.extend(self.decode_master_payload(&cipher, master_dir).await?);
         }
-        Ok(())
+        Ok(produced)
     }
 
     /// Decrypt a staged payload through a streaming reader and walk it
     /// table by table (rows streamed for array tables) into `master_dir`,
     /// with Nuverse schema restoration when this region has a schema store.
     /// Runs on the blocking pool; the in-memory footprint is one row of the
-    /// largest table plus fixed buffers. Returns the top-level table count.
+    /// largest table plus fixed buffers. Returns the names of the files written.
     async fn decode_master_payload(
         &self,
         cipher_path: &Path,
         master_dir: &str,
-    ) -> Result<usize, AppError> {
+    ) -> Result<std::collections::HashSet<String>, AppError> {
         let config = &self.client.config;
         let cryptor = if config.master_aes_key_hex.is_empty() && config.master_aes_iv_hex.is_empty()
         {
@@ -821,7 +825,7 @@ treating difference as an update",
         let cipher_path = cipher_path.to_path_buf();
         let master_dir = PathBuf::from(master_dir);
         let region_upper = self.region.as_str().to_uppercase();
-        tokio::task::spawn_blocking(move || -> Result<usize, AppError> {
+        tokio::task::spawn_blocking(move || -> Result<std::collections::HashSet<String>, AppError> {
             let cipher_len = std::fs::metadata(&cipher_path)?.len();
             let reader = cryptor.decrypt_reader(std::io::BufReader::with_capacity(
                 1 << 20,
@@ -837,10 +841,36 @@ treating difference as an update",
                 writer.written(),
                 writer.skipped()
             );
-            Ok(tables)
+            Ok(writer.take_produced())
         })
         .await
         .map_err(|e| AppError::Internal(format!("master decode task: {}", e)))?
+    }
+
+    /// Delete master files the complete dump just written did not produce
+    /// (see `updater::prune`). Only reached after every payload of the update
+    /// decoded successfully, and before the version save / git commit.
+    async fn prune_stale_files(
+        &self,
+        master_dir: &str,
+        produced: std::collections::HashSet<String>,
+    ) -> Result<(), AppError> {
+        let policy = super::prune::PrunePolicy::for_producer(&self.client.config, self.region);
+        let master_dir = PathBuf::from(master_dir);
+        let version_path = self.client.config.version_path.clone();
+        let region_upper = self.region.as_str().to_uppercase();
+        tokio::task::spawn_blocking(move || {
+            super::prune::prune_stale_master_files(
+                &master_dir,
+                &version_path,
+                &produced,
+                &policy,
+                &region_upper,
+            )
+        })
+        .await
+        .map_err(|e| AppError::Internal(format!("prune task: {}", e)))??;
+        Ok(())
     }
 
     async fn ingest_master_files(&self, master_dir: &str) {
@@ -1324,6 +1354,10 @@ mod tests {
         config.master_dir = root.join("master").to_string_lossy().into_owned();
         config.account_dir = root.join("accounts").to_string_lossy().into_owned();
         config.version_path = root.join("version.json").to_string_lossy().into_owned();
+        config.prune_pending_path = root
+            .join("prune-pending.json")
+            .to_string_lossy()
+            .into_owned();
         std::fs::create_dir_all(&config.account_dir).unwrap();
         std::fs::write(
             &config.version_path,
@@ -1491,7 +1525,7 @@ mod tests {
             .decode_master_payload(&cipher, master_dir.to_str().unwrap())
             .await
             .unwrap();
-        assert_eq!(tables, 2);
+        assert_eq!(tables.len(), 2);
         assert!(master_dir.join("cards.json").exists());
         assert!(master_dir.join("musics.json").exists());
         assert!(
@@ -1848,6 +1882,103 @@ mod tests {
         let events: serde_json::Value =
             sonic_rs::from_slice(&std::fs::read(master_dir.join("events.json")).unwrap()).unwrap();
         assert_eq!(events[0]["id"], 1);
+        server.abort();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    async fn path_handler(
+        State(bodies): State<Arc<std::collections::HashMap<String, Vec<u8>>>>,
+        uri: axum::http::Uri,
+    ) -> Response<Body> {
+        let split = uri.path().rsplit('/').next().unwrap_or_default();
+        let body = bodies.get(split).cloned().unwrap_or_default();
+        Response::builder()
+            .header("content-type", "application/octet-stream")
+            .body(Body::from(body))
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn prunes_stale_files_only_after_a_complete_dump() {
+        let cryptor = crate::crypto::SekaiCryptor::from_hex(KEY, IV).unwrap();
+        let bodies: std::collections::HashMap<String, Vec<u8>> = [
+            (
+                "a".to_string(),
+                cryptor
+                    .pack(&serde_json::json!({"a": [{"id": 1}], "b": []}))
+                    .unwrap(),
+            ),
+            (
+                "b".to_string(),
+                cryptor
+                    .pack(&serde_json::json!({"c": [], "d": {"k": 1}}))
+                    .unwrap(),
+            ),
+            ("bad".to_string(), b"not a master payload".to_vec()),
+        ]
+        .into_iter()
+        .collect();
+        let app = Router::new()
+            .fallback(path_handler)
+            .with_state(Arc::new(bodies));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let root = temp_dir();
+        let updater = make_updater(ServerRegion::Jp, &url, &root, Vec::new()).await;
+        let session = AccountSession::new(crate::client::AccountType::CP(
+            crate::client::SekaiAccountCP {
+                user_id: "1".to_string(),
+                device_id: "device".to_string(),
+                credential: "credential".to_string(),
+            },
+        ));
+        let master = root.join("master");
+        std::fs::create_dir_all(&master).unwrap();
+        std::fs::write(master.join("dropped.json"), "[]").unwrap();
+        std::fs::write(master.join("notes.txt"), "keep").unwrap();
+        let login = |splits: &[&str]| {
+            let mut login = login_response();
+            login.suite_master_split_path = splits.iter().map(|s| s.to_string()).collect();
+            login
+        };
+
+        // A failed split aborts the update before any pruning (or pending).
+        assert!(updater
+            .update_master_data(Some(&session), &login(&["/a", "/bad"]))
+            .await
+            .is_err());
+        assert!(!root.join("prune-pending.json").exists());
+
+        // First complete dump over two splits: the union is kept and the
+        // missing table only becomes pending.
+        updater
+            .update_master_data(Some(&session), &login(&["/a", "b"]))
+            .await
+            .unwrap();
+        assert!(master.join("dropped.json").exists());
+        assert!(root.join("prune-pending.json").exists());
+        // Missing again from the next complete dump: deleted.
+        updater
+            .update_master_data(Some(&session), &login(&["/a", "b"]))
+            .await
+            .unwrap();
+        for name in ["a.json", "b.json", "c.json", "d.json", "notes.txt"] {
+            assert!(master.join(name).exists(), "{name} kept");
+        }
+        assert!(!master.join("dropped.json").exists());
+        std::fs::write(master.join("dropped.json"), "[]").unwrap();
+
+        // A dump far smaller than the directory trips the guard: the update
+        // succeeds but nothing is deleted.
+        updater
+            .update_master_data(Some(&session), &login(&["/a"]))
+            .await
+            .unwrap();
+        for name in ["a.json", "b.json", "c.json", "d.json", "dropped.json"] {
+            assert!(master.join(name).exists(), "{name} kept by the guard");
+        }
         server.abort();
         std::fs::remove_dir_all(root).unwrap();
     }
