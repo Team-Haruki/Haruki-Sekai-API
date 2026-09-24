@@ -41,10 +41,20 @@ pub struct Registry {
 }
 
 impl Registry {
+    /// A registry on file-backed state under `registry.state_dir`.
     pub fn new(config: Arc<Config>, syncers: HashMap<ServerRegion, Arc<MasterSyncer>>) -> Self {
         let state = RegistryState::new(&config.registry.state_dir);
+        Self::with_state(config, syncers, state)
+    }
+
+    /// A registry on the given state (file or database backed).
+    pub fn with_state(
+        config: Arc<Config>,
+        syncers: HashMap<ServerRegion, Arc<MasterSyncer>>,
+        state: RegistryState,
+    ) -> Self {
         let metas = if config.registry.music_metas.enabled {
-            match MusicMetasManager::new(&config) {
+            match MusicMetasManager::new(&config, state.clone()) {
                 Ok(m) => Some(m),
                 Err(e) => {
                     error!("music_metas feed disabled: {}", e);

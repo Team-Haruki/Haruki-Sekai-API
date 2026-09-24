@@ -59,6 +59,11 @@ registry: # master data manager (`master_registry` binary); ignored by the API s
   port: 9998
   token: "" # bearer for PUT/POST endpoints and owner webhooks; empty disables them
   state_dir: "./Data/registry" # manifests, publish history, app-identity overrides
+  # Registry state in a database instead of JSON files under state_dir (PostgreSQL in production;
+  # tables registry_state + registry_publish_history are created on start). Empty keeps the files.
+  # On first start with empty tables the files are imported once (and kept). music_metas blobs stay
+  # under state_dir either way.
+  state_dsn: "" # e.g. "postgres://sekai_api:pass@127.0.0.1:5432/sekai_api"
   subscribers: [] # peers to POST /internal/master-updated after a region is published
   # - url: "http://100.64.0.2:9999"
   #   token: "peer-internal-token"

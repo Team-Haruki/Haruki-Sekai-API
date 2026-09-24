@@ -5,9 +5,10 @@
 //! a mutable pointer plus immutable blobs. Consumers stop fetching upstream
 //! themselves and read the registry instead.
 //!
-//! State layout under `<state_dir>/metas/<region>/`: `current.json` (the
-//! [`MetasRecord`] pointer) and `<sha256>.json` blobs (current plus the
-//! previous one, older blobs are pruned).
+//! The [`MetasRecord`] pointer lives in the registry state (file backend:
+//! `<state_dir>/metas/<region>/current.json`; database backend: a
+//! `registry_state` row). The `<sha256>.json` blobs (current plus the previous
+//! one, older blobs are pruned) always live under `<state_dir>/metas/<region>/`.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -16,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value as JsonValue};
 use tracing::{info, warn};
 
-use super::state::is_hex_digest;
+use super::state::{is_hex_digest, RegistryState};
 use crate::client::helper::write_file_atomic;
 use crate::config::{Config, ServerRegion};
 use crate::error::AppError;
@@ -85,6 +86,7 @@ pub struct MetasRefresh {
 
 pub struct MusicMetasManager {
     dir: PathBuf,
+    state: RegistryState,
     http: reqwest::Client,
     sources: Vec<(ServerRegion, String)>,
     inject_omakase: bool,
@@ -92,7 +94,7 @@ pub struct MusicMetasManager {
 }
 
 impl MusicMetasManager {
-    pub fn new(config: &Config) -> Result<Self, AppError> {
+    pub fn new(config: &Config, state: RegistryState) -> Result<Self, AppError> {
         let settings = &config.registry.music_metas;
         let mut builder = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(60))
@@ -150,7 +152,8 @@ impl MusicMetasManager {
             .map(|(region, _)| (*region, tokio::sync::Mutex::new(())))
             .collect();
         Ok(Self {
-            dir: PathBuf::from(&config.registry.state_dir).join("metas"),
+            dir: state.dir().join("metas"),
+            state,
             http,
             sources,
             inject_omakase: settings.inject_omakase,
@@ -173,23 +176,13 @@ impl MusicMetasManager {
         self.dir.join(region.as_str())
     }
 
-    fn record_path(&self, region: ServerRegion) -> PathBuf {
-        self.region_dir(region).join("current.json")
-    }
-
     /// Path of a content blob; `None` for anything that is not a digest.
     pub fn blob_path(&self, region: ServerRegion, sha256: &str) -> Option<PathBuf> {
         is_hex_digest(sha256).then(|| self.region_dir(region).join(format!("{sha256}.json")))
     }
 
     pub async fn current(&self, region: ServerRegion) -> Result<Option<MetasRecord>, AppError> {
-        match tokio::fs::read(self.record_path(region)).await {
-            Ok(data) => serde_json::from_slice(&data)
-                .map(Some)
-                .map_err(|e| AppError::ParseError(format!("metas record: {e}"))),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(e.into()),
-        }
+        self.state.metas_record(region).await
     }
 
     /// Conditional fetch of one region: 304 refreshes the pointer's
@@ -208,7 +201,20 @@ impl MusicMetasManager {
         };
         let existing = self.current(region).await?;
         let mut req = self.http.get(&url);
-        if let Some(prev) = existing.as_ref().filter(|r| r.source_url == url) {
+        // Revalidate only while the pointed-to blob is on disk: a pointer that
+        // outlived its blob (state in a database, blob volume lost) must
+        // re-download, or a 304 would keep serving a 404 forever.
+        let blob_present = match existing
+            .as_ref()
+            .and_then(|r| self.blob_path(region, &r.sha256))
+        {
+            Some(path) => tokio::fs::try_exists(&path).await.unwrap_or(false),
+            None => false,
+        };
+        if let Some(prev) = existing
+            .as_ref()
+            .filter(|r| r.source_url == url && blob_present)
+        {
             if let Some(etag) = &prev.source_etag {
                 req = req.header("if-none-match", etag);
             }
@@ -336,11 +342,7 @@ impl MusicMetasManager {
         region: ServerRegion,
         record: &MetasRecord,
     ) -> Result<(), AppError> {
-        tokio::fs::create_dir_all(self.region_dir(region)).await?;
-        let json = serde_json::to_vec_pretty(record)
-            .map_err(|e| AppError::ParseError(format!("metas record: {e}")))?;
-        write_file_atomic(&self.record_path(region), &json).await?;
-        Ok(())
+        self.state.set_metas_record(region, record).await
     }
 
     /// Keep the current blob and the previous one; remove older blobs.
@@ -671,7 +673,7 @@ mod tests {
             .sources
             .insert(ServerRegion::Jp, format!("http://{addr}/music_metas.json"));
         // Other regions keep their defaults but are not touched by this test.
-        let manager = MusicMetasManager::new(&config).unwrap();
+        let manager = MusicMetasManager::new(&config, RegistryState::new(&root)).unwrap();
         assert_eq!(manager.regions().len(), 5);
         assert!(manager.current(ServerRegion::Jp).await.unwrap().is_none());
 
@@ -711,6 +713,16 @@ mod tests {
             .unwrap()
             .exists());
         assert!(manager.blob_path(ServerRegion::Jp, "../x").is_none());
+
+        // A pointer whose blob vanished re-downloads instead of revalidating.
+        let blob4 = manager
+            .blob_path(ServerRegion::Jp, &fourth.record.sha256)
+            .unwrap();
+        std::fs::remove_file(&blob4).unwrap();
+        let healed = manager.refresh(ServerRegion::Jp).await.unwrap();
+        assert!(!healed.not_modified && !healed.changed);
+        assert_eq!(up.hits.lock().last().unwrap().as_deref(), None);
+        assert!(blob4.exists());
 
         // Upstream failure leaves the pointer untouched.
         server.abort();

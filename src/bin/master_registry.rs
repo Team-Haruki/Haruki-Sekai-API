@@ -11,6 +11,7 @@ use tracing::{error, info};
 
 use haruki_sekai_api::config::Config;
 use haruki_sekai_api::db;
+use haruki_sekai_api::registry::state::RegistryState;
 use haruki_sekai_api::registry::{http, Registry};
 use haruki_sekai_api::updater::sync::build_syncers;
 
@@ -37,8 +38,17 @@ async fn main() -> anyhow::Result<()> {
         .map(|region| (*region, Arc::new(tokio::sync::Mutex::new(()))))
         .collect();
     let syncers = build_syncers(&config, &HashMap::new(), master_db, &version_locks);
+    let state = if config.registry.state_dsn.trim().is_empty() {
+        info!("Registry state: files under {}", config.registry.state_dir);
+        RegistryState::new(&config.registry.state_dir)
+    } else {
+        let state =
+            RegistryState::connect(&config.registry.state_dir, &config.registry.state_dsn).await?;
+        info!("Registry state: database (registry.state_dsn)");
+        state
+    };
     let config = Arc::new(config);
-    let registry = Arc::new(Registry::new(config.clone(), syncers));
+    let registry = Arc::new(Registry::with_state(config.clone(), syncers, state));
     for region in registry.regions() {
         info!(
             "{} managed (owner: {})",

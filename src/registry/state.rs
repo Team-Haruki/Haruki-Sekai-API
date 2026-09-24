@@ -1,22 +1,46 @@
-//! On-disk registry state. Deliberately plain JSON under `registry.state_dir`
-//! so the skeleton needs no database; the layout is
+//! Registry state: the published manifests (current + immutable snapshots by
+//! content hash), the publish history, app-identity overrides and the
+//! music_metas pointers.
 //!
-//! ```text
-//! <state_dir>/manifests/<region>/current.json   latest published manifest
-//! <state_dir>/manifests/<region>/history.jsonl  one summary line per publish
-//! <state_dir>/app/<region>.json                 app-identity override
-//! ```
+//! Two backends share one API:
 //!
-//! Every write goes through temp+rename so readers never see a torn file.
+//! - **Files** (default, `registry.state_dsn` empty): plain JSON under
+//!   `registry.state_dir`, every write through temp+rename so readers never
+//!   see a torn file:
+//!
+//!   ```text
+//!   <state_dir>/manifests/<region>/current.json          latest published manifest
+//!   <state_dir>/manifests/<region>/history.jsonl         one summary line per publish
+//!   <state_dir>/manifests/<region>/by-hash/<hash>.json   immutable manifest snapshots
+//!   <state_dir>/app/<region>.json                        app-identity override
+//!   <state_dir>/metas/<region>/current.json              music_metas pointer
+//!   ```
+//!
+//! - **Database** (`registry.state_dsn` set, PostgreSQL in production): the
+//!   same documents in `registry_state` keyed by `(region, kind, name)` and
+//!   the history in `registry_publish_history`. A publish (current, snapshot,
+//!   snapshot pruning, history line) is one transaction. On first start with
+//!   empty tables the files above are imported once and left in place.
+//!
+//! music_metas blobs are content, not state: they stay under
+//! `<state_dir>/metas/<region>/` with either backend.
 
 use std::path::{Path, PathBuf};
 
+use chrono::{DateTime, Utc};
+use sea_orm::sea_query::OnConflict;
+use sea_orm::{
+    ActiveValue::Set, ColumnTrait, ConnectionTrait, DatabaseConnection, EntityTrait,
+    PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, TransactionTrait,
+};
 use serde::{Deserialize, Serialize};
+use tracing::{info, warn};
 
 use crate::api::internal::MasterManifest;
 use crate::client::helper::write_file_atomic;
 use crate::client::helper::AppInfo;
 use crate::config::ServerRegion;
+use crate::db::entity::{registry_publish_history, registry_state};
 use crate::error::AppError;
 
 /// One publish, as recorded in the history log.
@@ -62,18 +86,58 @@ pub fn content_hash(manifest: &MasterManifest) -> String {
 /// Immutable manifest snapshots kept per region (newest publishes).
 const MANIFEST_SNAPSHOTS_KEPT: usize = 20;
 
+const ALL_REGIONS: [ServerRegion; 5] = [
+    ServerRegion::Jp,
+    ServerRegion::En,
+    ServerRegion::Tw,
+    ServerRegion::Kr,
+    ServerRegion::Cn,
+];
+
+/// `registry_state.kind` values.
+const KIND_MANIFEST: &str = "manifest";
+const KIND_SNAPSHOT: &str = "manifest_snapshot";
+const KIND_APP: &str = "app_identity";
+const KIND_METAS: &str = "metas_record";
+/// `registry_state.name` of the singleton documents.
+const NAME_CURRENT: &str = "current";
+
 #[derive(Debug, Clone)]
 pub struct RegistryState {
     dir: PathBuf,
+    /// Set when the state lives in a database instead of `dir`.
+    db: Option<DatabaseConnection>,
 }
 
 impl RegistryState {
+    /// File-backed state under `dir`.
     pub fn new(dir: impl Into<PathBuf>) -> Self {
-        Self { dir: dir.into() }
+        Self {
+            dir: dir.into(),
+            db: None,
+        }
+    }
+
+    /// Database-backed state: connect to `dsn`, create the tables when
+    /// missing and, when they are empty, import the file state under `dir`
+    /// once. `dir` still holds the music_metas blobs.
+    pub async fn connect(dir: impl Into<PathBuf>, dsn: &str) -> Result<Self, AppError> {
+        let db = crate::db::init_registry_state_db(dsn).await?;
+        let state = Self {
+            dir: dir.into(),
+            db: Some(db),
+        };
+        state.import_files_if_empty().await?;
+        Ok(state)
     }
 
     pub fn dir(&self) -> &Path {
         &self.dir
+    }
+
+    /// Whether the state lives in a database (else in files under `dir`).
+    pub fn is_database(&self) -> bool {
+        self.db.is_some()
     }
 
     fn manifest_dir(&self, region: ServerRegion) -> PathBuf {
@@ -92,6 +156,19 @@ impl RegistryState {
         self.manifest_dir(region).join("by-hash")
     }
 
+    fn app_path(&self, region: ServerRegion) -> PathBuf {
+        self.dir
+            .join("app")
+            .join(format!("{}.json", region.as_str()))
+    }
+
+    fn metas_record_path(&self, region: ServerRegion) -> PathBuf {
+        self.dir
+            .join("metas")
+            .join(region.as_str())
+            .join("current.json")
+    }
+
     /// An immutable manifest snapshot by content hash, if still kept.
     pub async fn manifest_by_hash(
         &self,
@@ -101,6 +178,9 @@ impl RegistryState {
         if !is_hex_digest(content_hash) {
             return Ok(None);
         }
+        if let Some(db) = &self.db {
+            return db_get(db, region, KIND_SNAPSHOT, content_hash).await;
+        }
         read_json(
             &self
                 .snapshot_dir(region)
@@ -109,14 +189,11 @@ impl RegistryState {
         .await
     }
 
-    fn app_path(&self, region: ServerRegion) -> PathBuf {
-        self.dir
-            .join("app")
-            .join(format!("{}.json", region.as_str()))
-    }
-
     /// The latest published manifest, if any.
     pub async fn current(&self, region: ServerRegion) -> Result<Option<MasterManifest>, AppError> {
+        if let Some(db) = &self.db {
+            return db_get(db, region, KIND_MANIFEST, NAME_CURRENT).await;
+        }
         read_json(&self.current_path(region)).await
     }
 
@@ -126,6 +203,18 @@ impl RegistryState {
         region: ServerRegion,
         limit: usize,
     ) -> Result<Vec<PublishRecord>, AppError> {
+        if let Some(db) = &self.db {
+            let rows = registry_publish_history::Entity::find()
+                .filter(registry_publish_history::Column::Region.eq(region.as_str()))
+                .order_by_desc(registry_publish_history::Column::Id)
+                .limit(limit as u64)
+                .all(db)
+                .await?;
+            return Ok(rows
+                .into_iter()
+                .filter_map(|row| serde_json::from_value(row.record).ok())
+                .collect());
+        }
         let path = self.history_path(region);
         let text = match tokio::fs::read_to_string(&path).await {
             Ok(t) => t,
@@ -145,22 +234,18 @@ impl RegistryState {
     /// Record `manifest` as the region's current state. Returns `true` when
     /// it differs from the previous publish (version or file set), in which
     /// case a history line is appended; an unchanged republish only refreshes
-    /// `current.json`.
+    /// `current`.
     pub async fn publish(
         &self,
         region: ServerRegion,
         manifest: &MasterManifest,
     ) -> Result<bool, AppError> {
         let record = PublishRecord::from_manifest(manifest);
+        if let Some(db) = &self.db {
+            return self.publish_db(db, region, manifest, &record).await;
+        }
         let previous = self.current(region).await?;
-        let changed = match previous {
-            Some(prev) => {
-                prev.data_version != manifest.data_version
-                    || prev.cdn_version != manifest.cdn_version
-                    || content_hash(&prev) != record.content_hash
-            }
-            None => true,
-        };
+        let changed = is_changed(previous.as_ref(), manifest, &record);
         tokio::fs::create_dir_all(self.snapshot_dir(region)).await?;
         let json = serde_json::to_vec_pretty(manifest)
             .map_err(|e| AppError::ParseError(format!("manifest: {e}")))?;
@@ -191,6 +276,76 @@ impl RegistryState {
         Ok(changed)
     }
 
+    /// The database publish: current, snapshot, snapshot pruning and the
+    /// history line commit together or not at all.
+    async fn publish_db(
+        &self,
+        db: &DatabaseConnection,
+        region: ServerRegion,
+        manifest: &MasterManifest,
+        record: &PublishRecord,
+    ) -> Result<bool, AppError> {
+        let txn = db.begin().await?;
+        let previous: Option<MasterManifest> =
+            db_get(&txn, region, KIND_MANIFEST, NAME_CURRENT).await?;
+        let changed = is_changed(previous.as_ref(), manifest, record);
+        let now = Utc::now();
+        let value = to_json(manifest, "manifest")?;
+        db_put(
+            &txn,
+            region,
+            KIND_MANIFEST,
+            NAME_CURRENT,
+            value.clone(),
+            now,
+        )
+        .await?;
+        if is_hex_digest(&record.content_hash) {
+            db_put(
+                &txn,
+                region,
+                KIND_SNAPSHOT,
+                &record.content_hash,
+                value,
+                now,
+            )
+            .await?;
+            let stale: Vec<String> = registry_state::Entity::find()
+                .select_only()
+                .column(registry_state::Column::Name)
+                .filter(registry_state::Column::Region.eq(region.as_str()))
+                .filter(registry_state::Column::Kind.eq(KIND_SNAPSHOT))
+                .order_by_desc(registry_state::Column::UpdatedAt)
+                .order_by_desc(registry_state::Column::Name)
+                .into_tuple::<String>()
+                .all(&txn)
+                .await?
+                .into_iter()
+                .skip(MANIFEST_SNAPSHOTS_KEPT)
+                .collect();
+            if !stale.is_empty() {
+                registry_state::Entity::delete_many()
+                    .filter(registry_state::Column::Region.eq(region.as_str()))
+                    .filter(registry_state::Column::Kind.eq(KIND_SNAPSHOT))
+                    .filter(registry_state::Column::Name.is_in(stale))
+                    .exec(&txn)
+                    .await?;
+            }
+        }
+        if changed {
+            registry_publish_history::Entity::insert(registry_publish_history::ActiveModel {
+                region: Set(region.as_str().to_string()),
+                record: Set(to_json(record, "publish record")?),
+                recorded_at: Set(now),
+                ..Default::default()
+            })
+            .exec(&txn)
+            .await?;
+        }
+        txn.commit().await?;
+        Ok(changed)
+    }
+
     /// Keep only the newest `MANIFEST_SNAPSHOTS_KEPT` snapshots (by mtime).
     async fn prune_snapshots(&self, region: ServerRegion) {
         let Ok(mut rd) = tokio::fs::read_dir(self.snapshot_dir(region)).await else {
@@ -214,6 +369,9 @@ impl RegistryState {
 
     /// The operator-set app identity for a region, if one was stored.
     pub async fn app_identity(&self, region: ServerRegion) -> Result<Option<AppInfo>, AppError> {
+        if let Some(db) = &self.db {
+            return db_get(db, region, KIND_APP, NAME_CURRENT).await;
+        }
         read_json(&self.app_path(region)).await
     }
 
@@ -222,6 +380,10 @@ impl RegistryState {
         region: ServerRegion,
         info: &AppInfo,
     ) -> Result<(), AppError> {
+        if let Some(db) = &self.db {
+            let value = to_json(info, "app identity")?;
+            return db_put(db, region, KIND_APP, NAME_CURRENT, value, Utc::now()).await;
+        }
         let path = self.app_path(region);
         if let Some(parent) = path.parent() {
             tokio::fs::create_dir_all(parent).await?;
@@ -233,12 +395,224 @@ impl RegistryState {
     }
 
     pub async fn clear_app_identity(&self, region: ServerRegion) -> Result<bool, AppError> {
+        if let Some(db) = &self.db {
+            let result = registry_state::Entity::delete_many()
+                .filter(registry_state::Column::Region.eq(region.as_str()))
+                .filter(registry_state::Column::Kind.eq(KIND_APP))
+                .filter(registry_state::Column::Name.eq(NAME_CURRENT))
+                .exec(db)
+                .await?;
+            return Ok(result.rows_affected > 0);
+        }
         match tokio::fs::remove_file(self.app_path(region)).await {
             Ok(()) => Ok(true),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
             Err(e) => Err(e.into()),
         }
     }
+
+    /// The music_metas pointer of a region, if one was stored.
+    pub async fn metas_record<T: serde::de::DeserializeOwned>(
+        &self,
+        region: ServerRegion,
+    ) -> Result<Option<T>, AppError> {
+        if let Some(db) = &self.db {
+            return db_get(db, region, KIND_METAS, NAME_CURRENT).await;
+        }
+        read_json(&self.metas_record_path(region)).await
+    }
+
+    pub async fn set_metas_record<T: Serialize>(
+        &self,
+        region: ServerRegion,
+        record: &T,
+    ) -> Result<(), AppError> {
+        if let Some(db) = &self.db {
+            let value = to_json(record, "metas record")?;
+            return db_put(db, region, KIND_METAS, NAME_CURRENT, value, Utc::now()).await;
+        }
+        let path = self.metas_record_path(region);
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        let json = serde_json::to_vec_pretty(record)
+            .map_err(|e| AppError::ParseError(format!("metas record: {e}")))?;
+        write_file_atomic(&path, &json).await?;
+        Ok(())
+    }
+
+    /// One-time import of the file state into empty database tables, in one
+    /// transaction. Unreadable files are skipped with a warning; the files
+    /// themselves are never modified or removed.
+    async fn import_files_if_empty(&self) -> Result<usize, AppError> {
+        let Some(db) = &self.db else {
+            return Ok(0);
+        };
+        let documents = registry_state::Entity::find().count(db).await?;
+        let history = registry_publish_history::Entity::find().count(db).await?;
+        if documents > 0 || history > 0 {
+            return Ok(0);
+        }
+        let files = RegistryState::new(self.dir.clone());
+        let txn = db.begin().await?;
+        let mut imported = 0usize;
+        for region in ALL_REGIONS {
+            let singles = [
+                (KIND_MANIFEST, files.current_path(region)),
+                (KIND_APP, files.app_path(region)),
+                (KIND_METAS, files.metas_record_path(region)),
+            ];
+            for (kind, path) in singles {
+                if let Some((value, at)) = import_document(&path).await {
+                    db_put(&txn, region, kind, NAME_CURRENT, value, at).await?;
+                    imported += 1;
+                }
+            }
+            if let Ok(mut rd) = tokio::fs::read_dir(files.snapshot_dir(region)).await {
+                while let Ok(Some(entry)) = rd.next_entry().await {
+                    let name = entry.file_name().to_string_lossy().into_owned();
+                    let Some(hash) = name.strip_suffix(".json").filter(|h| is_hex_digest(h)) else {
+                        continue;
+                    };
+                    if let Some((value, at)) = import_document(&entry.path()).await {
+                        db_put(&txn, region, KIND_SNAPSHOT, hash, value, at).await?;
+                        imported += 1;
+                    }
+                }
+            }
+            // Oldest first, so ids ascend in publish order like the log.
+            let mut records = files.history(region, usize::MAX).await?;
+            records.reverse();
+            for record in records {
+                let at = DateTime::parse_from_rfc3339(&record.published_at)
+                    .map(|t| t.with_timezone(&Utc))
+                    .unwrap_or_else(|_| Utc::now());
+                registry_publish_history::Entity::insert(registry_publish_history::ActiveModel {
+                    region: Set(region.as_str().to_string()),
+                    record: Set(to_json(&record, "publish record")?),
+                    recorded_at: Set(at),
+                    ..Default::default()
+                })
+                .exec(&txn)
+                .await?;
+                imported += 1;
+            }
+        }
+        txn.commit().await?;
+        if imported > 0 {
+            info!(
+                "Imported {} registry state entries from {} into the database (files kept)",
+                imported,
+                self.dir.display()
+            );
+        }
+        Ok(imported)
+    }
+}
+
+fn is_changed(
+    previous: Option<&MasterManifest>,
+    manifest: &MasterManifest,
+    record: &PublishRecord,
+) -> bool {
+    match previous {
+        Some(prev) => {
+            prev.data_version != manifest.data_version
+                || prev.cdn_version != manifest.cdn_version
+                || content_hash(prev) != record.content_hash
+        }
+        None => true,
+    }
+}
+
+fn to_json<T: Serialize>(value: &T, what: &str) -> Result<serde_json::Value, AppError> {
+    serde_json::to_value(value).map_err(|e| AppError::ParseError(format!("{what}: {e}")))
+}
+
+async fn db_get<C: ConnectionTrait, T: serde::de::DeserializeOwned>(
+    conn: &C,
+    region: ServerRegion,
+    kind: &str,
+    name: &str,
+) -> Result<Option<T>, AppError> {
+    let row = registry_state::Entity::find_by_id((
+        region.as_str().to_string(),
+        kind.to_string(),
+        name.to_string(),
+    ))
+    .one(conn)
+    .await?;
+    row.map(|row| {
+        serde_json::from_value(row.value).map_err(|e| {
+            AppError::ParseError(format!(
+                "registry_state {}/{kind}/{name}: {e}",
+                region.as_str()
+            ))
+        })
+    })
+    .transpose()
+}
+
+async fn db_put<C: ConnectionTrait>(
+    conn: &C,
+    region: ServerRegion,
+    kind: &str,
+    name: &str,
+    value: serde_json::Value,
+    at: DateTime<Utc>,
+) -> Result<(), AppError> {
+    registry_state::Entity::insert(registry_state::ActiveModel {
+        region: Set(region.as_str().to_string()),
+        kind: Set(kind.to_string()),
+        name: Set(name.to_string()),
+        value: Set(value),
+        updated_at: Set(at),
+    })
+    .on_conflict(
+        OnConflict::columns([
+            registry_state::Column::Region,
+            registry_state::Column::Kind,
+            registry_state::Column::Name,
+        ])
+        .update_columns([
+            registry_state::Column::Value,
+            registry_state::Column::UpdatedAt,
+        ])
+        .to_owned(),
+    )
+    .exec(conn)
+    .await?;
+    Ok(())
+}
+
+/// A state file's JSON and mtime, or `None` (with a warning when it exists
+/// but cannot be read or parsed).
+async fn import_document(path: &Path) -> Option<(serde_json::Value, DateTime<Utc>)> {
+    let data = match tokio::fs::read(path).await {
+        Ok(data) => data,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(e) => {
+            warn!(
+                "Skipping unreadable registry state {}: {}",
+                path.display(),
+                e
+            );
+            return None;
+        }
+    };
+    let value: serde_json::Value = match serde_json::from_slice(&data) {
+        Ok(v) => v,
+        Err(e) => {
+            warn!("Skipping corrupt registry state {}: {}", path.display(), e);
+            return None;
+        }
+    };
+    let at = tokio::fs::metadata(path)
+        .await
+        .and_then(|m| m.modified())
+        .map(DateTime::<Utc>::from)
+        .unwrap_or_else(|_| Utc::now());
+    Some((value, at))
 }
 
 /// A lowercase hex SHA-256, the only shape accepted in digest-keyed paths.
@@ -376,5 +750,188 @@ mod tests {
             Err(AppError::ParseError(_))
         ));
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    fn hex(n: usize) -> String {
+        format!("{:064x}", n)
+    }
+
+    /// The database backend against `dsn`, starting from a file state that
+    /// must be imported once and then left alone.
+    async fn exercise_database_state(dsn: &str) {
+        let root =
+            std::env::temp_dir().join(format!("haruki_registry_db_{}", uuid::Uuid::new_v4()));
+        let files = RegistryState::new(&root);
+        let first = manifest("1", &[("cards.json", "aa")]);
+        let second = manifest("2", &[("cards.json", "bb")]);
+        assert!(files.publish(ServerRegion::Jp, &first).await.unwrap());
+        assert!(files.publish(ServerRegion::Jp, &second).await.unwrap());
+        let app = AppInfo {
+            app_version: "5.7.0".to_string(),
+            app_hash: "override".to_string(),
+        };
+        files
+            .set_app_identity(ServerRegion::Kr, &app)
+            .await
+            .unwrap();
+        let metas = serde_json::json!({"region": "jp", "sha256": hex(7), "rows": 3});
+        files
+            .set_metas_record(ServerRegion::Jp, &metas)
+            .await
+            .unwrap();
+
+        let state = RegistryState::connect(&root, dsn).await.unwrap();
+        assert!(state.is_database());
+        // Imported: every document and the history in publish order.
+        assert_eq!(
+            state
+                .current(ServerRegion::Jp)
+                .await
+                .unwrap()
+                .unwrap()
+                .data_version,
+            "2"
+        );
+        let history = state.history(ServerRegion::Jp, 10).await.unwrap();
+        assert_eq!(history, files.history(ServerRegion::Jp, 10).await.unwrap());
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0].data_version, "2");
+        for record in &history {
+            assert!(state
+                .manifest_by_hash(ServerRegion::Jp, &record.content_hash)
+                .await
+                .unwrap()
+                .is_some());
+        }
+        assert_eq!(
+            state.app_identity(ServerRegion::Kr).await.unwrap(),
+            Some(app.clone())
+        );
+        assert_eq!(
+            state
+                .metas_record::<serde_json::Value>(ServerRegion::Jp)
+                .await
+                .unwrap(),
+            Some(metas.clone())
+        );
+        assert!(state.current(ServerRegion::En).await.unwrap().is_none());
+
+        // Same publish semantics as the files: an unchanged republish only
+        // refreshes current, a changed file set appends history.
+        let mut same = second.clone();
+        same.generated_at = "2026-09-11T00:00:09Z".to_string();
+        assert!(!state.publish(ServerRegion::Jp, &same).await.unwrap());
+        assert_eq!(
+            state
+                .current(ServerRegion::Jp)
+                .await
+                .unwrap()
+                .unwrap()
+                .generated_at,
+            same.generated_at
+        );
+        assert_eq!(state.history(ServerRegion::Jp, 10).await.unwrap().len(), 2);
+        assert!(state
+            .publish(ServerRegion::Jp, &manifest("2", &[("cards.json", "cc")]))
+            .await
+            .unwrap());
+        assert_eq!(state.history(ServerRegion::Jp, 10).await.unwrap().len(), 3);
+        assert_eq!(state.history(ServerRegion::Jp, 1).await.unwrap().len(), 1);
+        assert!(state
+            .history(ServerRegion::En, 10)
+            .await
+            .unwrap()
+            .is_empty());
+        // The files are left untouched by database writes.
+        assert_eq!(files.history(ServerRegion::Jp, 10).await.unwrap().len(), 2);
+
+        // Snapshots are capped at the newest MANIFEST_SNAPSHOTS_KEPT.
+        let mut hashes = Vec::new();
+        for n in 0..(MANIFEST_SNAPSHOTS_KEPT + 3) {
+            let mut m = manifest("3", &[("cards.json", "dd")]);
+            m.content_hash = hex(1000 + n);
+            hashes.push(m.content_hash.clone());
+            assert!(state.publish(ServerRegion::Tw, &m).await.unwrap());
+        }
+        let mut kept = 0;
+        for hash in &hashes {
+            if state
+                .manifest_by_hash(ServerRegion::Tw, hash)
+                .await
+                .unwrap()
+                .is_some()
+            {
+                kept += 1;
+            }
+        }
+        assert_eq!(kept, MANIFEST_SNAPSHOTS_KEPT);
+        assert!(state
+            .manifest_by_hash(ServerRegion::Tw, hashes.last().unwrap())
+            .await
+            .unwrap()
+            .is_some());
+        assert!(state
+            .manifest_by_hash(ServerRegion::Tw, &hashes[0])
+            .await
+            .unwrap()
+            .is_none());
+        assert!(state
+            .manifest_by_hash(ServerRegion::Jp, "../current")
+            .await
+            .unwrap()
+            .is_none());
+
+        assert!(state.clear_app_identity(ServerRegion::Kr).await.unwrap());
+        assert!(!state.clear_app_identity(ServerRegion::Kr).await.unwrap());
+        assert!(state
+            .app_identity(ServerRegion::Kr)
+            .await
+            .unwrap()
+            .is_none());
+        state
+            .set_metas_record(ServerRegion::Jp, &serde_json::json!({"sha256": hex(8)}))
+            .await
+            .unwrap();
+
+        // A restart does not import again: the database stays authoritative.
+        let again = RegistryState::connect(&root, dsn).await.unwrap();
+        assert_eq!(again.history(ServerRegion::Jp, 10).await.unwrap().len(), 3);
+        assert!(again
+            .app_identity(ServerRegion::Kr)
+            .await
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            again
+                .metas_record::<serde_json::Value>(ServerRegion::Jp)
+                .await
+                .unwrap(),
+            Some(serde_json::json!({"sha256": hex(8)}))
+        );
+        assert!(root.join("app/kr.json").exists(), "files are kept");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn database_state_on_sqlite() {
+        let db = std::env::temp_dir().join(format!("haruki_registry_{}.db", uuid::Uuid::new_v4()));
+        exercise_database_state(&format!("sqlite://{}?mode=rwc", db.display())).await;
+        let _ = std::fs::remove_file(db);
+    }
+
+    /// Set `HARUKI_TEST_REGISTRY_DSN` to a scratch PostgreSQL database (its
+    /// registry tables are dropped first), then `cargo test -- --ignored`.
+    #[tokio::test]
+    #[ignore] // Requires a running PostgreSQL
+    async fn database_state_on_postgres() {
+        let dsn = std::env::var("HARUKI_TEST_REGISTRY_DSN")
+            .unwrap_or_else(|_| "postgres://haruki:sekai@localhost:5432/registry_test".to_string());
+        let db = sea_orm::Database::connect(&dsn).await.unwrap();
+        db.execute_unprepared(
+            "DROP TABLE IF EXISTS registry_state; DROP TABLE IF EXISTS registry_publish_history;",
+        )
+        .await
+        .unwrap();
+        exercise_database_state(&dsn).await;
     }
 }
