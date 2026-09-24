@@ -163,8 +163,10 @@ haruki-sekai-configs.example.yaml – Configuration template
   (`Last-Modified` = first stored). `blob/` then also serves retained snapshots' files;
   `files/` and `bundle` follow `current`. Existing manifests are imported in the background
   at startup (disk, else `git cat-file` at the manifest's `gitCommit`), reads fall back to
-  disk while a blob is missing, and GC removes blobs no current/retained snapshot lists
-  after `blob_gc_grace_secs`. See `docs/master-registry-storage-and-ingest.md`
+  disk while a blob is missing or the database is slow/down (2 s budget per read, then a
+  5 s circuit breaker), and GC removes blobs no current/retained snapshot lists after
+  `blob_gc_grace_secs` (min 300; GC aborts if any snapshot is unreadable). The state pool is
+  8 connections with `pg`, 4 otherwise. See `docs/master-registry-storage-and-ingest.md`
 - It also maintains the music_metas feed (`metas.rs`, omakase rows injected), serves the
   app identity (`GET /v1/app/{region}`; `PUT` stores an override and pushes it to
   `registry.account_nodes`), and fans `master-updated` notices out to
@@ -172,7 +174,7 @@ haruki-sekai-configs.example.yaml – Configuration template
 - `/health` reports `status: degraded` when the last git push failed
 - CDN contract: pointers (`current`, `files/{name}`, `music_metas.json`, `app`) are
   `no-cache` + ETag; digest-addressed `blob/{sha256}` and `manifests/{hash}` are
-  immutable — never serve changing bytes under a digest URL
+  immutable — never serve changing bytes under a digest URL; their 404s/503s are `no-store`
 
 ### Schema System
 - `schema_info.json` defines table names, column types, and unique keys

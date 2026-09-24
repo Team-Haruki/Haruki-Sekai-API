@@ -424,7 +424,8 @@ pub struct RegistryConfig {
     pub blob_store: BlobStoreKind,
     /// `blob_store: pg` only: an unreferenced blob (in no region's current or
     /// retained snapshot manifest) is deleted once it has not been referenced
-    /// by a publish for this many seconds.
+    /// by a publish for this many seconds (at least 300; smaller values are
+    /// raised with a warning).
     #[serde(default = "default_blob_gc_grace_secs")]
     pub blob_gc_grace_secs: u64,
     /// Peers to notify (`POST <url>/internal/master-updated`) after a region

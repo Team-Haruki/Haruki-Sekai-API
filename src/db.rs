@@ -67,19 +67,33 @@ pub async fn init_master_db(config: &DatabaseConfig) -> Result<DatabaseConnectio
     Ok(db)
 }
 
+/// Registry state pool size with `registry.blob_store: fs`.
+pub const REGISTRY_STATE_POOL: u32 = 4;
+
+/// The registry state pool size: blob row queries (`registry.blob_store: pg`)
+/// share the pool and are capped at 4 at once (`registry::blobs`), so the pg
+/// store doubles it to leave connections for state writes.
+pub fn registry_state_pool_size(blob_store: crate::config::BlobStoreKind) -> u32 {
+    match blob_store {
+        crate::config::BlobStoreKind::Fs => REGISTRY_STATE_POOL,
+        crate::config::BlobStoreKind::Pg => REGISTRY_STATE_POOL * 2,
+    }
+}
+
 /// Connect to the registry state database (`registry.state_dsn`) and create
 /// its tables when missing. Any SeaORM backend works; PostgreSQL is the
 /// production target (the value columns are JSONB there).
-pub async fn init_registry_state_db(dsn: &str) -> Result<DatabaseConnection, AppError> {
+pub async fn init_registry_state_db(
+    dsn: &str,
+    max_connections: u32,
+) -> Result<DatabaseConnection, AppError> {
     if dsn.trim().is_empty() {
         return Err(AppError::DatabaseError(
             "Registry state DSN is empty".to_string(),
         ));
     }
     let mut opts = ConnectOptions::new(dsn.trim());
-    // Blob row queries (`registry.blob_store: pg`) share the pool and are
-    // capped at 4 at once (`registry::blobs`), leaving connections for state writes.
-    opts.max_connections(8)
+    opts.max_connections(max_connections.max(1))
         .min_connections(1)
         .connect_timeout(std::time::Duration::from_secs(30))
         .acquire_timeout(std::time::Duration::from_secs(30))

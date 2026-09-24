@@ -43,8 +43,12 @@ async fn main() -> anyhow::Result<()> {
         info!("Registry state: files under {}", config.registry.state_dir);
         RegistryState::new(&config.registry.state_dir)
     } else {
-        let state =
-            RegistryState::connect(&config.registry.state_dir, &config.registry.state_dsn).await?;
+        let state = RegistryState::connect_with_pool(
+            &config.registry.state_dir,
+            &config.registry.state_dsn,
+            db::registry_state_pool_size(config.registry.blob_store),
+        )
+        .await?;
         info!("Registry state: database (registry.state_dsn)");
         state
     };

@@ -143,7 +143,17 @@ impl RegistryState {
     /// missing and, when they are empty, import the file state under `dir`
     /// once. `dir` still holds the music_metas blobs.
     pub async fn connect(dir: impl Into<PathBuf>, dsn: &str) -> Result<Self, AppError> {
-        let db = crate::db::init_registry_state_db(dsn).await?;
+        Self::connect_with_pool(dir, dsn, crate::db::REGISTRY_STATE_POOL).await
+    }
+
+    /// [`Self::connect`] with a pool of `max_connections` (see
+    /// [`crate::db::registry_state_pool_size`]).
+    pub async fn connect_with_pool(
+        dir: impl Into<PathBuf>,
+        dsn: &str,
+        max_connections: u32,
+    ) -> Result<Self, AppError> {
+        let db = crate::db::init_registry_state_db(dsn, max_connections).await?;
         let state = Self {
             dir: dir.into(),
             db: Some(db),
@@ -175,8 +185,26 @@ impl RegistryState {
         self.require_blobs = true;
     }
 
-    /// The retained manifest snapshots of a region, newest first.
+    /// The retained manifest snapshots of a region, newest first. Unreadable
+    /// snapshots are skipped.
     pub async fn snapshots(&self, region: ServerRegion) -> Result<Vec<MasterManifest>, AppError> {
+        self.read_snapshots(region, false).await
+    }
+
+    /// Like [`Self::snapshots`], but any unreadable snapshot is an error
+    /// (garbage collection must not treat its blobs as unreferenced).
+    pub async fn snapshots_strict(
+        &self,
+        region: ServerRegion,
+    ) -> Result<Vec<MasterManifest>, AppError> {
+        self.read_snapshots(region, true).await
+    }
+
+    async fn read_snapshots(
+        &self,
+        region: ServerRegion,
+        strict: bool,
+    ) -> Result<Vec<MasterManifest>, AppError> {
         if let Some(db) = &self.db {
             let rows = registry_state::Entity::find()
                 .filter(registry_state::Column::Region.eq(region.as_str()))
@@ -185,10 +213,21 @@ impl RegistryState {
                 .order_by_desc(registry_state::Column::Name)
                 .all(db)
                 .await?;
-            return Ok(rows
-                .into_iter()
-                .filter_map(|row| serde_json::from_value(row.value).ok())
-                .collect());
+            let mut manifests = Vec::with_capacity(rows.len());
+            for row in rows {
+                match serde_json::from_value(row.value) {
+                    Ok(manifest) => manifests.push(manifest),
+                    Err(e) if strict => {
+                        return Err(AppError::ParseError(format!(
+                            "{} snapshot {}: {e}",
+                            region.as_str(),
+                            row.name
+                        )))
+                    }
+                    Err(_) => {}
+                }
+            }
+            return Ok(manifests);
         }
         let mut entries = Vec::new();
         if let Ok(mut rd) = tokio::fs::read_dir(self.snapshot_dir(region)).await {
@@ -204,8 +243,11 @@ impl RegistryState {
         entries.sort_by_key(|entry| std::cmp::Reverse(entry.0));
         let mut manifests = Vec::new();
         for (_, path) in entries {
-            if let Ok(Some(manifest)) = read_json::<MasterManifest>(&path).await {
-                manifests.push(manifest);
+            match read_json::<MasterManifest>(&path).await {
+                Ok(Some(manifest)) => manifests.push(manifest),
+                Ok(None) => {}
+                Err(e) if strict => return Err(e),
+                Err(_) => {}
             }
         }
         Ok(manifests)
@@ -217,7 +259,10 @@ impl RegistryState {
         let mut digests = HashSet::new();
         for region in ALL_REGIONS {
             let current = self.current(region).await?;
-            for manifest in current.into_iter().chain(self.snapshots(region).await?) {
+            for manifest in current
+                .into_iter()
+                .chain(self.snapshots_strict(region).await?)
+            {
                 digests.extend(manifest.files.into_iter().map(|f| f.sha256));
             }
         }
@@ -372,7 +417,7 @@ impl RegistryState {
         let txn = db.begin().await?;
         if self.require_blobs {
             let digests: Vec<String> = manifest.files.iter().map(|f| f.sha256.clone()).collect();
-            let missing = super::blobs::missing_digests(&txn, &digests).await?;
+            let missing = super::blobs::missing_digests(&txn, &digests, true).await?;
             if !missing.is_empty() {
                 return Err(AppError::Internal(format!(
                     "{} publish refused: {} listed file(s) missing from registry_blobs",

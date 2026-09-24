@@ -74,7 +74,7 @@ registry: # master data manager (`master_registry` binary); ignored by the API s
   # tables (requires state_dsn), serves retained snapshots' files under blob/{sha256} too, and
   # imports existing manifests in the background on first start. Rollback: set "fs" again.
   blob_store: "fs"
-  blob_gc_grace_secs: 86400 # pg: delete unreferenced blobs not referenced by a publish for this long
+  blob_gc_grace_secs: 86400 # pg: delete unreferenced blobs not referenced by a publish for this long (min 300)
   subscribers: [] # peers to POST /internal/master-updated after a region is published
   # - url: "http://100.64.0.2:9999"
   #   token: "peer-internal-token"

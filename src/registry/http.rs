@@ -21,6 +21,8 @@
 //! revalidated (a CDN that ignores `no-cache` needs a bypass rule for those
 //! paths, or clients add a unique query parameter); digest-addressed
 //! resources (`manifests/{hash}`, `blob/{sha256}`) are immutable for a year.
+//! Their 404s (a digest not stored yet, e.g. while the pg import runs) and
+//! 503s (pg store unreachable) are `no-store`, so a CDN never pins a miss.
 //!
 //! Mutations (require `registry.token`; disabled when it is empty):
 //! - `PUT /v1/app/{region}` / `DELETE /v1/app/{region}`  app-identity override; PUT
@@ -41,7 +43,7 @@ use axum::{
     Router,
 };
 use serde::Deserialize;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use super::Registry;
 use crate::api::internal::{build_master_tar, file_sha256, MasterUpdatedNotice};
@@ -143,6 +145,10 @@ async fn health(State(registry): State<Shared>) -> Response {
     json(&serde_json::json!({
         "status": if problems.is_empty() { "ok" } else { "degraded" },
         "version": env!("CARGO_PKG_VERSION"),
+        "blobStore": match registry.blobs.kind() {
+            BlobStoreKind::Fs => "fs",
+            BlobStoreKind::Pg => "pg",
+        },
         "problems": problems,
         "regions": regions,
     }))
@@ -176,12 +182,41 @@ fn http_date(time: std::time::SystemTime) -> String {
 /// content-hash addressed): a CDN may hold it for a year.
 const IMMUTABLE: &str = "public, max-age=31536000, immutable";
 
+/// Mark a response as never cacheable (misses and failures of URLs that are
+/// otherwise immutable).
+fn no_store(mut response: Response) -> Response {
+    response.headers_mut().insert(
+        "cache-control",
+        axum::http::HeaderValue::from_static("no-store"),
+    );
+    response
+}
+
+/// 404 for a digest- or hash-addressed URL: the resource may appear later
+/// (import, publish), so the miss must not be cached.
+fn digest_not_found(what: String) -> Response {
+    no_store(AppError::NotFound(what).into_response())
+}
+
+/// 503 for a read the blob store could not answer (database unreachable,
+/// busy): transient, never cached.
+fn store_unavailable(e: AppError) -> Response {
+    warn!("Registry blob read failed: {e}");
+    let mut response = e.into_response();
+    *response.status_mut() = StatusCode::SERVICE_UNAVAILABLE;
+    let mut response = no_store(response);
+    response
+        .headers_mut()
+        .insert("retry-after", axum::http::HeaderValue::from_static("5"));
+    response
+}
+
 /// Stream a file as an immutable, digest-tagged response.
 async fn immutable_file(path: &std::path::Path, digest: &str, content_type: &str) -> Response {
     let meta = match tokio::fs::metadata(path).await {
         Ok(m) => m,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return AppError::NotFound(format!("no blob {digest}")).into_response()
+            return digest_not_found(format!("no blob {digest}"))
         }
         Err(e) => return AppError::IoError(e.to_string()).into_response(),
     };
@@ -285,7 +320,7 @@ async fn manifest_by_hash(
                 .into_response(),
             Err(e) => AppError::ParseError(e.to_string()).into_response(),
         },
-        Ok(None) => AppError::NotFound(format!("no manifest {hash}")).into_response(),
+        Ok(None) => digest_not_found(format!("no manifest {hash}")),
         Err(e) => e.into_response(),
     }
 }
@@ -304,7 +339,7 @@ async fn blob(
         Err(e) => return e.into_response(),
     };
     if !super::state::is_hex_digest(&sha256) {
-        return AppError::NotFound(format!("no blob {sha256}")).into_response();
+        return digest_not_found(format!("no blob {sha256}"));
     }
     let manifest = match registry.state.current(region).await {
         Ok(m) => m,
@@ -322,8 +357,8 @@ async fn blob(
     };
     match registry.blobs.get(&sha256, local.as_deref()).await {
         Ok(Some(blob)) => immutable_blob(blob, &sha256, "application/json"),
-        Ok(None) => AppError::NotFound(format!("no blob {sha256}")).into_response(),
-        Err(e) => e.into_response(),
+        Ok(None) => digest_not_found(format!("no blob {sha256}")),
+        Err(e) => store_unavailable(e),
     }
 }
 
@@ -448,7 +483,7 @@ async fn metas_blob(
         Err(e) => return e.into_response(),
     };
     let Some(path) = manager.blob_path(region, &sha256) else {
-        return AppError::NotFound(format!("no blob {sha256}")).into_response();
+        return digest_not_found(format!("no blob {sha256}"));
     };
     immutable_file(&path, &sha256, "application/json").await
 }
@@ -585,7 +620,10 @@ async fn file(
 
 /// A master file of the current manifest from the blob store (pg): same
 /// headers as the fs path, with `Last-Modified` = when the content was first
-/// stored.
+/// stored. Unlike fs (which serves whatever is on disk), the name resolves
+/// through `current`: a file on disk but not in `current` is a 404, and so
+/// is a file whose blob is not stored yet (import running) while its bytes
+/// on disk no longer match the manifest digest.
 async fn file_from_store(
     registry: &Registry,
     region: ServerRegion,
@@ -612,7 +650,7 @@ async fn file_from_store(
     let blob = match registry.blobs.get(&entry.sha256, Some(&local)).await {
         Ok(Some(blob)) => blob,
         Ok(None) => return not_found(),
-        Err(e) => return e.into_response(),
+        Err(e) => return store_unavailable(e),
     };
     let mut response_headers = vec![
         ("content-type", "application/json".to_string()),
@@ -641,7 +679,12 @@ async fn bundle(State(registry): State<Shared>, Path(region): Path<String>) -> R
         match bundle_from_store(&registry, region).await {
             Ok(Some(response)) => return response,
             Ok(None) => {}
-            Err(e) => return e.into_response(),
+            // Store unreachable or busy: the directory tar still works.
+            Err(e) => warn!(
+                "{} Bundle from the master directory: blob store failed: {}",
+                region.as_str().to_uppercase(),
+                e
+            ),
         }
     }
     let (master_dir, version_path) = match registry.region_paths(region) {
@@ -688,7 +731,10 @@ async fn bundle(State(registry): State<Shared>, Path(region): Path<String>) -> R
 /// the same entries the fs bundle holds, in manifest order with fixed
 /// metadata (mode 0644, mtime = publish time), plus a version entry
 /// rebuilt from the manifest. Consistent with `current` by construction.
-/// `None` (fall back to the directory bundle) while a blob is missing.
+/// Every compressed blob is loaded before the 200 is sent, so the stream
+/// itself never touches the database and cannot break off halfway.
+/// `None` (fall back to the directory bundle) while a blob is missing; an
+/// empty manifest is a 404, like an empty directory.
 async fn bundle_from_store(
     registry: &Registry,
     region: ServerRegion,
@@ -696,25 +742,26 @@ async fn bundle_from_store(
     let Some(manifest) = registry.state.current(region).await? else {
         return Ok(None);
     };
+    if manifest.files.is_empty() {
+        return Ok(Some(
+            AppError::NotFound("master directory is empty".to_string()).into_response(),
+        ));
+    }
     let digests: Vec<String> = manifest.files.iter().map(|f| f.sha256.clone()).collect();
-    let missing = registry.blobs.missing(&digests).await?;
-    if !missing.is_empty() {
+    let Some(blobs) = registry.blobs.load_all(&digests).await? else {
         info!(
-            "{} Bundle from the master directory: {} blob(s) not stored yet",
-            region.as_str().to_uppercase(),
-            missing.len()
+            "{} Bundle from the master directory: blob(s) not stored yet",
+            region.as_str().to_uppercase()
         );
         return Ok(None);
-    }
+    };
     let (tx, rx) = tokio::sync::mpsc::channel::<std::io::Result<axum::body::Bytes>>(8);
-    let blobs = registry.blobs.clone();
-    let handle = tokio::runtime::Handle::current();
     tokio::task::spawn_blocking(move || {
         let writer = ChannelWriter {
             tx: tx.clone(),
             buf: Vec::with_capacity(BUNDLE_CHUNK),
         };
-        if let Err(e) = write_bundle(&handle, blobs.as_ref(), &manifest, writer) {
+        if let Err(e) = write_bundle(&blobs, &manifest, writer) {
             let _ = tx.blocking_send(Err(std::io::Error::other(e.to_string())));
         }
     });
@@ -766,8 +813,7 @@ impl std::io::Write for ChannelWriter {
 }
 
 fn write_bundle(
-    handle: &tokio::runtime::Handle,
-    blobs: &dyn super::blobs::BlobStore,
+    blobs: &super::blobs::BlobSet,
     manifest: &crate::api::internal::MasterManifest,
     writer: ChannelWriter,
 ) -> Result<(), AppError> {
@@ -786,11 +832,9 @@ fn write_bundle(
     };
     let mut builder = tar::Builder::new(writer);
     for file in &manifest.files {
-        let blob = handle
-            .block_on(blobs.get(&file.sha256, None))?
-            .ok_or_else(|| AppError::NotFound(format!("no blob {}", file.sha256)))?;
-        let mut entry = header(blob.size);
-        builder.append_data(&mut entry, &file.name, blob.into_reader()?)?;
+        let (size, reader) = blobs.reader(&file.sha256)?;
+        let mut entry = header(size);
+        builder.append_data(&mut entry, &file.name, reader)?;
     }
     if !manifest.data_version.is_empty() {
         let version = crate::client::helper::VersionInfo {
@@ -1121,10 +1165,13 @@ mod tests {
         let mut config = config.clone();
         config.registry.state_dsn = dsn.to_string();
         config.registry.blob_store = BlobStoreKind::Pg;
-        let mut state =
-            super::super::state::RegistryState::connect(&config.registry.state_dir, dsn)
-                .await
-                .unwrap();
+        let mut state = super::super::state::RegistryState::connect_with_pool(
+            &config.registry.state_dir,
+            dsn,
+            crate::db::registry_state_pool_size(BlobStoreKind::Pg),
+        )
+        .await
+        .unwrap();
         let blobs = super::super::blobs::open_blob_store(&config.registry, &mut state)
             .await
             .unwrap();
@@ -1206,6 +1253,11 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), 200);
 
+        let (_, health) = get_json(&client, &format!("{pg_base}/health")).await;
+        assert_eq!(health["blobStore"], "pg");
+        let (_, health) = get_json(&client, &format!("{file_base}/health")).await;
+        assert_eq!(health["blobStore"], "fs");
+
         let stats = pg.import_blobs().await;
         assert_eq!((stats.stored, stats.unavailable), (2, 0));
         assert_eq!(blob_rows(&pg).await, 2);
@@ -1255,6 +1307,15 @@ mod tests {
                 "{path}"
             );
             assert_eq!(a.bytes().await.unwrap(), b.bytes().await.unwrap(), "{path}");
+        }
+        // Misses on digest URLs must not be cached by a CDN.
+        for path in [
+            format!("/v1/master/jp/blob/{}", "0".repeat(64)),
+            format!("/v1/master/jp/manifests/{}", "0".repeat(64)),
+        ] {
+            let resp = client.get(format!("{pg_base}{path}")).send().await.unwrap();
+            assert_eq!(resp.status(), 404, "{path}");
+            assert_eq!(resp.headers()["cache-control"], "no-store", "{path}");
         }
         let file_etag = format!("\"{}\"", current["files"][0]["sha256"].as_str().unwrap());
         let resp = client
@@ -1328,6 +1389,61 @@ mod tests {
             .unwrap();
         assert_eq!(resp.text().await.unwrap(), "[{\"id\":2}]");
 
+        // Database unreachable: current files come from disk, the bundle
+        // from the directory, historical blobs answer an uncached 503.
+        let closed = sea_orm::Database::connect(dsn).await.unwrap();
+        closed.close_by_ref().await.unwrap();
+        let down = Arc::new(
+            Registry::with_state(Arc::new(config.clone()), HashMap::new(), pg.state.clone())
+                .with_blob_store(Arc::new(super::super::blobs::DbBlobStore::new(
+                    closed,
+                    std::time::Duration::from_secs(86_400),
+                ))),
+        );
+        let (down_base, down_server) = serve(router(down)).await;
+        let started = std::time::Instant::now();
+        let resp = client
+            .get(format!("{down_base}/v1/master/jp/blob/{old_sha}"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 503);
+        assert_eq!(resp.headers()["cache-control"], "no-store");
+        let resp = client
+            .get(format!("{down_base}/v1/master/jp/files/cards.json"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        assert_eq!(resp.text().await.unwrap(), "[{\"id\":1}]");
+        let cards_sha = manifest
+            .files
+            .iter()
+            .find(|f| f.name == "cards.json")
+            .unwrap()
+            .sha256
+            .clone();
+        let resp = client
+            .get(format!("{down_base}/v1/master/jp/blob/{cards_sha}"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        assert_eq!(resp.headers()["cache-control"], IMMUTABLE);
+        let resp = client
+            .get(format!("{down_base}/v1/master/jp/bundle"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let names: Vec<String> = untar(&resp.bytes().await.unwrap())
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        assert!(names.contains(&"musics.json".to_string()), "{names:?}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        down_server.abort();
+
         // A manifest listing an unstored digest never becomes current.
         let mut bogus = manifest.clone();
         bogus.files[0].sha256 = "1".repeat(64);
@@ -1346,6 +1462,32 @@ mod tests {
         // GC: nothing while every blob is referenced or within the grace.
         assert_eq!(pg.blobs.collect_garbage(&pg.state).await.unwrap(), 0);
         let db = pg.state.database().unwrap().clone();
+        // PostgreSQL: the publish check's row lock holds off GC's DELETE
+        // until the publish commits.
+        if db.get_database_backend() == sea_orm::DatabaseBackend::Postgres {
+            use sea_orm::{ConnectionTrait, TransactionTrait};
+            let publish = db.begin().await.unwrap();
+            let checked = super::super::blobs::missing_digests(
+                &publish,
+                std::slice::from_ref(&old_sha),
+                true,
+            )
+            .await
+            .unwrap();
+            assert!(checked.is_empty());
+            let gc = db.begin().await.unwrap();
+            gc.execute_unprepared("SET LOCAL lock_timeout = '200ms'")
+                .await
+                .unwrap();
+            let blocked = gc
+                .execute_unprepared(&format!(
+                    "DELETE FROM registry_blobs WHERE sha256 = '{old_sha}'"
+                ))
+                .await;
+            assert!(blocked.is_err(), "DELETE must wait for the publish");
+            gc.rollback().await.unwrap();
+            publish.rollback().await.unwrap();
+        }
         let eager = super::super::blobs::DbBlobStore::new(db.clone(), std::time::Duration::ZERO);
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         use super::super::blobs::BlobStore as _;
@@ -1362,6 +1504,32 @@ mod tests {
                 .unwrap();
         }
         assert_eq!(pg.blobs.collect_garbage(&pg.state).await.unwrap(), 0);
+        // An unreadable snapshot aborts GC: nothing is deleted.
+        {
+            use crate::db::entity::registry_state;
+            use sea_orm::{ActiveValue::Set, EntityTrait};
+            registry_state::Entity::insert(registry_state::ActiveModel {
+                region: Set("jp".to_string()),
+                kind: Set("manifest_snapshot".to_string()),
+                name: Set("f".repeat(64)),
+                value: Set(serde_json::json!({"broken": true})),
+                updated_at: Set(chrono::Utc::now()),
+            })
+            .exec(&db)
+            .await
+            .unwrap();
+        }
+        assert!(eager.collect_garbage(&pg.state).await.is_err());
+        assert_eq!(blob_rows(&pg).await, 3);
+        {
+            use crate::db::entity::registry_state;
+            use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+            registry_state::Entity::delete_many()
+                .filter(registry_state::Column::Name.eq("f".repeat(64)))
+                .exec(&db)
+                .await
+                .unwrap();
+        }
         assert_eq!(eager.collect_garbage(&pg.state).await.unwrap(), 1);
         assert_eq!(blob_rows(&pg).await, 2);
         let resp = client
@@ -1370,12 +1538,25 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), 404);
+        assert_eq!(resp.headers()["cache-control"], "no-store");
         let resp = client
             .get(format!("{pg_base}/v1/master/jp/files/cards.json"))
             .send()
             .await
             .unwrap();
         assert_eq!(resp.text().await.unwrap(), "[{\"id\":1}]");
+
+        // An empty manifest's bundle is a 404, like an empty directory.
+        let mut empty = manifest.clone();
+        empty.files.clear();
+        empty.content_hash = String::new();
+        pg.state.publish(ServerRegion::Jp, &empty).await.unwrap();
+        let resp = client
+            .get(format!("{pg_base}/v1/master/jp/bundle"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 404);
 
         file_server.abort();
         pg_server.abort();
