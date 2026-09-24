@@ -64,6 +64,11 @@ registry: # master data manager (`master_registry` binary); ignored by the API s
   # On first start with empty tables the files are imported once (and kept). music_metas blobs stay
   # under state_dir either way.
   state_dsn: "" # e.g. "postgres://sekai_api:pass@127.0.0.1:5432/sekai_api"
+  # Exactly ONE registry instance per state database: import and publish are not multi-writer
+  # safe, and each instance caches current manifests in memory. Tables are created with
+  # IF NOT EXISTS only (no migrations). Rollback to files: stop the registry, delete
+  # <state_dir>/manifests/*/current.json (otherwise startup keeps the stale pre-DB manifest,
+  # since publish_missing skips regions that have one), clear state_dsn, start it again.
   subscribers: [] # peers to POST /internal/master-updated after a region is published
   # - url: "http://100.64.0.2:9999"
   #   token: "peer-internal-token"

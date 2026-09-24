@@ -134,7 +134,14 @@ haruki-sekai-configs.example.yaml – Configuration template
   consume: it pulls each region from its owner via `MasterSyncer`, owns git push and
   ingest, and publishes per-region manifests (`contentHash` + `gitCommit`). State lives
   in `Data/registry/` JSON files, or in the `registry_state` / `registry_publish_history`
-  tables when `registry.state_dsn` is set (files imported once into empty tables, kept)
+  tables when `registry.state_dsn` is set (files imported once into empty tables, kept).
+  Run exactly one registry per state database (import/publish are not multi-writer safe;
+  current manifests, app identity and metas pointers are cached in memory and refreshed
+  only by that instance's own writes). Tables are created `IF NOT EXISTS`; there is no
+  migration path, so a column change needs hand-written DDL. Rolling back to files: stop
+  the registry, delete `<state_dir>/manifests/*/current.json` (startup `publish_missing`
+  skips regions that already have a current, which would serve the pre-DB manifest), clear
+  `state_dsn`, restart
 - It also maintains the music_metas feed (`metas.rs`, omakase rows injected), serves the
   app identity (`GET /v1/app/{region}`; `PUT` stores an override and pushes it to
   `registry.account_nodes`), and fans `master-updated` notices out to

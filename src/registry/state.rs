@@ -25,7 +25,11 @@
 //! music_metas blobs are content, not state: they stay under
 //! `<state_dir>/metas/<region>/` with either backend.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use parking_lot::RwLock;
 
 use chrono::{DateTime, Utc};
 use sea_orm::sea_query::OnConflict;
@@ -107,7 +111,16 @@ pub struct RegistryState {
     dir: PathBuf,
     /// Set when the state lives in a database instead of `dir`.
     db: Option<DatabaseConnection>,
+    /// Database backend only: the singleton documents (current manifest, app
+    /// identity, metas pointer) as last read or written, so the hot read
+    /// paths (`current`, every `blob/` lookup) do not query the database per
+    /// request and keep answering through a transient database outage. This
+    /// instance is the only writer (one registry per state database), so the
+    /// cache is refreshed by its own publishes and writes.
+    cache: SingletonCache,
 }
+
+type SingletonCache = Arc<RwLock<HashMap<(ServerRegion, &'static str), Option<serde_json::Value>>>>;
 
 impl RegistryState {
     /// File-backed state under `dir`.
@@ -115,6 +128,7 @@ impl RegistryState {
         Self {
             dir: dir.into(),
             db: None,
+            cache: Arc::default(),
         }
     }
 
@@ -126,8 +140,10 @@ impl RegistryState {
         let state = Self {
             dir: dir.into(),
             db: Some(db),
+            cache: Arc::default(),
         };
         state.import_files_if_empty().await?;
+        state.load_cache().await?;
         Ok(state)
     }
 
@@ -191,8 +207,8 @@ impl RegistryState {
 
     /// The latest published manifest, if any.
     pub async fn current(&self, region: ServerRegion) -> Result<Option<MasterManifest>, AppError> {
-        if let Some(db) = &self.db {
-            return db_get(db, region, KIND_MANIFEST, NAME_CURRENT).await;
+        if self.db.is_some() {
+            return self.cached(region, KIND_MANIFEST).await;
         }
         read_json(&self.current_path(region)).await
     }
@@ -291,6 +307,7 @@ impl RegistryState {
         let changed = is_changed(previous.as_ref(), manifest, record);
         let now = Utc::now();
         let value = to_json(manifest, "manifest")?;
+        let value_for_cache = value.clone();
         db_put(
             &txn,
             region,
@@ -343,6 +360,9 @@ impl RegistryState {
             .await?;
         }
         txn.commit().await?;
+        self.cache
+            .write()
+            .insert((region, KIND_MANIFEST), Some(value_for_cache));
         Ok(changed)
     }
 
@@ -369,8 +389,8 @@ impl RegistryState {
 
     /// The operator-set app identity for a region, if one was stored.
     pub async fn app_identity(&self, region: ServerRegion) -> Result<Option<AppInfo>, AppError> {
-        if let Some(db) = &self.db {
-            return db_get(db, region, KIND_APP, NAME_CURRENT).await;
+        if self.db.is_some() {
+            return self.cached(region, KIND_APP).await;
         }
         read_json(&self.app_path(region)).await
     }
@@ -382,7 +402,17 @@ impl RegistryState {
     ) -> Result<(), AppError> {
         if let Some(db) = &self.db {
             let value = to_json(info, "app identity")?;
-            return db_put(db, region, KIND_APP, NAME_CURRENT, value, Utc::now()).await;
+            db_put(
+                db,
+                region,
+                KIND_APP,
+                NAME_CURRENT,
+                value.clone(),
+                Utc::now(),
+            )
+            .await?;
+            self.cache.write().insert((region, KIND_APP), Some(value));
+            return Ok(());
         }
         let path = self.app_path(region);
         if let Some(parent) = path.parent() {
@@ -402,6 +432,7 @@ impl RegistryState {
                 .filter(registry_state::Column::Name.eq(NAME_CURRENT))
                 .exec(db)
                 .await?;
+            self.cache.write().insert((region, KIND_APP), None);
             return Ok(result.rows_affected > 0);
         }
         match tokio::fs::remove_file(self.app_path(region)).await {
@@ -416,8 +447,8 @@ impl RegistryState {
         &self,
         region: ServerRegion,
     ) -> Result<Option<T>, AppError> {
-        if let Some(db) = &self.db {
-            return db_get(db, region, KIND_METAS, NAME_CURRENT).await;
+        if self.db.is_some() {
+            return self.cached(region, KIND_METAS).await;
         }
         read_json(&self.metas_record_path(region)).await
     }
@@ -429,7 +460,17 @@ impl RegistryState {
     ) -> Result<(), AppError> {
         if let Some(db) = &self.db {
             let value = to_json(record, "metas record")?;
-            return db_put(db, region, KIND_METAS, NAME_CURRENT, value, Utc::now()).await;
+            db_put(
+                db,
+                region,
+                KIND_METAS,
+                NAME_CURRENT,
+                value.clone(),
+                Utc::now(),
+            )
+            .await?;
+            self.cache.write().insert((region, KIND_METAS), Some(value));
+            return Ok(());
         }
         let path = self.metas_record_path(region);
         if let Some(parent) = path.parent() {
@@ -439,6 +480,49 @@ impl RegistryState {
             .map_err(|e| AppError::ParseError(format!("metas record: {e}")))?;
         write_file_atomic(&path, &json).await?;
         Ok(())
+    }
+
+    /// Fill the singleton cache from the database (after the import).
+    async fn load_cache(&self) -> Result<(), AppError> {
+        let Some(db) = &self.db else {
+            return Ok(());
+        };
+        let mut loaded = HashMap::new();
+        for region in ALL_REGIONS {
+            for kind in [KIND_MANIFEST, KIND_APP, KIND_METAS] {
+                let value: Option<serde_json::Value> =
+                    db_get(db, region, kind, NAME_CURRENT).await?;
+                loaded.insert((region, kind), value);
+            }
+        }
+        *self.cache.write() = loaded;
+        Ok(())
+    }
+
+    /// A cached singleton document, read from the database on a miss.
+    async fn cached<T: serde::de::DeserializeOwned>(
+        &self,
+        region: ServerRegion,
+        kind: &'static str,
+    ) -> Result<Option<T>, AppError> {
+        let hit = self.cache.read().get(&(region, kind)).cloned();
+        let value = match (hit, &self.db) {
+            (Some(value), _) => value,
+            (None, Some(db)) => {
+                let value: Option<serde_json::Value> =
+                    db_get(db, region, kind, NAME_CURRENT).await?;
+                self.cache.write().insert((region, kind), value.clone());
+                value
+            }
+            (None, None) => None,
+        };
+        value
+            .map(|v| {
+                serde_json::from_value(v).map_err(|e| {
+                    AppError::ParseError(format!("registry_state {}/{kind}: {e}", region.as_str()))
+                })
+            })
+            .transpose()
     }
 
     /// One-time import of the file state into empty database tables, in one
@@ -892,6 +976,20 @@ mod tests {
             .set_metas_record(ServerRegion::Jp, &serde_json::json!({"sha256": hex(8)}))
             .await
             .unwrap();
+
+        // Reads of the singletons are served from memory, so a database
+        // outage does not fail `current` (or the blob lookups built on it).
+        let offline = state.clone();
+        if let Some(db) = &offline.db {
+            db.clone().close().await.unwrap();
+        }
+        assert!(offline.current(ServerRegion::Jp).await.unwrap().is_some());
+        assert!(offline.current(ServerRegion::En).await.unwrap().is_none());
+        assert!(offline
+            .metas_record::<serde_json::Value>(ServerRegion::Jp)
+            .await
+            .unwrap()
+            .is_some());
 
         // A restart does not import again: the database stays authoritative.
         let again = RegistryState::connect(&root, dsn).await.unwrap();
