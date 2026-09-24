@@ -101,9 +101,17 @@ servers:
     master_updater_cron: "7 * * * * *" # cron expression, this mean "execute it at every minute at second 7"
     # After a complete master dump (or owner bundle pull), delete master_dir/*.json files it did
     # not produce so tables dropped upstream leave the git mirror and the registry manifest.
-    # Nothing is deleted when the dump produced fewer than prune_min_ratio of the files present.
+    # The producer deletes a table only when two consecutive complete dumps miss it (the set
+    # missed last time is kept in prune_pending_path, default ./Data/prune/<region>.json; keep
+    # it outside any git worktree). Nothing is deleted when the dump produced fewer than
+    # prune_min_ratio of the files present or more than prune_max_files are due. Tables consumers
+    # require (deck-service's keys, events, worldBlooms, cards, gachas, ...) are never pruned;
+    # prune_protect adds more.
     prune_stale: true
     prune_min_ratio: 0.75
+    prune_max_files: 10
+    prune_protect: []
+    prune_pending_path: ""
 
   en:
     enabled: false

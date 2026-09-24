@@ -302,12 +302,18 @@ impl MasterSyncer {
     /// Delete master files the bundle just unpacked did not carry. Runs only
     /// after the whole bundle unpacked without error.
     async fn prune_stale_files(&self, produced: HashSet<String>) -> Result<(), AppError> {
-        let policy = self.prune;
+        let policy = self.prune.clone();
         let master_dir = PathBuf::from(&self.master_dir);
         let version_path = self.version_path.clone();
         let region_upper = self.region.as_str().to_uppercase();
         tokio::task::spawn_blocking(move || {
-            prune_stale_master_files(&master_dir, &version_path, &produced, policy, &region_upper)
+            prune_stale_master_files(
+                &master_dir,
+                &version_path,
+                &produced,
+                &policy,
+                &region_upper,
+            )
         })
         .await
         .map_err(|e| AppError::Internal(format!("prune task: {}", e)))??;
@@ -771,15 +777,18 @@ mod tests {
         let master = root.join("master");
         std::fs::create_dir_all(&master).unwrap();
         std::fs::write(master.join("dropped.json"), "[]").unwrap();
+        // Protected: kept even though the owner's bundle lacks it.
+        std::fs::write(master.join("events.json"), "[]").unwrap();
         let v2 = sonic_rs::to_string(&version("2.0.0.1", 0)).unwrap();
         let bundle_version = v2.as_bytes();
-        let full = tar_of(&[
-            ("a.json", b"[]"),
-            ("b.json", b"[]"),
-            ("c.json", b"[]"),
-            ("d.json", b"[]"),
-            (BUNDLE_VERSION_ENTRY, bundle_version),
-        ]);
+        let tables: Vec<(String, &[u8])> = "abcdefgh"
+            .chars()
+            .map(|c| (format!("{c}.json"), b"[]" as &[u8]))
+            .collect();
+        let tables: Vec<(&str, &[u8])> = tables.iter().map(|(n, d)| (n.as_str(), *d)).collect();
+        let mut full_entries = tables.clone();
+        full_entries.push((BUNDLE_VERSION_ENTRY, bundle_version));
+        let full = tar_of(&full_entries);
         let (url, server) = spawn_sync_source(SyncReply {
             version: bundle_version.to_vec(),
             bundle: full,
@@ -796,6 +805,7 @@ mod tests {
         let syncers = build_syncers(&config, &HashMap::new(), None, &HashMap::new());
         assert!(syncers[&ServerRegion::Jp].sync_once().await.unwrap());
         assert!(!master.join("dropped.json").exists());
+        assert!(master.join("events.json").exists());
         assert!(master.join("d.json").exists());
         server.abort();
 
@@ -817,20 +827,34 @@ mod tests {
         assert!(master.join("dropped.json").exists());
         server.abort();
 
-        // `prune_stale: false` keeps files a complete bundle no longer carries.
+        // The cap applies to the syncer too: over it, nothing is deleted.
         let (url, server) = spawn_sync_source(SyncReply {
             version: sonic_rs::to_string(&version("4.0.0.1", 0))
                 .unwrap()
                 .into_bytes(),
-            bundle: tar_of(&[
-                ("a.json", b"[]"),
-                ("b.json", b"[]"),
-                ("c.json", b"[]"),
-                ("d.json", b"[]"),
-            ]),
+            bundle: tar_of(&tables),
         })
         .await;
         server_config.master_sync.source_url = url;
+        server_config.prune_max_files = 0;
+        config
+            .servers
+            .insert(ServerRegion::Jp, server_config.clone());
+        let syncers = build_syncers(&config, &HashMap::new(), None, &HashMap::new());
+        assert!(syncers[&ServerRegion::Jp].sync_once().await.unwrap());
+        assert!(master.join("dropped.json").exists());
+        server.abort();
+
+        // `prune_stale: false` keeps files a complete bundle no longer carries.
+        let (url, server) = spawn_sync_source(SyncReply {
+            version: sonic_rs::to_string(&version("5.0.0.1", 0))
+                .unwrap()
+                .into_bytes(),
+            bundle: tar_of(&tables),
+        })
+        .await;
+        server_config.master_sync.source_url = url;
+        server_config.prune_max_files = 10;
         server_config.prune_stale = false;
         config.servers.insert(ServerRegion::Jp, server_config);
         let syncers = build_syncers(&config, &HashMap::new(), None, &HashMap::new());

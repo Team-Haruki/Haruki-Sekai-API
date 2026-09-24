@@ -362,12 +362,32 @@ pub struct ServerConfig {
     /// produced fewer than this fraction of the `*.json` files present.
     #[serde(default = "default_prune_min_ratio")]
     pub prune_min_ratio: f64,
+    /// Mass-deletion guard for `prune_stale`: nothing is pruned when one run
+    /// would delete more than this many files.
+    #[serde(default = "default_prune_max_files")]
+    pub prune_max_files: usize,
+    /// Table names (`events` or `events.json`) never pruned, on top of the
+    /// built-in list of tables consumers require.
+    #[serde(default)]
+    pub prune_protect: Vec<String>,
+    /// Producer only: where the tables missing from the last complete dump
+    /// are remembered (a file is deleted only when two consecutive complete
+    /// dumps miss it). Empty uses `./Data/prune/<region>.json`. Keep it out of
+    /// any git worktree.
+    #[serde(default)]
+    pub prune_pending_path: String,
 }
 
 pub const DEFAULT_PRUNE_MIN_RATIO: f64 = 0.75;
 
 fn default_prune_min_ratio() -> f64 {
     DEFAULT_PRUNE_MIN_RATIO
+}
+
+pub const DEFAULT_PRUNE_MAX_FILES: usize = 10;
+
+fn default_prune_max_files() -> usize {
+    DEFAULT_PRUNE_MAX_FILES
 }
 
 /// Settings for the `master_registry` binary (the master data manager): a

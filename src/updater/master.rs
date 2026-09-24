@@ -855,7 +855,7 @@ treating difference as an update",
         master_dir: &str,
         produced: std::collections::HashSet<String>,
     ) -> Result<(), AppError> {
-        let policy = super::prune::PrunePolicy::from_config(&self.client.config);
+        let policy = super::prune::PrunePolicy::for_producer(&self.client.config, self.region);
         let master_dir = PathBuf::from(master_dir);
         let version_path = self.client.config.version_path.clone();
         let region_upper = self.region.as_str().to_uppercase();
@@ -864,7 +864,7 @@ treating difference as an update",
                 &master_dir,
                 &version_path,
                 &produced,
-                policy,
+                &policy,
                 &region_upper,
             )
         })
@@ -1354,6 +1354,10 @@ mod tests {
         config.master_dir = root.join("master").to_string_lossy().into_owned();
         config.account_dir = root.join("accounts").to_string_lossy().into_owned();
         config.version_path = root.join("version.json").to_string_lossy().into_owned();
+        config.prune_pending_path = root
+            .join("prune-pending.json")
+            .to_string_lossy()
+            .into_owned();
         std::fs::create_dir_all(&config.account_dir).unwrap();
         std::fs::write(
             &config.version_path,
@@ -1940,7 +1944,22 @@ mod tests {
             login
         };
 
-        // Complete dump over two splits: the union is kept, the rest pruned.
+        // A failed split aborts the update before any pruning (or pending).
+        assert!(updater
+            .update_master_data(Some(&session), &login(&["/a", "/bad"]))
+            .await
+            .is_err());
+        assert!(!root.join("prune-pending.json").exists());
+
+        // First complete dump over two splits: the union is kept and the
+        // missing table only becomes pending.
+        updater
+            .update_master_data(Some(&session), &login(&["/a", "b"]))
+            .await
+            .unwrap();
+        assert!(master.join("dropped.json").exists());
+        assert!(root.join("prune-pending.json").exists());
+        // Missing again from the next complete dump: deleted.
         updater
             .update_master_data(Some(&session), &login(&["/a", "b"]))
             .await
@@ -1949,14 +1968,7 @@ mod tests {
             assert!(master.join(name).exists(), "{name} kept");
         }
         assert!(!master.join("dropped.json").exists());
-
-        // A failed split aborts the update before any pruning.
         std::fs::write(master.join("dropped.json"), "[]").unwrap();
-        assert!(updater
-            .update_master_data(Some(&session), &login(&["/a", "/bad"]))
-            .await
-            .is_err());
-        assert!(master.join("dropped.json").exists());
 
         // A dump far smaller than the directory trips the guard: the update
         // succeeds but nothing is deleted.
