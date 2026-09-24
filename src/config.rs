@@ -353,6 +353,21 @@ pub struct ServerConfig {
     /// Cache windows for this region's cached read endpoints.
     #[serde(default)]
     pub cache_ttls: CacheTtlConfig,
+    /// After a complete master dump (producer) or bundle pull (syncer),
+    /// delete `master_dir/*.json` files that dump did not produce, so tables
+    /// dropped upstream leave the git mirror and the registry manifest.
+    #[serde(default = "default_true")]
+    pub prune_stale: bool,
+    /// Mass-deletion guard for `prune_stale`: nothing is pruned when the dump
+    /// produced fewer than this fraction of the `*.json` files present.
+    #[serde(default = "default_prune_min_ratio")]
+    pub prune_min_ratio: f64,
+}
+
+pub const DEFAULT_PRUNE_MIN_RATIO: f64 = 0.75;
+
+fn default_prune_min_ratio() -> f64 {
+    DEFAULT_PRUNE_MIN_RATIO
 }
 
 /// Settings for the `master_registry` binary (the master data manager): a

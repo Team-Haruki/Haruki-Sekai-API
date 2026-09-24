@@ -99,6 +99,11 @@ servers:
     nuverse_schema_bundle_path: ""
     enable_master_updater: true # check for master data updates periodically
     master_updater_cron: "7 * * * * *" # cron expression, this mean "execute it at every minute at second 7"
+    # After a complete master dump (or owner bundle pull), delete master_dir/*.json files it did
+    # not produce so tables dropped upstream leave the git mirror and the registry manifest.
+    # Nothing is deleted when the dump produced fewer than prune_min_ratio of the files present.
+    prune_stale: true
+    prune_min_ratio: 0.75
 
   en:
     enabled: false

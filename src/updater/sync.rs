@@ -11,7 +11,7 @@
 //! ingest / version-merge / git-push pipeline as a locally downloaded update
 //! runs, so a pulling node can still be the git publisher.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -25,6 +25,7 @@ use super::git::GitHelper;
 use super::master::{
     is_safe_path_component, persist_app_identity, persist_version_file, AppIdentity,
 };
+use super::prune::{prune_stale_master_files, PrunePolicy};
 use crate::client::helper::{VersionHelper, VersionInfo};
 use crate::config::{Config, ServerRegion};
 use crate::error::AppError;
@@ -32,6 +33,9 @@ use crate::error::AppError;
 /// Name of the tar entry carrying the owner's version file. Uses characters
 /// that can never collide with a master table name.
 pub const BUNDLE_VERSION_ENTRY: &str = "__haruki_version__.json";
+
+/// A bundle's embedded version (when present) and its master file names.
+type UnpackedBundle = (Option<VersionInfo>, HashSet<String>);
 
 /// Decide whether the remote (owner) master state warrants a pull: the owner
 /// is authoritative, so any dataVersion difference counts, as does a newer
@@ -66,6 +70,9 @@ pub struct MasterSyncer {
     /// report a mirror that stopped moving. A failed push is otherwise invisible:
     /// publishing continues and only a log line records it.
     git_state: parking_lot::Mutex<Option<GitPushState>>,
+    /// Stale-file pruning after a complete bundle unpack (the bundle is the
+    /// owner's whole master directory, so it is the authoritative file set).
+    prune: PrunePolicy,
 }
 
 /// What happened the last time this region's mirror was pushed. `reason` is a
@@ -162,8 +169,9 @@ impl MasterSyncer {
         // The bundle embeds the owner's version file as snapshotted at tar
         // time; prefer it over the separately fetched version so the recorded
         // version always matches the files actually written.
-        let bundle_version = self.pull_and_unpack().await?;
+        let (bundle_version, produced) = self.pull_and_unpack().await?;
         let version = bundle_version.unwrap_or(remote);
+        self.prune_stale_files(produced).await?;
 
         self.ingest().await;
 
@@ -239,8 +247,9 @@ impl MasterSyncer {
 
     /// Download the owner's bundle to a temp file, then unpack it into
     /// `master_dir` (each file written via temp+rename, matching the local
-    /// updater's per-file atomicity). Returns the bundle's embedded version.
-    async fn pull_and_unpack(&self) -> Result<Option<VersionInfo>, AppError> {
+    /// updater's per-file atomicity). Returns the bundle's embedded version and
+    /// the names of the master files it carried.
+    async fn pull_and_unpack(&self) -> Result<UnpackedBundle, AppError> {
         let url = format!(
             "{}/internal/master/{}/bundle",
             self.source_url.trim_end_matches('/'),
@@ -288,6 +297,21 @@ impl MasterSyncer {
         .await;
         let _ = tokio::fs::remove_file(&tmp_tar).await;
         result
+    }
+
+    /// Delete master files the bundle just unpacked did not carry. Runs only
+    /// after the whole bundle unpacked without error.
+    async fn prune_stale_files(&self, produced: HashSet<String>) -> Result<(), AppError> {
+        let policy = self.prune;
+        let master_dir = PathBuf::from(&self.master_dir);
+        let version_path = self.version_path.clone();
+        let region_upper = self.region.as_str().to_uppercase();
+        tokio::task::spawn_blocking(move || {
+            prune_stale_master_files(&master_dir, &version_path, &produced, policy, &region_upper)
+        })
+        .await
+        .map_err(|e| AppError::Internal(format!("prune task: {}", e)))??;
+        Ok(())
     }
 
     /// Best-effort DB ingestion, same contract as the local updater: failures
@@ -387,12 +411,13 @@ trigger): {e:#}",
 /// Unpack a master bundle tar: every entry must be a bare `<name>.json`
 /// filename (no directories, no dot segments); anything else is skipped with a
 /// warning. Files are written via temp+rename so concurrent readers never see
-/// partial content. Returns the embedded version entry, when present.
+/// partial content. Returns the embedded version entry, when present, and the
+/// names of the master files written.
 fn unpack_master_tar(
     tar_path: &Path,
     master_dir: &Path,
     region_upper: &str,
-) -> Result<Option<VersionInfo>, AppError> {
+) -> Result<UnpackedBundle, AppError> {
     use std::io::Read;
 
     let file = std::fs::File::open(tar_path)?;
@@ -400,6 +425,7 @@ fn unpack_master_tar(
     let mut version: Option<VersionInfo> = None;
     let mut written = 0usize;
     let mut skipped = 0usize;
+    let mut produced = HashSet::new();
     for entry in archive.entries().map_err(AppError::from)? {
         let mut entry = entry.map_err(AppError::from)?;
         if !entry.header().entry_type().is_file() {
@@ -431,6 +457,7 @@ fn unpack_master_tar(
         std::fs::write(&tmp, &contents)?;
         std::fs::rename(&tmp, &target)?;
         written += 1;
+        produced.insert(name);
     }
     info!(
         "{} Unpacked {} master files from bundle ({} skipped)",
@@ -441,7 +468,7 @@ fn unpack_master_tar(
             "bundle contained no master files".to_string(),
         ));
     }
-    Ok(version)
+    Ok((version, produced))
 }
 
 /// Build the per-region syncers for every region that configures a
@@ -507,6 +534,7 @@ pub fn build_syncers(
                 sync_lock: tokio::sync::Mutex::new(()),
                 ingest_failed: AtomicBool::new(false),
                 git_state: parking_lot::Mutex::new(None),
+                prune: PrunePolicy::from_config(server_config),
             }),
         );
     }
@@ -622,8 +650,11 @@ mod tests {
             b.finish().unwrap();
         }
 
-        let version = unpack_master_tar(&tar_path, &out, "TEST").unwrap();
+        let (version, produced) = unpack_master_tar(&tar_path, &out, "TEST").unwrap();
         assert_eq!(version.unwrap().data_version, "9.9.9.9");
+        let mut produced: Vec<_> = produced.into_iter().collect();
+        produced.sort();
+        assert_eq!(produced, ["cards.json", "events.json"]);
         assert!(out.join("events.json").exists());
         assert!(out.join("cards.json").exists());
         assert!(!out.join("escape.json").exists());
@@ -722,6 +753,93 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    fn tar_of(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut builder = tar::Builder::new(Vec::new());
+        for (name, data) in entries {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(data.len() as u64);
+            header.set_mode(0o600);
+            header.set_cksum();
+            builder.append_data(&mut header, name, *data).unwrap();
+        }
+        builder.into_inner().unwrap()
+    }
+
+    #[tokio::test]
+    async fn sync_prunes_files_missing_from_a_complete_bundle_only() {
+        let root = std::env::temp_dir().join(format!("haruki_sync_prune_{}", uuid::Uuid::new_v4()));
+        let master = root.join("master");
+        std::fs::create_dir_all(&master).unwrap();
+        std::fs::write(master.join("dropped.json"), "[]").unwrap();
+        let v2 = sonic_rs::to_string(&version("2.0.0.1", 0)).unwrap();
+        let bundle_version = v2.as_bytes();
+        let full = tar_of(&[
+            ("a.json", b"[]"),
+            ("b.json", b"[]"),
+            ("c.json", b"[]"),
+            ("d.json", b"[]"),
+            (BUNDLE_VERSION_ENTRY, bundle_version),
+        ]);
+        let (url, server) = spawn_sync_source(SyncReply {
+            version: bundle_version.to_vec(),
+            bundle: full,
+        })
+        .await;
+        let mut config: Config = serde_yaml::from_str("backend: {}").unwrap();
+        let mut server_config: crate::config::ServerConfig = serde_yaml::from_str("{}").unwrap();
+        server_config.master_dir = master.to_string_lossy().into_owned();
+        server_config.version_path = root.join("version.json").to_string_lossy().into_owned();
+        server_config.master_sync.source_url = url;
+        config
+            .servers
+            .insert(ServerRegion::Jp, server_config.clone());
+        let syncers = build_syncers(&config, &HashMap::new(), None, &HashMap::new());
+        assert!(syncers[&ServerRegion::Jp].sync_once().await.unwrap());
+        assert!(!master.join("dropped.json").exists());
+        assert!(master.join("d.json").exists());
+        server.abort();
+
+        // A bundle that fails to unpack leaves every file in place.
+        std::fs::write(master.join("dropped.json"), "[]").unwrap();
+        let (url, server) = spawn_sync_source(SyncReply {
+            version: sonic_rs::to_string(&version("3.0.0.1", 0))
+                .unwrap()
+                .into_bytes(),
+            bundle: b"definitely not a tar archive".to_vec(),
+        })
+        .await;
+        server_config.master_sync.source_url = url;
+        config
+            .servers
+            .insert(ServerRegion::Jp, server_config.clone());
+        let syncers = build_syncers(&config, &HashMap::new(), None, &HashMap::new());
+        assert!(syncers[&ServerRegion::Jp].sync_once().await.is_err());
+        assert!(master.join("dropped.json").exists());
+        server.abort();
+
+        // `prune_stale: false` keeps files a complete bundle no longer carries.
+        let (url, server) = spawn_sync_source(SyncReply {
+            version: sonic_rs::to_string(&version("4.0.0.1", 0))
+                .unwrap()
+                .into_bytes(),
+            bundle: tar_of(&[
+                ("a.json", b"[]"),
+                ("b.json", b"[]"),
+                ("c.json", b"[]"),
+                ("d.json", b"[]"),
+            ]),
+        })
+        .await;
+        server_config.master_sync.source_url = url;
+        server_config.prune_stale = false;
+        config.servers.insert(ServerRegion::Jp, server_config);
+        let syncers = build_syncers(&config, &HashMap::new(), None, &HashMap::new());
+        assert!(syncers[&ServerRegion::Jp].sync_once().await.unwrap());
+        assert!(master.join("dropped.json").exists());
+        server.abort();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[tokio::test]
     async fn syncer_builder_filters_incomplete_configuration() {
         let root = std::env::temp_dir().join(format!("haruki_sync_build_{}", uuid::Uuid::new_v4()));
@@ -749,6 +867,7 @@ mod tests {
             sync_lock: tokio::sync::Mutex::new(()),
             ingest_failed: AtomicBool::new(false),
             git_state: parking_lot::Mutex::new(None),
+            prune: PrunePolicy::default(),
         };
         assert_eq!(syncer.load_local_version().await.data_version, "");
         assert!(syncer.fetch_remote_version().await.is_err());
