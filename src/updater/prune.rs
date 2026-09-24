@@ -30,9 +30,19 @@ pub struct PrunePolicy {
 
 impl PrunePolicy {
     pub fn from_config(config: &ServerConfig) -> Self {
+        let min_ratio = if (0.0..=1.0).contains(&config.prune_min_ratio) {
+            config.prune_min_ratio
+        } else {
+            warn!(
+                "prune_min_ratio {} is outside 0.0-1.0; using {}",
+                config.prune_min_ratio,
+                crate::config::DEFAULT_PRUNE_MIN_RATIO
+            );
+            crate::config::DEFAULT_PRUNE_MIN_RATIO
+        };
         Self {
             enabled: config.prune_stale,
-            min_ratio: config.prune_min_ratio,
+            min_ratio,
         }
     }
 }
@@ -102,19 +112,22 @@ pub fn prune_stale_master_files(
         }
     }
 
-    let ratio_ok = existing == 0 || (produced.len() as f64) >= policy.min_ratio * existing as f64;
-    if produced.is_empty() || !ratio_ok {
+    // Count only produced names that are pruning candidates themselves, so
+    // names the scan ignores cannot inflate the ratio.
+    let kept = existing - stale.len();
+    let ratio_ok = (kept as f64) >= policy.min_ratio * existing as f64;
+    if kept == 0 || !ratio_ok {
         warn!(
-            "{} Refusing to prune stale master files: dump produced {} files but {} exist \
+            "{} Refusing to prune stale master files: dump produced {} of the {} files present \
 (prune_min_ratio {}); {} would have been deleted",
             region_upper,
-            produced.len(),
+            kept,
             existing,
             policy.min_ratio,
             stale.len()
         );
         return Ok(PruneOutcome::Refused {
-            produced: produced.len(),
+            produced: kept,
             existing,
         });
     }
@@ -238,6 +251,41 @@ mod tests {
         assert_eq!(
             pruned,
             PruneOutcome::Pruned(vec!["c.json".to_string(), "d.json".to_string()])
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn ignored_names_do_not_inflate_the_ratio_and_bad_ratios_fall_back() {
+        let root = temp_dir();
+        for name in ["a.json", "b.json", "c.json", "d.json"] {
+            std::fs::write(root.join(name), "[]").unwrap();
+        }
+        let produced = names(&["a.json", ".x.json", ".y.json", "z.txt", "missing.json"]);
+        assert_eq!(
+            prune_stale_master_files(&root, "", &produced, PrunePolicy::default(), "T").unwrap(),
+            PruneOutcome::Refused {
+                produced: 1,
+                existing: 4
+            }
+        );
+        let mut config: ServerConfig = serde_yaml::from_str("{}").unwrap();
+        assert_eq!(PrunePolicy::from_config(&config), PrunePolicy::default());
+        for bad in [f64::NAN, -0.1, 1.5, f64::INFINITY] {
+            config.prune_min_ratio = bad;
+            assert_eq!(
+                PrunePolicy::from_config(&config).min_ratio,
+                crate::config::DEFAULT_PRUNE_MIN_RATIO
+            );
+        }
+        config.prune_min_ratio = 0.5;
+        config.prune_stale = false;
+        assert_eq!(
+            PrunePolicy::from_config(&config),
+            PrunePolicy {
+                enabled: false,
+                min_ratio: 0.5
+            }
         );
         std::fs::remove_dir_all(root).unwrap();
     }
