@@ -8,7 +8,8 @@
 //!   `If-None-Match` -> 304, `Last-Modified`, `Content-Length`)
 //! - `GET /v1/master/{region}/bundle`             tar of the master directory
 //! - `GET /v1/master/{region}/manifests/{hash}`  immutable manifest snapshot by contentHash
-//! - `GET /v1/master/{region}/blob/{sha256}`      immutable master file by digest
+//! - `GET /v1/master/{region}/blob/{sha256}`      immutable master file by digest (fs
+//!   store: current files only; pg store: any retained blob, see `registry::blobs`)
 //! - `GET /v1/metas/{region}/current`             music_metas pointer (ETag = digest)
 //! - `GET /v1/metas/{region}/music_metas.json`    current music_metas bytes (mutable)
 //! - `GET /v1/metas/{region}/blob/{sha256}`       immutable music_metas bytes
@@ -45,7 +46,7 @@ use tracing::{error, info};
 use super::Registry;
 use crate::api::internal::{build_master_tar, file_sha256, MasterUpdatedNotice};
 use crate::client::helper::AppInfo;
-use crate::config::ServerRegion;
+use crate::config::{BlobStoreKind, ServerRegion};
 use crate::error::AppError;
 use crate::updater::master::is_safe_path_component;
 
@@ -291,8 +292,9 @@ async fn manifest_by_hash(
 
 /// A master file by its SHA-256 (from the manifest): immutable, so a CDN
 /// keeps serving it across versions for every table that did not change.
-/// Only files of the current manifest are addressable; a stale digest is a
-/// 404 and the consumer re-reads `current`.
+/// With the fs store only files of the current manifest are addressable (a
+/// stale digest is a 404 and the consumer re-reads `current`); the pg store
+/// also serves every blob a retained snapshot lists.
 async fn blob(
     State(registry): State<Shared>,
     Path((region, sha256)): Path<(String, String)>,
@@ -305,39 +307,42 @@ async fn blob(
         return AppError::NotFound(format!("no blob {sha256}")).into_response();
     }
     let manifest = match registry.state.current(region).await {
-        Ok(Some(m)) => m,
-        Ok(None) => return AppError::NotFound(format!("no blob {sha256}")).into_response(),
+        Ok(m) => m,
         Err(e) => return e.into_response(),
     };
-    let Some(entry) = manifest.files.iter().find(|f| f.sha256 == sha256) else {
-        return AppError::NotFound(format!("no blob {sha256}")).into_response();
+    let local = match manifest
+        .as_ref()
+        .and_then(|m| m.files.iter().find(|f| f.sha256 == sha256))
+    {
+        Some(entry) => match registry.region_paths(region) {
+            Ok((master_dir, _)) => Some(std::path::Path::new(&master_dir).join(&entry.name)),
+            Err(e) => return e.into_response(),
+        },
+        None => None,
     };
-    let (master_dir, _) = match registry.region_paths(region) {
-        Ok(p) => p,
-        Err(e) => return e.into_response(),
-    };
-    let path = std::path::Path::new(&master_dir).join(&entry.name);
-    // The file may have been rewritten since the manifest was published;
-    // never serve different bytes under a digest URL.
-    let actual = {
-        let path = path.clone();
-        match tokio::fs::metadata(&path).await {
-            Ok(meta) => {
-                match tokio::task::spawn_blocking(move || file_sha256(&path, &meta)).await {
-                    Ok(Ok(d)) => d,
-                    Ok(Err(e)) => return e.into_response(),
-                    Err(e) => {
-                        return AppError::Internal(format!("digest task: {e}")).into_response()
-                    }
-                }
-            }
-            Err(_) => return AppError::NotFound(format!("no blob {sha256}")).into_response(),
-        }
-    };
-    if actual != sha256 {
-        return AppError::NotFound(format!("no blob {sha256}")).into_response();
+    match registry.blobs.get(&sha256, local.as_deref()).await {
+        Ok(Some(blob)) => immutable_blob(blob, &sha256, "application/json"),
+        Ok(None) => AppError::NotFound(format!("no blob {sha256}")).into_response(),
+        Err(e) => e.into_response(),
     }
-    immutable_file(&path, &sha256, "application/json").await
+}
+
+/// An immutable, digest-tagged response streaming `blob`.
+fn immutable_blob(blob: super::blobs::Blob, digest: &str, content_type: &str) -> Response {
+    let size = blob.size;
+    let mut response = blob.into_body().into_response();
+    let headers = response.headers_mut();
+    for (name, value) in [
+        ("content-type", content_type.to_string()),
+        ("content-length", size.to_string()),
+        ("etag", etag(digest)),
+        ("cache-control", IMMUTABLE.to_string()),
+    ] {
+        if let Ok(value) = axum::http::HeaderValue::from_str(&value) {
+            headers.insert(name, value);
+        }
+    }
+    response
 }
 
 fn metas_manager(registry: &Registry) -> Result<&super::metas::MusicMetasManager, AppError> {
@@ -522,6 +527,9 @@ async fn file(
     if !is_safe_path_component(&name) || !name.ends_with(".json") || name.starts_with('.') {
         return AppError::NotFound(format!("no master file {:?}", name)).into_response();
     }
+    if registry.blobs.kind() != BlobStoreKind::Fs {
+        return file_from_store(&registry, region, &name, &headers).await;
+    }
     let (master_dir, _) = match registry.region_paths(region) {
         Ok(p) => p,
         Err(e) => return e.into_response(),
@@ -575,11 +583,67 @@ async fn file(
     }
 }
 
+/// A master file of the current manifest from the blob store (pg): same
+/// headers as the fs path, with `Last-Modified` = when the content was first
+/// stored.
+async fn file_from_store(
+    registry: &Registry,
+    region: ServerRegion,
+    name: &str,
+    headers: &HeaderMap,
+) -> Response {
+    let not_found = || AppError::NotFound(format!("no master file {:?}", name)).into_response();
+    let local = match registry.region_paths(region) {
+        Ok((master_dir, _)) => std::path::Path::new(&master_dir).join(name),
+        Err(e) => return e.into_response(),
+    };
+    let manifest = match registry.state.current(region).await {
+        Ok(Some(m)) => m,
+        Ok(None) => return not_found(),
+        Err(e) => return e.into_response(),
+    };
+    let Some(entry) = manifest.files.iter().find(|f| f.name == name) else {
+        return not_found();
+    };
+    let tag = etag(&entry.sha256);
+    if if_none_match(headers, &tag) {
+        return not_modified(&tag);
+    }
+    let blob = match registry.blobs.get(&entry.sha256, Some(&local)).await {
+        Ok(Some(blob)) => blob,
+        Ok(None) => return not_found(),
+        Err(e) => return e.into_response(),
+    };
+    let mut response_headers = vec![
+        ("content-type", "application/json".to_string()),
+        ("content-length", blob.size.to_string()),
+        ("etag", tag),
+        ("cache-control", "no-cache".to_string()),
+    ];
+    if let Some(modified) = blob.modified {
+        response_headers.push(("last-modified", http_date(modified)));
+    }
+    let mut response = blob.into_body().into_response();
+    for (name, value) in response_headers {
+        if let Ok(value) = axum::http::HeaderValue::from_str(&value) {
+            response.headers_mut().insert(name, value);
+        }
+    }
+    response
+}
+
 async fn bundle(State(registry): State<Shared>, Path(region): Path<String>) -> Response {
     let region = match parse_region(&region) {
         Ok(r) => r,
         Err(e) => return e.into_response(),
     };
+    if registry.blobs.kind() != BlobStoreKind::Fs {
+        match bundle_from_store(&registry, region).await {
+            Ok(Some(response)) => return response,
+            Ok(None) => {}
+            Err(e) => return e.into_response(),
+        }
+    }
     let (master_dir, version_path) = match registry.region_paths(region) {
         Ok(p) => p,
         Err(e) => return e.into_response(),
@@ -618,6 +682,135 @@ async fn bundle(State(registry): State<Shared>, Path(region): Path<String>) -> R
             AppError::IoError(e.to_string()).into_response()
         }
     }
+}
+
+/// The current manifest's files as a tar streamed from the blob store (pg):
+/// the same entries the fs bundle holds, in manifest order with fixed
+/// metadata (mode 0644, mtime = publish time), plus a version entry
+/// rebuilt from the manifest. Consistent with `current` by construction.
+/// `None` (fall back to the directory bundle) while a blob is missing.
+async fn bundle_from_store(
+    registry: &Registry,
+    region: ServerRegion,
+) -> Result<Option<Response>, AppError> {
+    let Some(manifest) = registry.state.current(region).await? else {
+        return Ok(None);
+    };
+    let digests: Vec<String> = manifest.files.iter().map(|f| f.sha256.clone()).collect();
+    let missing = registry.blobs.missing(&digests).await?;
+    if !missing.is_empty() {
+        info!(
+            "{} Bundle from the master directory: {} blob(s) not stored yet",
+            region.as_str().to_uppercase(),
+            missing.len()
+        );
+        return Ok(None);
+    }
+    let (tx, rx) = tokio::sync::mpsc::channel::<std::io::Result<axum::body::Bytes>>(8);
+    let blobs = registry.blobs.clone();
+    let handle = tokio::runtime::Handle::current();
+    tokio::task::spawn_blocking(move || {
+        let writer = ChannelWriter {
+            tx: tx.clone(),
+            buf: Vec::with_capacity(BUNDLE_CHUNK),
+        };
+        if let Err(e) = write_bundle(&handle, blobs.as_ref(), &manifest, writer) {
+            let _ = tx.blocking_send(Err(std::io::Error::other(e.to_string())));
+        }
+    });
+    let stream = futures::stream::unfold(rx, |mut rx| async move {
+        rx.recv().await.map(|item| (item, rx))
+    });
+    Ok(Some(
+        (
+            StatusCode::OK,
+            [("content-type", "application/x-tar")],
+            axum::body::Body::from_stream(stream),
+        )
+            .into_response(),
+    ))
+}
+
+const BUNDLE_CHUNK: usize = 64 * 1024;
+
+/// Blocking `Write` into the response body channel, in `BUNDLE_CHUNK` pieces.
+struct ChannelWriter {
+    tx: tokio::sync::mpsc::Sender<std::io::Result<axum::body::Bytes>>,
+    buf: Vec<u8>,
+}
+
+impl ChannelWriter {
+    fn send(&mut self) -> std::io::Result<()> {
+        if self.buf.is_empty() {
+            return Ok(());
+        }
+        let chunk = std::mem::replace(&mut self.buf, Vec::with_capacity(BUNDLE_CHUNK));
+        self.tx
+            .blocking_send(Ok(axum::body::Bytes::from(chunk)))
+            .map_err(|_| std::io::Error::new(std::io::ErrorKind::BrokenPipe, "client went away"))
+    }
+}
+
+impl std::io::Write for ChannelWriter {
+    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+        self.buf.extend_from_slice(data);
+        if self.buf.len() >= BUNDLE_CHUNK {
+            self.send()?;
+        }
+        Ok(data.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.send()
+    }
+}
+
+fn write_bundle(
+    handle: &tokio::runtime::Handle,
+    blobs: &dyn super::blobs::BlobStore,
+    manifest: &crate::api::internal::MasterManifest,
+    writer: ChannelWriter,
+) -> Result<(), AppError> {
+    use std::io::Write as _;
+    let mtime = chrono::DateTime::parse_from_rfc3339(&manifest.generated_at)
+        .map(|t| t.timestamp().max(0) as u64)
+        .unwrap_or(0);
+    let header = |size: u64| {
+        let mut header = tar::Header::new_gnu();
+        header.set_entry_type(tar::EntryType::Regular);
+        header.set_size(size);
+        header.set_mode(0o644);
+        header.set_mtime(mtime);
+        header
+    };
+    let mut builder = tar::Builder::new(writer);
+    for file in &manifest.files {
+        let blob = handle
+            .block_on(blobs.get(&file.sha256, None))?
+            .ok_or_else(|| AppError::NotFound(format!("no blob {}", file.sha256)))?;
+        let mut entry = header(blob.size);
+        builder.append_data(&mut entry, &file.name, blob.into_reader()?)?;
+    }
+    if !manifest.data_version.is_empty() {
+        let version = crate::client::helper::VersionInfo {
+            app_version: manifest.app_version.clone(),
+            app_hash: manifest.app_hash.clone(),
+            data_version: manifest.data_version.clone(),
+            asset_version: manifest.asset_version.clone(),
+            asset_hash: manifest.asset_hash.clone(),
+            cdn_version: manifest.cdn_version,
+        };
+        let data = serde_json::to_vec(&version)
+            .map_err(|e| AppError::ParseError(format!("version entry: {e}")))?;
+        let mut entry = header(data.len() as u64);
+        builder.append_data(
+            &mut entry,
+            crate::updater::sync::BUNDLE_VERSION_ENTRY,
+            data.as_slice(),
+        )?;
+    }
+    builder.into_inner()?.flush()?;
+    Ok(())
 }
 
 async fn app_identity(State(registry): State<Shared>, Path(region): Path<String>) -> Response {
@@ -919,6 +1112,369 @@ mod tests {
         assert_eq!(resp.status(), 304);
         file_server.abort();
         db_server.abort();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A registry on database state at `dsn` with `blob_store: pg`.
+    async fn blob_registry(config: &Config, dsn: &str) -> Arc<Registry> {
+        let mut config = config.clone();
+        config.registry.state_dsn = dsn.to_string();
+        config.registry.blob_store = BlobStoreKind::Pg;
+        let mut state =
+            super::super::state::RegistryState::connect(&config.registry.state_dir, dsn)
+                .await
+                .unwrap();
+        let blobs = super::super::blobs::open_blob_store(&config.registry, &mut state)
+            .await
+            .unwrap();
+        Arc::new(
+            Registry::with_state(Arc::new(config), HashMap::new(), state).with_blob_store(blobs),
+        )
+    }
+
+    fn untar(bytes: &[u8]) -> Vec<(String, Vec<u8>)> {
+        use std::io::Read;
+        let mut archive = tar::Archive::new(bytes);
+        let mut entries: Vec<(String, Vec<u8>)> = archive
+            .entries()
+            .unwrap()
+            .map(|entry| {
+                let mut entry = entry.unwrap();
+                let name = entry.path().unwrap().to_string_lossy().into_owned();
+                let mut data = Vec::new();
+                entry.read_to_end(&mut data).unwrap();
+                if name == BUNDLE_VERSION_ENTRY {
+                    let version: crate::client::helper::VersionInfo =
+                        serde_json::from_slice(&data).unwrap();
+                    data = serde_json::to_vec(&version).unwrap();
+                }
+                (name, data)
+            })
+            .collect();
+        entries.sort();
+        entries
+    }
+
+    async fn blob_rows(registry: &Registry) -> u64 {
+        use sea_orm::{EntityTrait, PaginatorTrait};
+        crate::db::entity::RegistryBlob::find()
+            .count(registry.state.database().unwrap())
+            .await
+            .unwrap()
+    }
+
+    /// fs and pg blob stores against one master directory: identical bodies
+    /// and headers for every read, import of existing manifests, dedupe,
+    /// historical blobs, the publish guard and garbage collection.
+    async fn exercise_blob_store(dsn: &str) {
+        let root = temp_dir();
+        let mut config = base_config(&root, "secret");
+        config.registry.music_metas.enabled = false;
+        let master = root.join("master");
+        std::fs::write(master.join("cards.json"), "[{\"id\":1}]").unwrap();
+        // Same bytes under two names: one blob.
+        std::fs::write(master.join("dup.json"), "[{\"id\":1}]").unwrap();
+        let big: String = (0..20_000)
+            .map(|i| format!("{{\"id\":{i},\"title\":\"music {i}\"}}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let big = format!("[{big}]");
+        std::fs::write(master.join("musics.json"), &big).unwrap();
+        write_version(&root, "5.6.1.11");
+        let files = Arc::new(Registry::new(Arc::new(config.clone()), HashMap::new()));
+        files.publish_missing().await;
+        // Switching an existing deployment: the file state is imported, the
+        // blobs are not there yet and reads fall back to the directory.
+        let pg = blob_registry(&config, dsn).await;
+        pg.publish_missing().await;
+        assert_eq!(blob_rows(&pg).await, 0);
+        let (file_base, file_server) = serve(router(files.clone())).await;
+        let (pg_base, pg_server) = serve(router(pg.clone())).await;
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!("{pg_base}/v1/master/jp/files/musics.json"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        assert_eq!(resp.text().await.unwrap(), big);
+        let resp = client
+            .get(format!("{pg_base}/v1/master/jp/bundle"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+
+        let stats = pg.import_blobs().await;
+        assert_eq!((stats.stored, stats.unavailable), (2, 0));
+        assert_eq!(blob_rows(&pg).await, 2);
+        // Idempotent.
+        assert_eq!(pg.import_blobs().await.stored, 0);
+
+        let (_, current) = get_json(&client, &format!("{file_base}/v1/master/jp/current")).await;
+        let hash = current["contentHash"].as_str().unwrap().to_string();
+        let mut paths = vec![
+            "/v1/master/jp/current".to_string(),
+            format!("/v1/master/jp/manifests/{hash}"),
+            "/v1/master/jp/history".to_string(),
+            "/v1/master/jp/files/nope.json".to_string(),
+            "/v1/master/jp/files/..json".to_string(),
+            format!("/v1/master/jp/blob/{}", "0".repeat(64)),
+            "/v1/master/jp/blob/xyz".to_string(),
+            "/v1/master/kr/files/cards.json".to_string(),
+        ];
+        for file in current["files"].as_array().unwrap() {
+            paths.push(format!(
+                "/v1/master/jp/files/{}",
+                file["name"].as_str().unwrap()
+            ));
+            paths.push(format!(
+                "/v1/master/jp/blob/{}",
+                file["sha256"].as_str().unwrap()
+            ));
+        }
+        for path in &paths {
+            let a = client
+                .get(format!("{file_base}{path}"))
+                .send()
+                .await
+                .unwrap();
+            let b = client.get(format!("{pg_base}{path}")).send().await.unwrap();
+            assert_eq!(a.status(), b.status(), "{path}");
+            for header in ["etag", "cache-control", "content-type", "content-length"] {
+                assert_eq!(
+                    a.headers().get(header),
+                    b.headers().get(header),
+                    "{path} {header}"
+                );
+            }
+            assert_eq!(
+                a.headers().contains_key("last-modified"),
+                b.headers().contains_key("last-modified"),
+                "{path}"
+            );
+            assert_eq!(a.bytes().await.unwrap(), b.bytes().await.unwrap(), "{path}");
+        }
+        let file_etag = format!("\"{}\"", current["files"][0]["sha256"].as_str().unwrap());
+        let resp = client
+            .get(format!("{pg_base}/v1/master/jp/files/cards.json"))
+            .header("if-none-match", &file_etag)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 304);
+        // Bundle: the same entries (the version entry compared parsed).
+        let a = client
+            .get(format!("{file_base}/v1/master/jp/bundle"))
+            .send()
+            .await
+            .unwrap();
+        let b = client
+            .get(format!("{pg_base}/v1/master/jp/bundle"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            a.headers().get("content-type"),
+            b.headers().get("content-type")
+        );
+        let (a, b) = (a.bytes().await.unwrap(), b.bytes().await.unwrap());
+        let entries = untar(&b);
+        assert_eq!(untar(&a), entries);
+        assert_eq!(entries.len(), 4);
+
+        // The store now serves without the directory.
+        let old_sha = current["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["name"] == "musics.json")
+            .unwrap()["sha256"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        std::fs::write(master.join("musics.json"), "[{\"id\":2}]").unwrap();
+        let resp = client
+            .get(format!("{pg_base}/v1/master/jp/blob/{old_sha}"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.text().await.unwrap(), big);
+        // A new publish: the replaced file stays addressable by digest (its
+        // snapshot is retained), unchanged files are not stored again.
+        write_version(&root, "5.6.1.12");
+        let (manifest, changed) = pg.publish(ServerRegion::Jp).await.unwrap();
+        assert!(changed);
+        assert_eq!(blob_rows(&pg).await, 3);
+        let resp = client
+            .get(format!("{pg_base}/v1/master/jp/blob/{old_sha}"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        assert_eq!(resp.headers()["cache-control"], IMMUTABLE);
+        assert_eq!(resp.text().await.unwrap(), big);
+        let resp = client
+            .get(format!("{file_base}/v1/master/jp/blob/{old_sha}"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 404, "fs serves current files only");
+        let resp = client
+            .get(format!("{pg_base}/v1/master/jp/files/musics.json"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.text().await.unwrap(), "[{\"id\":2}]");
+
+        // A manifest listing an unstored digest never becomes current.
+        let mut bogus = manifest.clone();
+        bogus.files[0].sha256 = "1".repeat(64);
+        bogus.content_hash = String::new();
+        assert!(pg.state.publish(ServerRegion::Jp, &bogus).await.is_err());
+        assert_eq!(
+            pg.state
+                .current(ServerRegion::Jp)
+                .await
+                .unwrap()
+                .unwrap()
+                .content_hash,
+            manifest.content_hash
+        );
+
+        // GC: nothing while every blob is referenced or within the grace.
+        assert_eq!(pg.blobs.collect_garbage(&pg.state).await.unwrap(), 0);
+        let db = pg.state.database().unwrap().clone();
+        let eager = super::super::blobs::DbBlobStore::new(db.clone(), std::time::Duration::ZERO);
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        use super::super::blobs::BlobStore as _;
+        assert_eq!(eager.collect_garbage(&pg.state).await.unwrap(), 0);
+        // Drop the old snapshot: its only exclusive blob becomes garbage.
+        {
+            use crate::db::entity::registry_state;
+            use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+            registry_state::Entity::delete_many()
+                .filter(registry_state::Column::Kind.eq("manifest_snapshot"))
+                .filter(registry_state::Column::Name.eq(hash.clone()))
+                .exec(&db)
+                .await
+                .unwrap();
+        }
+        assert_eq!(pg.blobs.collect_garbage(&pg.state).await.unwrap(), 0);
+        assert_eq!(eager.collect_garbage(&pg.state).await.unwrap(), 1);
+        assert_eq!(blob_rows(&pg).await, 2);
+        let resp = client
+            .get(format!("{pg_base}/v1/master/jp/blob/{old_sha}"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 404);
+        let resp = client
+            .get(format!("{pg_base}/v1/master/jp/files/cards.json"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.text().await.unwrap(), "[{\"id\":1}]");
+
+        file_server.abort();
+        pg_server.abort();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn blob_store_on_sqlite_matches_the_directory() {
+        let db = std::env::temp_dir().join(format!("haruki_blobs_{}.db", uuid::Uuid::new_v4()));
+        exercise_blob_store(&format!("sqlite://{}?mode=rwc", db.display())).await;
+        let _ = std::fs::remove_file(db);
+    }
+
+    /// Set `HARUKI_TEST_REGISTRY_DSN` to a scratch PostgreSQL database (its
+    /// registry tables are dropped first), then `cargo test -- --ignored`.
+    #[tokio::test]
+    #[ignore] // Requires a running PostgreSQL
+    async fn blob_store_on_postgres_matches_the_directory() {
+        use sea_orm::ConnectionTrait;
+        let dsn = std::env::var("HARUKI_TEST_REGISTRY_DSN")
+            .unwrap_or_else(|_| "postgres://haruki:sekai@localhost:5432/registry_test".to_string());
+        let db = sea_orm::Database::connect(&dsn).await.unwrap();
+        db.execute_unprepared(
+            "DROP TABLE IF EXISTS registry_state; DROP TABLE IF EXISTS registry_publish_history; \
+             DROP TABLE IF EXISTS registry_blobs;",
+        )
+        .await
+        .unwrap();
+        exercise_blob_store(&dsn).await;
+    }
+
+    #[test]
+    fn pg_blob_store_requires_database_state() {
+        let root = temp_dir();
+        let mut config = base_config(&root, "");
+        config.registry.blob_store = BlobStoreKind::Pg;
+        let mut state = super::super::state::RegistryState::new(&config.registry.state_dir);
+        let opened =
+            tokio::runtime::Runtime::new()
+                .unwrap()
+                .block_on(super::super::blobs::open_blob_store(
+                    &config.registry,
+                    &mut state,
+                ));
+        assert!(opened.is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Import recovers files of retained snapshots that are gone from the
+    /// directory from the manifest's git commit.
+    #[tokio::test]
+    async fn blob_import_reads_replaced_files_from_git() {
+        let root = temp_dir();
+        let master = root.join("master");
+        let git = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&root)
+                .args([
+                    "-c",
+                    "user.name=t",
+                    "-c",
+                    "user.email=t@t",
+                    "-c",
+                    "commit.gpgsign=false",
+                ])
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(status.status.success(), "git {args:?}: {status:?}");
+        };
+        git(&["init", "-q"]);
+        let mut config = base_config(&root, "");
+        config.registry.music_metas.enabled = false;
+        std::fs::write(master.join("cards.json"), "[{\"id\":1}]").unwrap();
+        write_version(&root, "1");
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "-m", "v1"]);
+        let files = Registry::new(Arc::new(config.clone()), HashMap::new());
+        let (first, _) = files.publish(ServerRegion::Jp).await.unwrap();
+        assert!(first.git_commit.is_some());
+        std::fs::write(master.join("cards.json"), "[{\"id\":2}]").unwrap();
+        write_version(&root, "2");
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "-m", "v2"]);
+        files.publish(ServerRegion::Jp).await.unwrap();
+
+        let db = root.join("state.db");
+        let pg = blob_registry(&config, &format!("sqlite://{}?mode=rwc", db.display())).await;
+        let stats = pg.import_blobs().await;
+        assert_eq!((stats.stored, stats.unavailable), (2, 0));
+        let old = &first.files[0].sha256;
+        let blob = pg.blobs.get(old, None).await.unwrap().unwrap();
+        let mut body = String::new();
+        use std::io::Read;
+        blob.into_reader()
+            .unwrap()
+            .read_to_string(&mut body)
+            .unwrap();
+        assert_eq!(body, "[{\"id\":1}]");
         std::fs::remove_dir_all(root).unwrap();
     }
 

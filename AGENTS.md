@@ -63,6 +63,9 @@ src/
     state.rs               – Per-region registry state (manifests, snapshots, history,
                              app identity, metas pointers): JSON files, or a database
                              when `registry.state_dsn` is set (one-time file import)
+    blobs.rs               – Master file content store (`registry.blob_store`): the
+                             master directories (fs) or content-addressed zstd blobs in
+                             `registry_blobs` (pg): import, GC, directory fallback
   models/                  – ~92 auto-generated game data model files (never hand-edit;
                              regenerate them from the source data)
   bin/
@@ -77,6 +80,8 @@ tools/
                              Il2Cpp DummyDll dump and emits Data/structures/nuverse_schema_bundle.json
 docs/
   nuverse-schema-guide.md  – Nuverse schema assets: layout, field naming, update workflow
+  master-registry-storage-and-ingest.md – registry content in PostgreSQL (blob store) and the
+                             registry-driven multi-target ingest design
 Data/master/               – Regional master data JSON files (jp, en, tw, kr, cn)
 Data/registry/             – Registry JSON state (per-region manifests); music_metas blobs
 Data/structures/           – Committed Nuverse schema assets (nuverse_schema_bundle.json, *.avsc)
@@ -151,6 +156,15 @@ haruki-sekai-configs.example.yaml – Configuration template
   the registry, delete `<state_dir>/manifests/*/current.json` (startup `publish_missing`
   skips regions that already have a current, which would serve the pre-DB manifest), clear
   `state_dsn`, restart
+- Master file content is served from the master directories (`registry.blob_store: fs`,
+  default) or from `registry_blobs` in the state database (`pg`, requires `state_dsn`):
+  zstd blobs keyed by SHA-256, stored before the manifest that lists them commits (the
+  publish transaction checks), served decompressed with the same bytes and headers
+  (`Last-Modified` = first stored). `blob/` then also serves retained snapshots' files;
+  `files/` and `bundle` follow `current`. Existing manifests are imported in the background
+  at startup (disk, else `git cat-file` at the manifest's `gitCommit`), reads fall back to
+  disk while a blob is missing, and GC removes blobs no current/retained snapshot lists
+  after `blob_gc_grace_secs`. See `docs/master-registry-storage-and-ingest.md`
 - It also maintains the music_metas feed (`metas.rs`, omakase rows injected), serves the
   app identity (`GET /v1/app/{region}`; `PUT` stores an override and pushes it to
   `registry.account_nodes`), and fans `master-updated` notices out to
@@ -265,7 +279,7 @@ docker build --build-arg VERSION=v1.0.0 -t haruki-sekai-api .
 ### Modifying the Ingest Engine
 - Table-to-file mapping: `resolve_table_name()` normalizes filenames (lowercase, strip underscores, try plural forms)
 - Column mapping: JSON keys are normalized (lowercase + strip underscores), `id` → `game_id`
-- Fallback: unmapped JSON keys are snake_cased and stored as `json.RawMessage`
+- Unmapped JSON keys are dropped (only keys matching a schema column are inserted)
 - Ingestion is transactional: DELETE existing region data, then batch INSERT (1000 rows per batch)
 
 ### Modifying Config

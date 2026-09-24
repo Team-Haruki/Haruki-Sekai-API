@@ -77,7 +77,9 @@ pub async fn init_registry_state_db(dsn: &str) -> Result<DatabaseConnection, App
         ));
     }
     let mut opts = ConnectOptions::new(dsn.trim());
-    opts.max_connections(4)
+    // Blob reads (`registry.blob_store: pg`) share the pool; they are bounded
+    // separately so state writes always find a connection.
+    opts.max_connections(8)
         .min_connections(1)
         .connect_timeout(std::time::Duration::from_secs(30))
         .acquire_timeout(std::time::Duration::from_secs(30))
@@ -113,6 +115,25 @@ pub async fn init_registry_state_db(dsn: &str) -> Result<DatabaseConnection, App
     }
     info!("Registry state database initialized successfully (SeaORM)");
     Ok(db)
+}
+
+/// Create the registry blob table (`registry.blob_store: pg`) on the
+/// registry state database when missing.
+pub async fn init_registry_blob_table(db: &DatabaseConnection) -> Result<(), AppError> {
+    let schema = Schema::new(db.get_database_backend());
+    let stmt = schema
+        .create_table_from_entity(entity::RegistryBlob)
+        .if_not_exists()
+        .to_owned();
+    db.execute(&stmt)
+        .await
+        .map_err(|e| AppError::DatabaseError(format!("Failed to create registry_blobs: {}", e)))?;
+    for mut stmt in schema.create_index_from_entity(entity::RegistryBlob) {
+        db.execute(stmt.if_not_exists()).await.map_err(|e| {
+            AppError::DatabaseError(format!("Failed to create registry_blobs index: {}", e))
+        })?;
+    }
+    Ok(())
 }
 
 /// Percent-encode a URL userinfo component so passwords containing URL-special

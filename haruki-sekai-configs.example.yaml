@@ -69,6 +69,12 @@ registry: # master data manager (`master_registry` binary); ignored by the API s
   # IF NOT EXISTS only (no migrations). Rollback to files: stop the registry, delete
   # <state_dir>/manifests/*/current.json (otherwise startup keeps the stale pre-DB manifest,
   # since publish_missing skips regions that have one), clear state_dsn, start it again.
+  # Master file content: "fs" serves the master directories (default); "pg" stores every
+  # published file zstd-compressed and content-addressed in registry_blobs next to the state
+  # tables (requires state_dsn), serves retained snapshots' files under blob/{sha256} too, and
+  # imports existing manifests in the background on first start. Rollback: set "fs" again.
+  blob_store: "fs"
+  blob_gc_grace_secs: 86400 # pg: delete unreferenced blobs not referenced by a publish for this long
   subscribers: [] # peers to POST /internal/master-updated after a region is published
   # - url: "http://100.64.0.2:9999"
   #   token: "peer-internal-token"
