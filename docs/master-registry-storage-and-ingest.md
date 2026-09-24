@@ -25,7 +25,7 @@ amount of data in memory at once.
 | key | default | meaning |
 |---|---|---|
 | `registry.blob_store` | `fs` | `fs`: serve from the master directories (current behaviour). `pg`: serve from `registry_blobs` |
-| `registry.blob_gc_grace_secs` | `86400` | an unreferenced blob is deleted only after no publish has referenced it for this long |
+| `registry.blob_gc_grace_secs` | `86400` | an unreferenced blob is deleted only after no publish has referenced it for this long (minimum 300; smaller values are raised with a warning) |
 
 `pg` requires `registry.state_dsn`, and startup fails without it. There is no
 separate `blob_dsn`. The blob table has to be in the same database as the state
@@ -90,7 +90,10 @@ would stop being identical to the fs store's.
    because the file changed under the publish. The row is then inserted.
 3. `state.publish` runs as one transaction (#105). It first checks that every
    digest the manifest lists is in `registry_blobs`, and refuses to commit
-   otherwise. After that it switches `current`, writes the snapshot, prunes the
+   otherwise. On PostgreSQL the check reads the rows `FOR KEY SHARE`, which
+   conflicts with GC's `DELETE`: a GC delete that is already running makes the
+   check see the row as missing (the publish fails and the next one re-stores
+   it), and a later one waits until the publish commits. After that it switches `current`, writes the snapshot, prunes the
    snapshots and appends history. As a result, `current` never lists a blob that
    cannot be served.
 4. Subscribers are notified, then one GC pass runs.
@@ -100,9 +103,9 @@ would stop being identical to the fs store's.
 | endpoint | fs (unchanged) | pg |
 |---|---|---|
 | `current`, `manifests/{hash}`, `history` | state | state |
-| `files/{name}` | the file on disk (whatever is there now) | resolved through the current manifest, then the blob |
+| `files/{name}` | the file on disk (whatever is there now) | resolved through the current manifest, then the blob (see the edge case below) |
 | `blob/{sha256}` | only files of the current manifest whose bytes on disk still hash to the digest | any stored blob: current, or listed by a retained snapshot of any region, or not yet collected |
-| `bundle` | tar of the directory (readdir order, file metadata) | tar streamed from the blobs of `current` (manifest order, mode 0644, mtime = publish time) plus a version entry built from the manifest |
+| `bundle` | tar of the directory (readdir order, file metadata); 404 when it holds no `*.json` | tar built from the blobs of `current` (manifest order, mode 0644, mtime = publish time) plus a version entry built from the manifest; 404 when `current` lists no files |
 
 - **Byte identity.** For `current`, `files/`, `blob/` and the error bodies,
   the body, status, `ETag`, `Cache-Control`, `Content-Type` and
@@ -122,21 +125,42 @@ would stop being identical to the fs store's.
 - **Fallback.** A current file whose blob is missing, because the import is
   still running or the database cannot be read, is served from the worktree
   with the fs store's digest check. The bundle falls back to the directory tar
-  while any blob is missing.
+  while any blob is missing, and whenever the store fails before the response
+  starts.
+- **Slow or unreachable database.** One read gets 2 s (`QUERY_TIMEOUT`) for the
+  read slot, the query slot and the query together; the pool's own 30 s
+  acquire timeout is never reached. A failed or timed-out query opens a 5 s
+  circuit breaker (`BREAKER_OPEN`): reads then skip the database, so current
+  `files/` and `blob/` requests go straight to disk.
+- **Historical blob while the store cannot answer** (database down, breaker
+  open, no read slot): `503` with `Cache-Control: no-store` and
+  `Retry-After: 5`, not a 500. A `404` on a digest URL (`blob/`,
+  `manifests/`, music_metas `blob/`), for example a digest whose import has
+  not run yet, also carries `no-store`, so a CDN never pins a miss on an
+  otherwise immutable URL.
+- **`files/` edge case.** With pg, `files/{name}` resolves through `current`.
+  While a file's blob is not stored yet (import running) and its bytes on
+  disk no longer match the manifest digest, the fallback's digest check
+  fails and the answer is a 404 (fs would serve the new bytes on disk). The
+  window closes once the import stores the blob (from git if needed) or the
+  next publish lists the new bytes.
+- **Bundle never breaks off.** Before answering, the bundle loads the
+  compressed blobs of every file `current` lists (about 8 MB for a full
+  region, at most `BUNDLE_CONCURRENCY` = 4 bundles at once, 20 s budget).
+  Only then is the 200 sent; the tar is decoded from memory by a blocking
+  task into a bounded channel of eight 64 KiB chunks, so a database error can
+  no longer truncate a response mid-stream. Any failure before that falls
+  back to the directory tar.
 - **Memory.** At most 16 blob responses are in flight at once
-  (`READ_CONCURRENCY`, a semaphore held for the whole stream). A read waits
-  at most 10 s for a slot, so slow clients cannot stall the others; after
-  that, a current file is served from disk, and any other read fails with an
-  error. The 37 MB file stores as 0.85 MB, so the largest
-  blob is about 1.3 MB, and each decoder has a 1 MiB window. The worst case is
-  therefore about 40 MB. The bundle
-  is written by a blocking task into a bounded channel of eight 64 KiB chunks,
-  one blob at a time, with no temp file. The state pool grew from 4 to 8
-  connections. At most 4 blob row queries run at once, so state writes always
-  find a connection. A blob holds a connection only for its single-row fetch,
-  not while the body streams. No extra
-  server-side cache is added: blob URLs are immutable and EdgeOne caches them,
-  `files/` is revalidated with 304s, and decompressing 1.5 MB takes about 2 ms.
+  (`READ_CONCURRENCY`, a semaphore held for the whole stream). The 37 MB file
+  stores as 0.85 MB, so the largest blob is about 1.3 MB, and each decoder has
+  a 1 MiB window: about 40 MB worst case for blobs, plus about 4 × 8 MB for
+  bundles being sent. The state pool is 8 connections with `blob_store: pg`
+  (4 with fs, as before). At most 4 blob row queries run at once, so state
+  writes always find a connection. A blob holds a connection only for its
+  fetch, not while the body streams. No extra server-side cache is added: blob
+  URLs are immutable and EdgeOne caches them, `files/` is revalidated with
+  304s, and decompressing 1.5 MB takes about 2 ms.
 
 ### Import (fs → pg on an existing deployment)
 
@@ -157,7 +181,9 @@ background (`Registry::import_blobs`):
   - The import took 2.9 s. It stored 407 blobs (18 duplicate files were
     deduplicated), 281 MB → 7.95 MB.
   - Peak RSS of the whole process was 53.5 MB. That covers the import plus 8
-    concurrent full bundles and 8 concurrent 37 MB blob downloads afterwards.
+    concurrent full bundles and 8 concurrent 37 MB blob downloads afterwards
+    (measured before bundles loaded their blobs up front; that adds about
+    8 MB per bundle being sent, at most 4 at once).
   - One full bundle streamed in 0.5 s.
 
 Reads keep working during the import through the directory fallback.
@@ -171,8 +197,11 @@ After every changed publish, and after the import, one pass runs:
 - It deletes at most 500 blobs that are not referenced and have
   `last_seen_at < now - blob_gc_grace_secs`.
 - A publish that races the pass has just touched its blobs, so they are inside
-  the grace period. The publish transaction's existence check catches anything
-  else.
+  the grace period (at least 300 s). The publish transaction's locked
+  existence check catches anything else (see the publish flow).
+- If any current manifest or retained snapshot of any region cannot be read
+  or parsed, the pass is aborted with a warning and deletes nothing: an
+  unreadable snapshot must not make its blobs look unreferenced.
 - Only one pass runs at a time.
 
 ### Rollback
@@ -195,9 +224,11 @@ After every changed publish, and after the import, one pass runs:
   the whole bundle on the next trigger (`ingest_failed`).
 - **Target.** In production the VM105 syncer ingests into CN08 `haruki_sekai`
   through `master_database.dsn`. That database has 116 typed tables from
-  `schema_info.json`. 102 of them have the unique key `(id, server_region)`,
-  where JSON `id` is mapped to `game_id`, and every table has a `server_region`
-  column.
+  `schema_info.json`, and every table has a `server_region` column. 102 of
+  them have the unique key `(id, server_region)`, where JSON `id` is mapped to
+  `game_id`; 12 have another composite key (for example
+  `(card_rarity_type, server_region)` or `(event_id, music_id, server_region)`);
+  2 have no key at all (`ngwords`, `resourceboxdetails`).
 - **Write pattern.** `IngestionEngine::ingest_master_data`
   (`ingest_engine.rs`) re-ingests every `*.json` file on every run: there is no
   change detection. Each file is its own transaction:
@@ -236,25 +267,34 @@ config section. It reads nothing from the worktrees. Everything comes from the
 registry over HTTP: `current`, `manifests/{hash}` and `blob/{sha256}`. The
 immutable blob URLs make retries and multi-node placement trivial.
 
+**The ingester requires `registry.blob_store: pg`.** With the fs store,
+`blob/{sha256}` serves only files of the *current* manifest, so every blob of a
+manifest the ingester is still working on turns into a 404 as soon as the
+registry publishes the next version. The ingester checks this at startup (the
+registry's `/health` reports `blobStore`) and refuses to run against an fs
+registry.
+
 ```yaml
 ingest:
   registry_url: "http://127.0.0.1:9998"
-  token: ""                         # registry.token, for the webhook subscription
   listen: "127.0.0.1:9997"          # receives the registry's publish webhook
+  webhook_token: ""                 # required bearer token on the webhook (empty = webhook off)
   reconcile_cron: "0 */5 * * * *"   # fallback: compare every target with registry current
   parse_concurrency: 2              # files parsed at once (memory knob)
   targets:
-    - name: cn08
+    - name: cn08                    # the key of this target's state rows; never reuse or rename
       dsn: "postgres://.../haruki_sekai"
       regions: [jp, en, tw, kr, cn]
       tables: all                   # or an allow-list of table names
       schema: schema_info.json      # typed column map
-      raw_column: true              # add/keep `raw jsonb` with the full row
+      raw: true                     # keep the full row in master_raw (side table)
+      required_tables: default      # default = the prune protect list
+      min_ratio: 0.5
       max_connections: 4
     - name: analytics
       dsn: "postgres://.../master_raw"
       tables: [cards, events, musics]
-      raw_column: true
+      raw: true
 ```
 
 ### Triggers
@@ -263,41 +303,90 @@ ingest:
   backwards-compatible way; existing receivers ignore the unknown fields:
 
   ```json
-  {"server":"jp","dataVersion":"...","contentHash":"<hex>","gitCommit":"<sha>|null",
-   "previousContentHash":"<hex>|null",
-   "changed":[{"name":"cards.json","sha256":"...","size":123}],
-   "removed":["oldtable.json"]}
+  {"server":"jp","dataVersion":"...","contentHash":"<hex>","gitCommit":"<sha>|null"}
   ```
 
-  The payload names a manifest, so the ingester can always re-derive it from
-  `manifests/{contentHash}`. `changed` is an optimisation, not a source of
-  truth. Publishing sends it and does not wait: the registry already
-  notifies subscribers after the state commit and after releasing the publish
-  lock.
-- **Reconciliation.** On `reconcile_cron`, and at startup, the ingester reads
-  each region's `current` and compares it with each target's recorded
-  `content_hash`. It catches lost webhooks, ingester downtime, a newly added
-  target, and a target restored from backup.
+  The webhook is a *trigger only*. The ingester never ingests the hash in the
+  payload; it starts a reconcile of that region, which reads the registry's
+  `current` at that moment. Two webhooks in quick succession, or one that
+  arrives late, therefore cannot make a target ingest an older version.
+  Publishing sends it and does not wait: the registry already notifies
+  subscribers after the state commit and after releasing the publish lock.
+- **Webhook auth.** The endpoint requires `Authorization: Bearer
+  <ingest.webhook_token>` (the registry's `subscribers[].token`, which it
+  already sends). A missing or wrong token is a 401; an empty
+  `webhook_token` disables the endpoint (404), leaving only reconciliation.
+  Even an authenticated webhook can only cause a reconcile, never choose the
+  data.
+- **Reconciliation.** On `reconcile_cron`, at startup and on every webhook,
+  the ingester reads each region's `current` and compares it with each
+  target's recorded version. It catches lost webhooks, ingester downtime, a
+  newly added target, and a target restored from backup.
+
+### Concurrency and ordering
+
+- One reconcile per `(target, region)` at a time: a PostgreSQL advisory lock
+  on the target database, keyed by `hashtext('master_ingest:' || target || ':'
+  || region)`, taken with `pg_try_advisory_lock` for the whole run (a second
+  ingester process against the same target skips the region instead of
+  interleaving). In-process, a per-`(target, region)` mutex coalesces
+  triggers: a trigger that arrives during a run schedules exactly one follow-up
+  run.
+- **Never backwards.** A target's version only moves forward. Before a run
+  commits, it re-reads `master_ingest_version` under the advisory lock and
+  aborts if the recorded `data_version` is newer than the one it is ingesting
+  (versions compared with the existing `compare_version`). An equal
+  `data_version` with a different `content_hash` (a re-publish of the same
+  version) is allowed.
+- **Pruned manifest.** The registry keeps 20 snapshots per region. If
+  `manifests/{hash}` or one of its blobs answers 404 while a run is in
+  progress (the registry moved on and pruned it), the run is abandoned without
+  commit and restarted from the new `current`. A 503 is retried with backoff.
 
 ### Per-target state
 
-The following table is created in each target database, so the state travels
-with the data (backups and restores stay consistent):
+The following tables are created in each target database, so the state
+travels with the data (backups and restores stay consistent). Every row is
+keyed by the **target name** as well, so two targets that point at the same
+database (for example a full target and an allow-list target sharing one
+instance) never read or overwrite each other's state:
 
 ```sql
-master_ingest_state(region text, file text, sha256 text, table_name text,
-                    rows bigint, ingested_at timestamptz, primary key(region, file))
-master_ingest_version(region text primary key, content_hash text, data_version text,
+master_ingest_state(target text, region text, file text, sha256 text, table_name text,
+                    mapping_hash text, rows bigint, missing_since text,
+                    ingested_at timestamptz, primary key(target, region, file))
+master_ingest_version(target text, region text, content_hash text, data_version text,
                       git_commit text, started_at timestamptz, finished_at timestamptz,
-                      status text, error text)
+                      status text, error text, primary key(target, region))
+master_raw(region text, table_name text, key jsonb, raw jsonb,
+           primary key(region, table_name, key))
 ```
+
+### Mapping hash
+
+A file's `sha256` alone is not enough to skip it: the same bytes produce
+different rows when the mapping changes. Each `(target, table)` has a
+**mapping hash**, SHA-256 over:
+
+- the table's entry in `schema_info.json` (columns, types, unique keys),
+- the ingest engine version (a constant bumped whenever the value conversion
+  or key normalization changes),
+- the target's `raw` setting,
+- the target's resolved table set.
+
+It is stored per file in `master_ingest_state.mapping_hash`. A file is
+re-ingested when its `sha256` **or** its mapping hash differs, so regenerating
+the models, upgrading the engine or turning `raw` on rewrites exactly the
+affected tables even though no master file changed.
 
 ### Algorithm, per region
 
-1. Fetch the target manifest.
-2. For each target, compute a diff against `master_ingest_state`: changed
-   files, where the sha256 differs or the file is new, and removed files. A
-   target already at `content_hash` is skipped.
+1. Take the advisory lock, read the registry's `current` and fetch
+   `manifests/{contentHash}`.
+2. For each target, diff against `master_ingest_state`: changed files (new
+   file, different `sha256` or different mapping hash) and files no longer
+   listed. A target already at `content_hash` with no mapping change is
+   skipped.
 3. Compute the union of the changed files over all targets.
 4. Handle each unioned file once:
    - Stream `blob/{sha}` (verify the sha256 while reading).
@@ -305,57 +394,102 @@ master_ingest_version(region text primary key, content_hash text, data_version t
      per batch).
    - Fan each batch out, through bounded channels, to the targets that need
      that file. Each target builds its own typed rows (its table set, its
-     columns and `raw`).
-5. Each target has **one transaction per region**. Within it:
+     columns) and, with `raw`, its `master_raw` rows.
+5. Each target applies the region in **one transaction** in steady state
+   (a master update touches a few dozen tables). Within it:
    - Every changed file is written, with the per-table write strategy below.
-   - Tables of removed files are cleared for the region (`removed`
-     semantics are explicit now).
+   - Removed files are handled with the prune rule below.
+   - The integrity checks run.
    - `master_ingest_state` and `master_ingest_version` are updated.
-   - Commit.
-
-   Readers of a target switch from one complete version to the next.
+   - Commit. Readers of a target switch from one complete version to the next.
 6. A slow target stalls the fan-out only through its bounded channel. If a
    target fails (connection, constraint or check), it rolls back, records
    `status=failed` and is dropped from this run. The other targets continue.
    Reconciliation retries it later.
 
+### First full ingest
+
+A new target, or a mapping change that touches most tables, would otherwise
+rewrite the full ~417 MB in one transaction per region (huge WAL, long locks,
+one failure redoes everything). Instead, when a run would rewrite more than a
+threshold (default: 25 tables or 50 MB of JSON), it is **staged per table**:
+
+- Each table is loaded into a staging table (`<table>__ingest`), checked, and
+  swapped in its own short transaction (upsert/delete from staging, or
+  `ALTER TABLE … RENAME` for a table that is empty for the other regions),
+  recording that file's `master_ingest_state` row in the same transaction.
+- `master_ingest_version.status` stays `staging` until every table is done,
+  then the final transaction sets the version. Readers see a mix of old and
+  new tables during a first load; that is acceptable once and is reported by
+  `status`.
+- A failure resumes where it stopped: finished tables already carry the new
+  `sha256` and mapping hash.
+
 ### Write strategy per table
 
 The goal is to avoid rewriting unchanged rows:
 
-- Tables with a unique key: rows go into a temp table (`COPY` when available,
-  otherwise batched INSERT), then
-  `INSERT … ON CONFLICT (key) DO UPDATE … WHERE (t.*) IS DISTINCT FROM (excluded.*)`,
-  then `DELETE … WHERE server_region = $r AND key NOT IN temp`. WAL is then
-  proportional to the rows that actually changed.
-- Tables without a key (2 today): DELETE and INSERT for the region, as now.
-  Only changed files reach this path.
+- Tables with a unique key (114 of 116: `(id, server_region)` or another
+  composite key): rows are written with **batched multi-row `INSERT … ON
+  CONFLICT (key) DO UPDATE … WHERE (t.*) IS DISTINCT FROM (excluded.*)`**, then
+  `DELETE … WHERE server_region = $r AND key NOT IN (keys of this file)`. WAL is
+  then proportional to the rows that actually changed. `COPY` is not used:
+  batched INSERT stays on SeaORM/sqlx without a second write path and is fast
+  enough at a few dozen changed tables per update.
+- Tables without a key (2 today: `ngwords`, `resourceboxdetails`): DELETE and
+  INSERT for the region, as now. Only changed files reach this path.
 
 ### Typed tables and unknown keys
 
 - Typed columns keep the current mapping: normalized key, `id` → `game_id`,
   and the typed value conversions.
-- With `raw_column: true`, every table has `raw jsonb`, which holds the full
-  original row. No field is lost, and new game fields can be queried at once and
-  promoted to typed columns later without re-downloading anything.
+- With `raw: true`, the full original row goes into the **side table
+  `master_raw(region, table_name, key, raw)`**, not into a column of the typed
+  tables. The typed tables stay narrow and unchanged for existing readers; no
+  field is lost, and new game fields can be queried at once and promoted to
+  typed columns later without re-downloading anything. Rows of keyless tables
+  use their row index within the file as `key`.
 - Unknown keys are counted per table and reported in `master_ingest_version`
   and in the log, instead of being dropped silently.
 - DDL:
-  - `raw` is added with `ALTER TABLE … ADD COLUMN IF NOT EXISTS`.
-  - Missing tables are created only when the target allows it (`create_tables:
-    true`). Otherwise the target fails its check.
+  - The state tables and `master_raw` are created with `IF NOT EXISTS`.
+  - Missing typed tables are created only when the target allows it
+    (`create_tables: true`). Otherwise the target fails its check.
   - Typed-column changes stay manual, as today.
+
+### Removed tables
+
+A file that disappears from the manifest is handled with the producer's prune
+rule (`updater/prune.rs`), not immediately:
+
+- The first manifest without the file records `missing_since` in its
+  `master_ingest_state` row and keeps the rows.
+- The table's rows for the region are deleted only when a **second
+  consecutive** ingested version still lacks the file. A file that comes back
+  in between clears `missing_since`.
+- Tables on the protect list (`BUILTIN_PROTECTED_TABLES`) and tables in the
+  target's `required_tables` are never cleared this way; a manifest that drops
+  one of them fails the `required_tables` check below instead, so the
+  operator sees it.
 
 ### Integrity checks, before a region's commit
 
 - The number of manifest files matches the files that are handled plus the
   ones skipped because no table exists.
-- Every table named in `required_tables` has at least one row for the region.
-  The list defaults to the prune protect list (`BUILTIN_PROTECTED_TABLES`),
-  which is already kept in sync with consumers.
+- Every table named in `required_tables` has at least one row for the region
+  after the write. The list defaults to the prune protect list
+  (`BUILTIN_PROTECTED_TABLES`), which is already kept in sync with consumers.
 - Each changed file's row count is at least `min_ratio` times its previous row
   count (0.5 by default). This guards against a truncated upstream table. A
   failed check aborts that target's transaction.
+- **Manual override for `min_ratio`.** A legitimate large shrink (the game
+  really removed most rows of a table) would otherwise fail forever. The
+  operator allows it for one specific version: `POST
+  /v1/ingest/{target}/{region}/allow-shrink` with `{"contentHash": "...",
+  "tables": ["..."]}` (same bearer token), or the same list in the config
+  (`allow_shrink: [{content_hash, tables}]`). The override applies only to that
+  `contentHash` and is recorded in `master_ingest_version.error` for the
+  audit trail; the next version is checked normally.
 
 ### Memory
 
@@ -366,23 +500,28 @@ compressed transport stays on the registry side.
 ### Rollout
 
 1. Registry: extend the webhook payload and add `registry.subscribers` →
-   ingester. This is compatible with existing receivers.
+   ingester (with its token). This is compatible with existing receivers. The
+   registry must run `blob_store: pg`.
 2. Run the ingester against a scratch copy of `haruki_sekai`, and compare the
    tables with the old ingest at the same `contentHash`.
 3. Point the ingester at CN08 `haruki_sekai` and remove `master_database` from
    the VM105 syncer config, so the old ingest stops there. The old engine stays
    for `run_ingest` and for owner nodes until it is retired.
 
-### Open questions for B
+### Decisions (defaults)
 
-- **`raw` storage.** Should it be in the typed tables or in one side table
-  `master_raw(region, table, key, raw)`? Keeping it in the typed tables avoids
-  joins; a side table keeps the typed tables narrow.
-- **COPY.** Should the target writer use sqlx's `COPY` directly (faster, and
-  it bypasses SeaORM), or stay on batched INSERT?
-- **Removed files.** Should the rows of a removed file be deleted right away,
-  or only after two consecutive manifests without the file, matching the
-  producer's prune rule?
+These were open questions; the operator decided them as follows:
+
+- **`raw` storage:** a side table `master_raw(region, table_name, key, raw)`,
+  not a column in the typed tables.
+- **Writes:** batched `INSERT … ON CONFLICT DO UPDATE` (upsert), not `COPY`.
+- **Removed tables:** rows are deleted only after two consecutive ingested
+  versions without the file (the producer's prune rule), never for protected
+  or required tables.
+- **Historical blob while PostgreSQL is down:** the registry answers `503`
+  with `Cache-Control: no-store` (implemented in part A); the ingester retries.
+- **No zstd `Content-Encoding` on blob responses:** bodies stay byte-identical
+  to the fs store, and a CDN holds one variant per URL.
 
 ---
 
