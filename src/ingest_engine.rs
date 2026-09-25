@@ -25,9 +25,16 @@ type SchemaMap = HashMap<String, (ColumnTypeMap, UniqueKeys)>;
 /// shared node; raise it via `master_database.ingest_concurrency` where RAM
 /// allows.
 pub const DEFAULT_INGEST_CONCURRENCY: usize = 2;
-/// Rows parsed per batch before they are turned into an INSERT. Bounded
-/// memory per file is roughly `ROWS_PER_BATCH * CHANNEL_DEPTH` rows.
+/// Rows parsed per batch before they are turned into an INSERT.
 pub(crate) const ROWS_PER_BATCH: usize = 2_000;
+/// Estimated in-memory size (see [`approx_value_bytes`]) at which a batch is
+/// cut before it reaches `ROWS_PER_BATCH`. Row counts alone do not bound
+/// memory: `gachas.json` or `cards.json` are 35-48 MB in ~1-1.5k rows, so a
+/// row-count batch was the whole file as a `Value` tree (several times its size),
+/// copied again into typed values and the INSERT. With this cap, memory per
+/// in-flight file is about `(CHANNEL_DEPTH + 2) * BATCH_BYTES` plus the typed
+/// copy of one batch, whatever the file size.
+pub(crate) const BATCH_BYTES: usize = 1024 * 1024;
 /// Parsed batches allowed to queue ahead of the inserting side.
 pub(crate) const CHANNEL_DEPTH: usize = 2;
 
@@ -372,7 +379,11 @@ pub(crate) async fn insert_batch(
         for row in chunk {
             stmt.values_panic(row);
         }
-        txn.execute(&stmt)
+        // Build, then drop the statement: its values are cloned into the
+        // built statement, so holding both doubles the batch in memory.
+        let built = txn.get_database_backend().build(&stmt);
+        drop(stmt);
+        txn.execute_raw(built)
             .await
             .context("Failed to execute batch insert")?;
     }
@@ -380,16 +391,27 @@ pub(crate) async fn insert_batch(
 }
 
 /// Stream a JSON array from `reader`, handing `f` the elements in batches of
-/// at most `batch_size`. Non-object elements are passed through and filtered
-/// by the batch builder, as before. The last (partial) batch is flushed at
-/// the end of the array.
+/// at most `batch_size` rows and about [`BATCH_BYTES`] of parsed values
+/// (a single larger row is a batch of its own). Non-object elements are
+/// passed through and filtered by the batch builder, as before. The last
+/// (partial) batch is flushed at the end of the array.
 pub(crate) fn stream_rows<R: std::io::Read>(
     reader: R,
     batch_size: usize,
     f: impl FnMut(Vec<Value>) -> Result<()>,
 ) -> Result<()> {
+    stream_rows_bounded(reader, batch_size, BATCH_BYTES, f)
+}
+
+pub(crate) fn stream_rows_bounded<R: std::io::Read>(
+    reader: R,
+    batch_size: usize,
+    batch_bytes: usize,
+    f: impl FnMut(Vec<Value>) -> Result<()>,
+) -> Result<()> {
     struct RowsVisitor<F> {
         batch_size: usize,
+        batch_bytes: usize,
         f: F,
     }
     impl<'de, F: FnMut(Vec<Value>) -> Result<()>> serde::de::Visitor<'de> for RowsVisitor<F> {
@@ -401,12 +423,14 @@ pub(crate) fn stream_rows<R: std::io::Read>(
             mut self,
             mut seq: A,
         ) -> std::result::Result<(), A::Error> {
-            let mut buf = Vec::with_capacity(self.batch_size);
+            let mut buf = Vec::new();
+            let mut bytes = 0usize;
             while let Some(row) = seq.next_element::<Value>()? {
+                bytes += approx_value_bytes(&row);
                 buf.push(row);
-                if buf.len() >= self.batch_size {
-                    let full = std::mem::replace(&mut buf, Vec::with_capacity(self.batch_size));
-                    (self.f)(full).map_err(serde::de::Error::custom)?;
+                if buf.len() >= self.batch_size || bytes >= self.batch_bytes {
+                    (self.f)(std::mem::take(&mut buf)).map_err(serde::de::Error::custom)?;
+                    bytes = 0;
                 }
             }
             if !buf.is_empty() {
@@ -416,9 +440,34 @@ pub(crate) fn stream_rows<R: std::io::Read>(
         }
     }
     let mut de = serde_json::Deserializer::from_reader(reader);
-    serde::Deserializer::deserialize_seq(&mut de, RowsVisitor { batch_size, f })?;
+    serde::Deserializer::deserialize_seq(
+        &mut de,
+        RowsVisitor {
+            batch_size,
+            batch_bytes,
+            f,
+        },
+    )?;
     de.end()?;
     Ok(())
+}
+
+/// Rough heap footprint of a parsed value (node sizes plus string and key
+/// bytes, ignoring allocator slack): what batches are bounded by.
+pub(crate) fn approx_value_bytes(value: &Value) -> usize {
+    const NODE: usize = std::mem::size_of::<Value>();
+    match value {
+        Value::String(s) => NODE + s.len(),
+        Value::Array(items) => NODE + items.iter().map(approx_value_bytes).sum::<usize>(),
+        // Entry: key String, value, hash and index slot.
+        Value::Object(map) => {
+            NODE + map
+                .iter()
+                .map(|(k, v)| 40 + k.len() + approx_value_bytes(v))
+                .sum::<usize>()
+        }
+        _ => NODE,
+    }
 }
 
 /// CPU-bound work for one batch: map the keys present in these rows to DB
@@ -785,6 +834,43 @@ mod tests {
         assert_eq!(batch.rows.len(), 2);
         let empty = build_batch(&[], "items", &columns, "jp", true);
         assert!(empty.column_names.is_empty() && empty.rows.is_empty());
+    }
+
+    #[test]
+    fn large_rows_cut_batches_by_size_not_only_by_count() {
+        // 300 rows of ~20 KB each: one row-count batch would be the whole
+        // file; the size cap splits it and keeps every row, in order.
+        let big = "x".repeat(20_000);
+        let rows: Vec<Value> = (0..300).map(|i| json!({"id": i, "blob": big})).collect();
+        let json = serde_json::to_vec(&rows).unwrap();
+        let row_bytes = approx_value_bytes(&rows[0]);
+        assert!(row_bytes > 20_000);
+        let cap = 100 * row_bytes;
+        let mut sizes = Vec::new();
+        let mut seen = 0;
+        stream_rows_bounded(std::io::Cursor::new(json), ROWS_PER_BATCH, cap, |batch| {
+            let bytes: usize = batch.iter().map(approx_value_bytes).sum();
+            assert!(bytes <= cap, "batch of {bytes} bytes over the {cap} cap");
+            for row in &batch {
+                assert_eq!(row["id"], json!(seen));
+                seen += 1;
+            }
+            sizes.push(batch.len());
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(seen, 300);
+        assert_eq!(sizes, vec![100, 100, 100]);
+
+        // A row larger than the cap is a batch of its own.
+        let mut sizes = Vec::new();
+        let json = serde_json::to_vec(&rows[..3]).unwrap();
+        stream_rows_bounded(std::io::Cursor::new(json), ROWS_PER_BATCH, 1, |batch| {
+            sizes.push(batch.len());
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(sizes, vec![1, 1, 1]);
     }
 
     #[test]

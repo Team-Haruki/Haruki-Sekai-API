@@ -407,8 +407,9 @@ affected tables even though no master file changed.
 3. Compute the union of the changed files over all targets.
 4. Handle each unioned file once:
    - Stream `blob/{sha}` (verify the sha256 while reading).
-   - Parse it once in row batches (the existing `stream_rows`, about 2000 rows
-     per batch).
+   - Parse it once in row batches (the existing `stream_rows`: at most 2000
+     rows and about 1 MiB of parsed values per batch, so a file of few very
+     large rows such as `gachas.json` is split too).
    - Fan each batch out, through bounded channels, to the targets that need
      that file. Each target builds its own typed rows (its table set, its
      columns) and, with `raw`, its `master_raw` rows.
@@ -521,9 +522,25 @@ rule (`updater/prune.rs`), not immediately:
 
 ### Memory
 
-Peak memory is `parse_concurrency` × (one blob read buffer + about 2 row
-batches × number of targets). No file is ever held whole in memory, and the
-compressed transport stays on the registry side.
+Peak memory is `parse_concurrency` × (one blob read buffer + about 4 row
+batches of at most ~1 MiB of parsed values, plus each target's typed copy of
+the batch it is writing). No file is ever held whole in memory, and the
+compressed transport stays on the registry side. The target pools keep no
+prepared-statement cache: the multi-row INSERTs (up to 65535 parameters) are
+all distinct and would otherwise stay cached on every pooled connection.
+
+Batches used to be bounded by row count only; `gachas.json` (48 MB in 1011
+rows) or `cards.json` then became one batch holding the whole file as a
+`Value` tree, copied twice more into the INSERT, and a first full ingest
+peaked at 1.35 GB RSS for two regions (OOM at a 512 MiB limit).
+`tests/ingest_memory.rs` guards this with a counting allocator (a 43 MB
+large-row file and a 150k-row file: ~12 MiB peak heap per region run).
+Measured on real JP+TW master data (first ingest over rows the old path
+wrote, one target, `parse_concurrency: 2`, the Alpine/musl build in a
+512 MiB container): before, OOM-killed at 512 MiB; after, peak live heap
+27 MB, VmHWM 39 MB, cgroup `memory.peak` 42 MB (macOS system allocator:
+~100 MB RSS). musl returns freed memory well, so no allocator change or
+arena tuning is needed. A `mem_limit` of 256 MiB leaves ample headroom.
 
 ### Rollout
 

@@ -145,7 +145,10 @@ haruki-sekai-configs.example.yaml – Configuration template
 - Downloaded payloads are decoded table by table with rows streamed (`master_stream.rs`),
   so the producer's peak memory is bounded by one row rather than the whole payload.
   Keep new master consumers on that path — never `unpack_ordered` a whole master
-- Ingestion streams row batches; `master_database.ingest_concurrency` bounds its memory
+- Ingestion streams row batches bounded by row count *and* size (`ROWS_PER_BATCH`,
+  `BATCH_BYTES` in `ingest_engine.rs`: a few master files have ~1k rows of 25-50 KB each);
+  `master_database.ingest_concurrency` / `ingest.parse_concurrency` bound its memory.
+  `tests/ingest_memory.rs` asserts the peak heap of a large-file ingest (PostgreSQL-gated)
 - After a complete dump (every split decoded) or a complete bundle unpack, `*.json` files the
   dump did not produce are deleted before ingest and git push (`updater/prune.rs`); a failed or
   partial run never prunes. The producer deletes only after two consecutive complete dumps miss
