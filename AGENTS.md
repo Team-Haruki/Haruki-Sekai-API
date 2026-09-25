@@ -14,7 +14,16 @@ src/
   config.rs                – YAML config structs with serde defaults
   error.rs                 – AppError enum (thiserror), HTTP status mapping, IntoResponse
   utils.rs                 – retry_async(), CachedResource<T>
-  ingest_engine.rs         – Bulk JSON→DB ingestion using schema_info.json
+  ingest_engine.rs         – Bulk JSON→DB ingestion using schema_info.json (the in-sync path);
+                             `MasterSchema` (table map, file→table resolution) shared with ingest/
+  ingest/                  – Registry-driven multi-target ingest (`master_ingest` binary):
+    mod.rs                 – Ingester: targets, coalesced per-region triggers, cron reconcile
+    run.rs                 – One region run: state diff, fetch+parse each changed file once,
+                             fan-out to per-target writer tasks, checks, commit
+    target.rs              – Per-target SQL: state tables, advisory lock, introspection,
+                             mapping hash, staged upsert/delete of a file, raw rows
+    registry_client.rs     – current / blob fetch with retries and streamed SHA-256 check
+    http.rs                – /health, publish webhook, allow-shrink
   upstream.rs              – RegionRouter: multi-upstream routing with priority-ordered
                              targets (local client + remote Haruki nodes), circuit breakers
   api/
@@ -71,6 +80,7 @@ src/
   bin/
     run_ingest.rs          – Standalone CLI for master data ingestion
     master_registry.rs     – Master data manager (registry), runs on the same config file
+    master_ingest.rs       – Registry-driven ingest role (`ingest` config section)
     bench_profile.rs       – Per-stage latency benchmark for the profile proxy path
 tools/
   ent_generator/           – Rust tool that reads src/models/ and generates:
@@ -170,11 +180,32 @@ haruki-sekai-configs.example.yaml – Configuration template
 - It also maintains the music_metas feed (`metas.rs`, omakase rows injected), serves the
   app identity (`GET /v1/app/{region}`; `PUT` stores an override and pushes it to
   `registry.account_nodes`), and fans `master-updated` notices out to
-  `registry.subscribers`
+  `registry.subscribers` (body `{server, dataVersion, contentHash, gitCommit, changedFiles,
+  removedFiles}`; the last four were added compatibly, receivers must still re-read `current`)
 - `/health` reports `status: degraded` when the last git push failed
 - CDN contract: pointers (`current`, `files/{name}`, `music_metas.json`, `app`) are
   `no-cache` + ETag; digest-addressed `blob/{sha256}` and `manifests/{hash}` are
   immutable — never serve changing bytes under a digest URL; their 404s/503s are `no-store`
+
+### Registry-Driven Ingest (`master_ingest`)
+- Opt-in role: runs only as its own process with an `ingest` config section; the in-sync path
+  (`master_database` on the syncer/registry/updater) is unchanged and stays the default. Never
+  point both at the same database
+- Reads only the registry (`/health` must report `blobStore: pg`, then `current` and
+  `blob/{sha256}`); the webhook (`POST /internal/master-updated`, bearer `ingest.webhook_token`)
+  and the cron only trigger a reconcile of the registry's `current`
+- Per target (`ingest.targets[]`, state keyed by target `name`): `master_ingest_state` (per-file
+  sha256 + mapping hash, rows, missing_since), `master_ingest_version`, `master_raw` (only with
+  `raw: true`, opt-in), `master_ingest_allow_shrink`. A file is rewritten when its sha256 or mapping
+  hash (schema entry, DB columns/types, key, `raw`, `target::ENGINE_VERSION`) changed — bump
+  `ENGINE_VERSION` when value conversion or write SQL changes
+- Each file is staged into a temp table, then upserted `ON CONFLICT (key) … WHERE … IS DISTINCT FROM`
+  and stale keys deleted (keyless tables / no matching unique index: delete + insert). Steady runs
+  commit a region in one transaction per target; runs above `stage_tables`/`stage_bytes` commit
+  per file (status `staging`). Checks: min_ratio (override: allow-shrink), required tables, never
+  backwards; removed files are cleared after two consecutive missing versions, never protected ones
+- DB tests: `HARUKI_TEST_INGEST_DSN` (a user that may CREATE DATABASE), optional
+  `HARUKI_TEST_INGEST_MASTER_DIR` for a full-directory equivalence run
 
 ### Schema System
 - `schema_info.json` defines table names, column types, and unique keys
@@ -242,6 +273,9 @@ cargo run --bin run_ingest
 # Run the master data manager (registry) on the same config file
 cargo run --bin master_registry
 
+# Run the registry-driven ingest role (needs an `ingest` section)
+cargo run --bin master_ingest
+
 # Tests, a single test, and the ones needing external services
 cargo test
 cargo test <test_name>
@@ -282,7 +316,9 @@ docker build --build-arg VERSION=v1.0.0 -t haruki-sekai-api .
 - Table-to-file mapping: `resolve_table_name()` normalizes filenames (lowercase, strip underscores, try plural forms)
 - Column mapping: JSON keys are normalized (lowercase + strip underscores), `id` → `game_id`
 - Unmapped JSON keys are dropped (only keys matching a schema column are inserted)
-- Ingestion is transactional: DELETE existing region data, then batch INSERT (1000 rows per batch)
+- In-sync path: one transaction per file, DELETE existing region data, then batch INSERT
+- Registry-driven path (`src/ingest/`): see "Registry-Driven Ingest" above; unmapped keys are
+  counted in `master_ingest_version.unknown_keys` and kept in `master_raw` when `raw: true`
 
 ### Modifying Config
 The config file is `haruki-sekai-configs.yaml`, located via the `CONFIG_PATH` env var

@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use tracing::{info, warn};
 
 // Structure of schema_info.json
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, serde::Serialize)]
 struct TableInfo {
     name: String,
     columns: Vec<String>,
@@ -16,8 +16,8 @@ struct TableInfo {
     unique_keys: Option<Vec<Vec<String>>>,
 }
 
-type ColumnTypeMap = HashMap<String, String>;
-type UniqueKeys = Vec<Vec<String>>;
+pub(crate) type ColumnTypeMap = HashMap<String, String>;
+pub(crate) type UniqueKeys = Vec<Vec<String>>;
 type SchemaMap = HashMap<String, (ColumnTypeMap, UniqueKeys)>;
 
 /// Files ingested concurrently by default. Each in-flight file holds at most
@@ -27,28 +27,56 @@ type SchemaMap = HashMap<String, (ColumnTypeMap, UniqueKeys)>;
 pub const DEFAULT_INGEST_CONCURRENCY: usize = 2;
 /// Rows parsed per batch before they are turned into an INSERT. Bounded
 /// memory per file is roughly `ROWS_PER_BATCH * CHANNEL_DEPTH` rows.
-const ROWS_PER_BATCH: usize = 2_000;
+pub(crate) const ROWS_PER_BATCH: usize = 2_000;
 /// Parsed batches allowed to queue ahead of the inserting side.
-const CHANNEL_DEPTH: usize = 2;
+pub(crate) const CHANNEL_DEPTH: usize = 2;
 
-pub struct IngestionEngine {
-    db: DatabaseConnection,
-    schema_map: SchemaMap, // table -> (column -> type, unique_keys)
-    file_to_table: HashMap<String, String>,
-    concurrency: usize,
+/// Tables dropped from the schema long ago whose files are never ingested.
+/// Note the generator would name a future characterProfiles model
+/// `characterprofiles` (not in this list) but a virtualItems model
+/// `virtualitems` (in it) — remove the entry before adding that model.
+pub(crate) fn is_legacy_skipped_table(table: &str) -> bool {
+    matches!(
+        table,
+        "character_profiles" | "virtual_items" | "virtualitems"
+    )
 }
 
-impl IngestionEngine {
-    pub async fn new(db: DatabaseConnection) -> Result<Self> {
-        let schema_json = tokio::fs::read_to_string("schema_info.json")
+/// The typed table map from `schema_info.json`: table -> (column -> type,
+/// unique keys), plus the file-stem resolution rules.
+pub struct MasterSchema {
+    schema_map: SchemaMap,
+    file_to_table: HashMap<String, String>,
+    /// Canonical JSON of each table's schema entry (mapping fingerprints).
+    entries: HashMap<String, String>,
+}
+
+impl MasterSchema {
+    pub async fn load(path: &str) -> Result<Self> {
+        let schema_json = tokio::fs::read_to_string(path)
             .await
-            .context("Failed to read schema_info.json")?;
-        let tables: Vec<TableInfo> = serde_json::from_str(&schema_json)?;
+            .with_context(|| format!("Failed to read {path}"))?;
+        Self::parse(&schema_json)
+    }
+
+    pub fn parse(schema_json: &str) -> Result<Self> {
+        let tables: Vec<TableInfo> = serde_json::from_str(schema_json)?;
 
         let mut schema_map = HashMap::new();
         let mut file_to_table = HashMap::new();
+        let mut entries = HashMap::new();
 
         for table in tables {
+            let mut sorted_columns = table.columns.clone();
+            sorted_columns.sort();
+            entries.insert(
+                table.name.clone(),
+                serde_json::json!({
+                    "columns": sorted_columns,
+                    "unique_keys": table.unique_keys,
+                })
+                .to_string(),
+            );
             let mut col_map = HashMap::new();
             for col_type_str in table.columns {
                 if let Some((col, typ)) = col_type_str.split_once(':') {
@@ -73,20 +101,13 @@ impl IngestionEngine {
         }
 
         Ok(Self {
-            db,
             schema_map,
             file_to_table,
-            concurrency: DEFAULT_INGEST_CONCURRENCY,
+            entries,
         })
     }
 
-    /// Number of files ingested at once (minimum 1).
-    pub fn with_concurrency(mut self, concurrency: usize) -> Self {
-        self.concurrency = concurrency.max(1);
-        self
-    }
-
-    fn resolve_table_name(&self, file_name_without_ext: &str) -> Option<String> {
+    pub fn resolve_table_name(&self, file_name_without_ext: &str) -> Option<String> {
         let normalized = file_name_without_ext.to_lowercase().replace("_", "");
 
         if let Some(tbl) = self.file_to_table.get(&normalized) {
@@ -110,6 +131,46 @@ impl IngestionEngine {
             }
         }
         None
+    }
+
+    /// Column -> type map and unique keys of `table`.
+    pub fn table(&self, table: &str) -> Option<&(ColumnTypeMap, UniqueKeys)> {
+        self.schema_map.get(table)
+    }
+
+    /// Canonical JSON of `table`'s schema entry (columns sorted).
+    pub fn entry_fingerprint(&self, table: &str) -> Option<&str> {
+        self.entries.get(table).map(String::as_str)
+    }
+
+    pub fn table_names(&self) -> impl Iterator<Item = &str> {
+        self.schema_map.keys().map(String::as_str)
+    }
+}
+
+pub struct IngestionEngine {
+    db: DatabaseConnection,
+    schema: MasterSchema,
+    concurrency: usize,
+}
+
+impl IngestionEngine {
+    pub async fn new(db: DatabaseConnection) -> Result<Self> {
+        Ok(Self {
+            db,
+            schema: MasterSchema::load("schema_info.json").await?,
+            concurrency: DEFAULT_INGEST_CONCURRENCY,
+        })
+    }
+
+    /// Number of files ingested at once (minimum 1).
+    pub fn with_concurrency(mut self, concurrency: usize) -> Self {
+        self.concurrency = concurrency.max(1);
+        self
+    }
+
+    fn resolve_table_name(&self, file_name_without_ext: &str) -> Option<String> {
+        self.schema.resolve_table_name(file_name_without_ext)
     }
 
     /// Ingest all JSON files in `dir_path` for the given `region`, running up to
@@ -179,19 +240,12 @@ impl IngestionEngine {
             None => return Ok(()),
         };
 
-        // Legacy hard skip kept on purpose: these tables were dropped from
-        // the schema long ago and their files are never ingested. Note the
-        // generator would name a future characterProfiles model
-        // `characterprofiles` (not in this list) but a virtualItems model
-        // `virtualitems` (in it) — remove the entry before adding that model.
-        if matches!(
-            table_name.as_str(),
-            "character_profiles" | "virtual_items" | "virtualitems"
-        ) {
+        // Legacy hard skip kept on purpose (see `is_legacy_skipped_table`).
+        if is_legacy_skipped_table(&table_name) {
             return Ok(());
         }
 
-        let (db_cols, _unique_keys) = self.schema_map.get(&table_name).unwrap();
+        let (db_cols, _unique_keys) = self.schema.table(&table_name).unwrap();
         let has_server_region = db_cols.contains_key("server_region");
 
         // Parse on the blocking pool, streaming the JSON array in row batches
@@ -290,13 +344,13 @@ impl IngestionEngine {
 
 /// One parsed row batch: the INSERT column list (derived from the keys
 /// present in this batch) and the typed row values.
-struct Batch {
-    column_names: Vec<String>,
-    rows: Vec<Vec<sea_orm::sea_query::SimpleExpr>>,
+pub(crate) struct Batch {
+    pub(crate) column_names: Vec<String>,
+    pub(crate) rows: Vec<Vec<sea_orm::sea_query::SimpleExpr>>,
 }
 
-async fn insert_batch(
-    txn: &sea_orm::DatabaseTransaction,
+pub(crate) async fn insert_batch(
+    txn: &impl ConnectionTrait,
     table_name: &str,
     batch: Batch,
 ) -> Result<()> {
@@ -329,7 +383,7 @@ async fn insert_batch(
 /// at most `batch_size`. Non-object elements are passed through and filtered
 /// by the batch builder, as before. The last (partial) batch is flushed at
 /// the end of the array.
-fn stream_rows<R: std::io::Read>(
+pub(crate) fn stream_rows<R: std::io::Read>(
     reader: R,
     batch_size: usize,
     f: impl FnMut(Vec<Value>) -> Result<()>,
@@ -372,7 +426,7 @@ fn stream_rows<R: std::io::Read>(
 /// batch are omitted from that batch's INSERT (they take the column default,
 /// NULL for every master table), which is how missing keys were handled
 /// before batching as well.
-fn build_batch(
+pub(crate) fn build_batch(
     data: &[Value],
     table_name: &str,
     db_cols: &HashMap<String, String>,
@@ -406,13 +460,13 @@ fn build_batch(
     Batch { column_names, rows }
 }
 
-struct MappedCol {
-    json_key: String,
-    db_col: String,
-    col_type: String,
+pub(crate) struct MappedCol {
+    pub(crate) json_key: String,
+    pub(crate) db_col: String,
+    pub(crate) col_type: String,
 }
 
-fn collect_json_keys(data: &[Value]) -> Vec<String> {
+pub(crate) fn collect_json_keys(data: &[Value]) -> Vec<String> {
     let mut keys = Vec::new();
     let mut seen = HashSet::new();
     for obj in data.iter().filter_map(Value::as_object) {
@@ -425,7 +479,10 @@ fn collect_json_keys(data: &[Value]) -> Vec<String> {
     keys
 }
 
-fn map_target_columns(keys: &[String], db_cols: &HashMap<String, String>) -> Vec<MappedCol> {
+pub(crate) fn map_target_columns(
+    keys: &[String],
+    db_cols: &HashMap<String, String>,
+) -> Vec<MappedCol> {
     keys.iter()
         .filter_map(|json_key| {
             let normalized = match normalize_json_key(json_key).as_str() {
@@ -444,7 +501,7 @@ fn map_target_columns(keys: &[String], db_cols: &HashMap<String, String>) -> Vec
         .collect()
 }
 
-fn build_rows(
+pub(crate) fn build_rows(
     data: &[Value],
     table_name: &str,
     target_columns: &[MappedCol],
@@ -1060,12 +1117,12 @@ mod tests {
             "charactermissionv2exjsons",
             "charactermissionv2areaitems",
         ] {
-            let (columns, keys) = &engine.schema_map[table];
+            let (columns, keys) = &engine.schema.schema_map[table];
             assert!(columns.contains_key("game_id"), "{table}");
             assert_eq!(keys, &default_key, "{table}");
         }
         // Nuverse resourceBoxDetails rows have no id/seq, so no unique key is declared.
-        let (columns, keys) = &engine.schema_map["resourceboxdetails"];
+        let (columns, keys) = &engine.schema.schema_map["resourceboxdetails"];
         assert!(!columns.contains_key("game_id"));
         assert!(keys.is_empty());
     }
@@ -1227,7 +1284,7 @@ mod tests {
             "unitstoryepisodegroups",
             "musiccategories",
         ] {
-            let (columns, keys) = &engine.schema_map[table];
+            let (columns, keys) = &engine.schema.schema_map[table];
             assert!(columns.contains_key("game_id"), "{table}");
             assert_eq!(keys, &default_key, "{table}");
         }
@@ -1237,7 +1294,7 @@ mod tests {
             "world_bloom_support_deck_skill_level_bonuses",
         ] {
             assert_eq!(
-                engine.schema_map["worldbloomsupportdeckbonuses"].0[column],
+                engine.schema.schema_map["worldbloomsupportdeckbonuses"].0[column],
                 "json.RawMessage"
             );
         }
@@ -1289,7 +1346,7 @@ mod tests {
                     "{region}: {table} resolved from an unexpected stem"
                 );
             }
-            for table in engine.schema_map.keys() {
+            for table in engine.schema.schema_map.keys() {
                 let expected = partial
                     .get(table.as_str())
                     .is_none_or(|regions| regions.contains(&region));

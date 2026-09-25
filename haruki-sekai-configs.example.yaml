@@ -75,7 +75,8 @@ registry: # master data manager (`master_registry` binary); ignored by the API s
   # imports existing manifests in the background on first start. Rollback: set "fs" again.
   blob_store: "fs"
   blob_gc_grace_secs: 86400 # pg: delete unreferenced blobs not referenced by a publish for this long (min 300)
-  subscribers: [] # peers to POST /internal/master-updated after a region is published
+  subscribers: [] # peers to POST /internal/master-updated after a region is published; the body is
+  # {server, dataVersion, contentHash, gitCommit, changedFiles, removedFiles} (receivers re-read current)
   # - url: "http://100.64.0.2:9999"
   #   token: "peer-internal-token"
   account_nodes: [] # SekaiAPI nodes to push app identity to on PUT /v1/app/{region}; like every
@@ -88,6 +89,29 @@ registry: # master data manager (`master_registry` binary); ignored by the API s
     cron: "0 */30 * * * *"
     inject_omakase: true # add the synthetic music_id 10000 rows consumers expect
     sources: {} # per-region URL overrides; "" disables a region (defaults: sekai-data.3-3.dev)
+
+ingest: # registry-driven ingest (`master_ingest` binary); absent = role off. Ignored by the API server
+  # and the registry. Requires the registry to run `blob_store: pg` (checked via its /health).
+  # Cutover from the in-sync ingest: docs/master-registry-storage-and-ingest.md, part B.
+  registry_url: "http://127.0.0.1:9998" # reads only current and blob/{sha256}
+  listen: "127.0.0.1:9997" # POST /internal/master-updated, POST /v1/ingest/{target}/{region}/allow-shrink, GET /health
+  webhook_token: "" # bearer on both POSTs (= the registry's subscribers[].token); empty = webhook off (404)
+  reconcile_cron: "0 */5 * * * *" # fallback reconcile of every region; "" disables the timer
+  parse_concurrency: 2 # regions reconciled at once (memory knob: ~2 row batches per target per region)
+  stage_tables: 25 # a run rewriting more tables than this (or stage_bytes of JSON) commits per table
+  stage_bytes: 52428800
+  targets:
+    - name: main # key of this target's state rows; never reuse or rename
+      dsn: "postgres://haruki:sekai@localhost:5432/master_data"
+      regions: [jp, en, tw, kr, cn]
+      tables: all # or a list of table names / file stems
+      schema: "schema_info.json"
+      raw: false # opt-in: keep every original row (unknown keys too) in master_raw
+      required_tables: default # default = prune protect list; or a list
+      min_ratio: 0.5 # a changed file must keep at least this share of its previous rows
+      max_connections: 4 # raised to 2 x parse_concurrency + 1 if lower
+      create_tables: false # create missing typed tables from the schema
+      allow_shrink: [] # - content_hash: "<hex>"  tables: [musics]
 
 # App identity (appVersion/appHash) is no longer polled. Push it to this node
 # with `POST /internal/app-identity` (bearer backend.internal_token, body

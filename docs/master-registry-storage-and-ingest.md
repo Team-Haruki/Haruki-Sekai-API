@@ -1,8 +1,9 @@
 # Master registry: content storage and registry-driven ingest
 
-Status: part A (content in PostgreSQL) ships with this change; part B
-(registry-driven ingest with multiple database targets) is a design for a
-follow-up.
+Status: part A (content in PostgreSQL) shipped in 6.24.0. Part B
+(registry-driven ingest with multiple database targets) is implemented as the
+opt-in `master_ingest` role; the in-sync ingest stays the default until the
+operator switches over (see "Cutover and rollback" below).
 
 Context. The registry (`master_registry` binary, CN05) pulls each region from
 its owner, writes the master JSON into the region's git worktree, pushes it to
@@ -213,7 +214,7 @@ After every changed publish, and after the import, one pass runs:
 
 ---
 
-## B. Registry-driven ingest with multiple database targets (design)
+## B. Registry-driven ingest with multiple database targets
 
 ### What exists today (verified in code)
 
@@ -261,8 +262,8 @@ After every changed publish, and after the import, one pass runs:
 
 ### Shape
 
-A new role of the same binary, `master_ingest` (a `src/bin/` entry or a
-`--role ingest` flag), runs as its own process and container with its own
+A new role, the `master_ingest` binary (`src/bin/master_ingest.rs`, shipped in
+the same image and reading the same config file format), runs as its own process and container with its own
 config section. It reads nothing from the worktrees. Everything comes from the
 registry over HTTP: `current`, `manifests/{hash}` and `blob/{sha256}`. The
 immutable blob URLs make retries and multi-node placement trivial.
@@ -280,22 +281,30 @@ ingest:
   listen: "127.0.0.1:9997"          # receives the registry's publish webhook
   webhook_token: ""                 # required bearer token on the webhook (empty = webhook off)
   reconcile_cron: "0 */5 * * * *"   # fallback: compare every target with registry current
-  parse_concurrency: 2              # files parsed at once (memory knob)
+  parse_concurrency: 2              # regions reconciled at once (memory knob)
+  stage_tables: 25                  # first-full-ingest thresholds (see below)
+  stage_bytes: 52428800
   targets:
     - name: cn08                    # the key of this target's state rows; never reuse or rename
       dsn: "postgres://.../haruki_sekai"
       regions: [jp, en, tw, kr, cn]
-      tables: all                   # or an allow-list of table names
+      tables: all                   # or an allow-list of table names / file stems
       schema: schema_info.json      # typed column map
-      raw: true                     # keep the full row in master_raw (side table)
+      raw: false                    # opt-in per target: keep the full row in master_raw
       required_tables: default      # default = the prune protect list
       min_ratio: 0.5
-      max_connections: 4
+      max_connections: 4            # raised to 2 x parse_concurrency + 1 when lower
+      create_tables: false
+      allow_shrink: []              # [{content_hash, tables}]
     - name: analytics
-      dsn: "postgres://.../master_raw"
+      dsn: "postgres://.../analytics"
       tables: [cards, events, musics]
-      raw: true
 ```
+
+`raw` is off by default. Turning it on for a target changes that target's
+mapping hash, so every table of the target is rewritten once to fill
+`master_raw`; turning it off again leaves the existing `master_raw` rows in
+place (drop them by hand).
 
 ### Triggers
 
@@ -303,8 +312,13 @@ ingest:
   backwards-compatible way; existing receivers ignore the unknown fields:
 
   ```json
-  {"server":"jp","dataVersion":"...","contentHash":"<hex>","gitCommit":"<sha>|null"}
+  {"server":"jp","dataVersion":"...","contentHash":"<hex>","gitCommit":"<sha>|null",
+   "changedFiles":["cards.json"],"removedFiles":[]}
   ```
+
+  `changedFiles` (new or modified) and `removedFiles` are the diff against the
+  previous `current`; SekaiAPI peers and older receivers read only `server`
+  and `dataVersion`.
 
   The webhook is a *trigger only*. The ingester never ingests the hash in the
   payload; it starts a reconcile of that region, which reads the registry's
@@ -325,11 +339,14 @@ ingest:
 
 ### Concurrency and ordering
 
-- One reconcile per `(target, region)` at a time: a PostgreSQL advisory lock
-  on the target database, keyed by `hashtext('master_ingest:' || target || ':'
-  || region)`, taken with `pg_try_advisory_lock` for the whole run (a second
-  ingester process against the same target skips the region instead of
-  interleaving). In-process, a per-`(target, region)` mutex coalesces
+- One reconcile per `(database, region)` at a time: a PostgreSQL advisory
+  lock on the target database, keyed by `hashtext('master_ingest:' ||
+  current_database() || ':' || current_schema() || ':' || region)`, taken with
+  `pg_try_advisory_lock` for the whole run (a second ingester process against
+  the same database skips the region instead of interleaving, whatever its
+  target is named). Two targets of one config may not point at the same
+  database (host, port and database name normalized): they would share the
+  typed tables and `master_raw`. In-process, a per-`(target, region)` mutex coalesces
   triggers: a trigger that arrives during a run schedules exactly one follow-up
   run.
 - **Never backwards.** A target's version only moves forward. Before a run
@@ -414,10 +431,12 @@ rewrite the full ~417 MB in one transaction per region (huge WAL, long locks,
 one failure redoes everything). Instead, when a run would rewrite more than a
 threshold (default: 25 tables or 50 MB of JSON), it is **staged per table**:
 
-- Each table is loaded into a staging table (`<table>__ingest`), checked, and
-  swapped in its own short transaction (upsert/delete from staging, or
-  `ALTER TABLE … RENAME` for a table that is empty for the other regions),
-  recording that file's `master_ingest_state` row in the same transaction.
+- Each changed file is written in its own short transaction: its rows are
+  loaded into a temporary staging table (`pg_temp._master_ingest_stage`,
+  dropped at commit), then applied to the live table with the same
+  upsert/delete as a steady-state run (see *Write strategy* and
+  *Implementation notes*), and that file's `master_ingest_state` row is
+  recorded in the same transaction. No table is renamed or swapped.
 - `master_ingest_version.status` stays `staging` until every table is done,
   then the final transaction sets the version. Readers see a mix of old and
   new tables during a first load; that is acceptable once and is reported by
@@ -471,6 +490,12 @@ rule (`updater/prune.rs`), not immediately:
   target's `required_tables` are never cleared this way; a manifest that drops
   one of them fails the `required_tables` check below instead, so the
   operator sees it.
+- A file that vanished while another listed file maps to the same table (a
+  rename) only loses its state row; the table is written by the new file.
+- A table that no longer exists in the target database is not cleared; the
+  file's state row is dropped and a warning logged.
+- While a file stays missing at the same `contentHash`, a timer reconcile is a
+  no-op (`upToDate`); the version row is not rewritten.
 
 ### Integrity checks, before a region's commit
 
@@ -481,7 +506,10 @@ rule (`updater/prune.rs`), not immediately:
   (`BUILTIN_PROTECTED_TABLES`), which is already kept in sync with consumers.
 - Each changed file's row count is at least `min_ratio` times its previous row
   count (0.5 by default). This guards against a truncated upstream table. A
-  failed check aborts that target's transaction.
+  failed check aborts that target's transaction. The previous count is the
+  one recorded in `master_ingest_state`; a file without a recorded count (a
+  new target, or a database filled by the old path, as at the cutover) is
+  compared with the table's current rows for the region.
 - **Manual override for `min_ratio`.** A legitimate large shrink (the game
   really removed most rows of a table) would otherwise fail forever. The
   operator allows it for one specific version: `POST
@@ -508,12 +536,119 @@ compressed transport stays on the registry side.
    the VM105 syncer config, so the old ingest stops there. The old engine stays
    for `run_ingest` and for owner nodes until it is retired.
 
+### Implementation notes
+
+Where the implementation refines the design above:
+
+- **Webhook and triggers.** Coalescing is per region (one run covers every
+  target of the region); a trigger during a run schedules exactly one
+  follow-up. Up to `parse_concurrency` regions run at once; within a region
+  each target's files are written in order on its own connection.
+- **Lock.** `pg_try_advisory_lock(hashtext('master_ingest:<database>:<schema>:<region>'))`
+  is taken on a dedicated connection that is closed when the run ends (also on
+  a panic), so a lock is never left on a pooled connection. A busy target is
+  reported as `busy` and retried on the next trigger.
+- **Manifest.** The run reads `current`, which is the manifest (same body as
+  `manifests/{contentHash}`), so no second fetch is made. A blob 404 abandons
+  the run without recording anything and restarts from the new `current` (up
+  to 3 times).
+- **Write path.** Each changed file is streamed from `blob/{sha256}` (size and
+  SHA-256 verified at the end of the stream; the file is applied only after
+  that), parsed once, and its row batches are sent to every target that needs
+  it. A target stages the rows in a temporary table (`CREATE TEMP TABLE … AS
+  SELECT <columns> FROM <table> WITH NO DATA`, so values bind exactly as in
+  the old path; the live columns' `DEFAULT`s are copied onto it, so a key
+  absent from every row of a batch takes the column default exactly as the
+  old path's INSERT, which omitted that column, did), runs `ANALYZE` on it,
+  then:
+  - keyed tables: `DELETE` rows of the region whose key is not in the file,
+    `INSERT … SELECT … ON CONFLICT (key, server_region) DO UPDATE … WHERE
+    (columns) IS DISTINCT FROM (excluded)`; rows with a NULL key column never
+    conflict, so they are replaced wholesale;
+  - keyless tables, and keyed tables whose database has no unique index that
+    matches the schema key: `DELETE` the region, then `INSERT`.
+- **Mapping hash** also covers the columns (and their database types and
+  defaults) that exist in the target, and the chosen key, so dropping or adding a column by
+  hand rewrites exactly that table. Files that are not written (no table,
+  legacy-skipped, outside the allow-list) get a state row with a skip hash,
+  so a later schema or allow-list change picks them up.
+- **Empty file.** A file with `[]` now empties the table for the region (the
+  old path left the rows); `min_ratio` guards this like any other shrink,
+  also on the first run against a database without ingest state.
+- **Unknown keys** are stored per table in `master_ingest_version.unknown_keys`
+  (jsonb) and logged; with `raw: true` they are also in `master_raw`.
+- **Allow-shrink** overrides from the HTTP endpoint are stored in
+  `master_ingest_allow_shrink(target, region, content_hash, tables)` in the
+  target database, so they survive a restart; config entries are merged in.
+  A run that used one records it in `master_ingest_version.error`.
+- **Staged runs** use the same staging-table write, one transaction per file
+  (with its state row); `RENAME`-swapping is not used. The final transaction
+  handles removals, checks and the version row.
+- **Failure recording.** `status=failed` keeps the last good `content_hash`
+  and `data_version`; `error` names the attempted `contentHash`.
+- **`/health`** of the ingester lists the last outcome per target and region
+  (`upToDate`, `ingested`, `busy`, `skipped`, `failed`) and reports `degraded`
+  when any is `skipped` or `failed`.
+- **Equivalence.** Tests ingest a real-data fixture through the new role into
+  two targets and compare every table (row count and a digest of all rows
+  except the serial `id`) with the old path's output; the same check over a
+  full real JP master directory (111 tables) is byte-identical.
+
+### Cutover and rollback
+
+Deploying this release changes nothing by itself: the registry only adds
+fields to its webhook body, and the ingester runs only when started with an
+`ingest` section.
+
+1. Registry (CN05): `registry.blob_store: pg` (already live since 6.24.0).
+2. Start `master_ingest` (same image, command `./master_ingest`) with a config
+   that has `backend: {}` and an `ingest` section; a target pointing at a
+   **scratch copy** of `haruki_sekai`
+   (`pg_dump haruki_sekai | psql haruki_sekai_ingest_test`) and
+   `webhook_token` set. Add it to `registry.subscribers` (url of the ingester,
+   token = `webhook_token`) and restart the registry.
+3. Wait for `GET /health` of the ingester to show every region `ingested` or
+   `upToDate`, then compare with the live database at the same `contentHash`
+   (per table `count(*)` and `md5(string_agg((to_jsonb(t) - 'id')::text, …))`,
+   as the tests do). Drop the scratch copy.
+4. Switch: on the VM105 syncer (and any node still ingesting into CN08)
+   set `master_database.enabled: false` and restart it; then point the
+   ingester target at CN08 `haruki_sekai` and restart the ingester. Its first
+   run against the live database writes only what differs (upserts with
+   `IS DISTINCT FROM`), staged per table. There is no `master_ingest_state`
+   yet, so `min_ratio` compares each file with the table's **live** row count
+   for the region: an empty or truncated file fails the run instead of
+   emptying a table.
+
+   Before this step, list the column defaults on CN08 `haruki_sekai`:
+
+   ```sql
+   SELECT table_name, column_name, column_default
+   FROM information_schema.columns
+   WHERE table_schema = 'public' AND column_default IS NOT NULL;
+   ```
+
+   Apart from the serial `id` columns, every listed default is copied onto
+   the staging table and applies to keys a file does not carry, as with the
+   old path; check that each one is intended.
+5. Watch `master_ingest_version` (`status`, `error`, `unknown_keys`) and the
+   ingester's `/health`.
+
+Rollback: stop the ingester (or remove its target), remove it from
+`registry.subscribers`, set `master_database.enabled: true` again on the
+syncer and restart it. The next sync ingests with the old path, which deletes
+and reinserts each table's region rows, so nothing from the new path needs
+undoing. The state tables (`master_ingest_*`, `master_raw`) can stay or be
+dropped; a later cutover re-checks every table (the old path does not update
+`master_ingest_state`, so re-enabling the ingester after a rollback period
+first compares the recorded sha256 values and rewrites whatever changed).
+
 ### Decisions (defaults)
 
 These were open questions; the operator decided them as follows:
 
 - **`raw` storage:** a side table `master_raw(region, table_name, key, raw)`,
-  not a column in the typed tables.
+  not a column in the typed tables; off by default, opt-in per target.
 - **Writes:** batched `INSERT … ON CONFLICT DO UPDATE` (upsert), not `COPY`.
 - **Removed tables:** rows are deleted only after two consecutive ingested
   versions without the file (the producer's prune rule), never for protected

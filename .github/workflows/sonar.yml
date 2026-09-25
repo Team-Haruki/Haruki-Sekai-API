@@ -22,6 +22,21 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    # Scratch database for the PostgreSQL-gated tests (`#[ignore]` locally).
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: haruki
+          POSTGRES_PASSWORD: sekai
+          POSTGRES_DB: registry_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U haruki"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -41,7 +56,14 @@ jobs:
           fallback: none
 
       - name: Generate coverage report
-        run: cargo llvm-cov --locked --all-targets --lcov --output-path lcov.info
+        env:
+          HARUKI_TEST_REGISTRY_DSN: postgres://haruki:sekai@localhost:5432/registry_test
+          HARUKI_TEST_INGEST_DSN: postgres://haruki:sekai@localhost:5432/registry_test
+        run: |
+          cargo llvm-cov --locked --all-targets --no-report
+          # The PostgreSQL-gated tests; one at a time (the registry ones share tables).
+          cargo llvm-cov --locked --lib --no-report -- --ignored --test-threads=1 ingest::tests postgres
+          cargo llvm-cov report --lcov --output-path lcov.info
 
       - name: SonarQube scan
         uses: SonarSource/sonarqube-scan-action@ba9859eae8dd6bd29e412f25ddbbef3d032000f4 # v8.2.2

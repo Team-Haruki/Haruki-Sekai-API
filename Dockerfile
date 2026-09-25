@@ -23,9 +23,11 @@ WORKDIR /app
 COPY --chown=haruki:haruki --from=builder /app/target/release/haruki-sekai-api .
 COPY --chown=haruki:haruki --from=builder /app/target/release/run_ingest .
 COPY --chown=haruki:haruki --from=builder /app/target/release/master_registry .
+COPY --chown=haruki:haruki --from=builder /app/target/release/master_ingest .
+COPY --chown=haruki:haruki schema_info.json ./schema_info.json
 COPY --chown=haruki:haruki Data ./Data
 RUN mkdir -p logs && chown haruki:haruki logs
-EXPOSE 9999 9998
+EXPOSE 9999 9998 9997
 ENV TZ=Asia/Shanghai
 ENV RUST_LOG=info
 ARG VERSION=dev

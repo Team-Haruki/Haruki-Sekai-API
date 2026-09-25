@@ -4,6 +4,7 @@ pub mod config;
 pub mod crypto;
 pub mod db;
 pub mod error;
+pub mod ingest;
 pub mod ingest_engine;
 pub mod models;
 pub mod registry;
