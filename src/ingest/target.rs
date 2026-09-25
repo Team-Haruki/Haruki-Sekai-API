@@ -73,6 +73,8 @@ fn sha_hex(parts: &[&str]) -> String {
 pub struct TableShape {
     /// column -> `information_schema` data type
     pub columns: BTreeMap<String, String>,
+    /// column -> default expression, for columns that have one
+    pub defaults: BTreeMap<String, String>,
     pub unique_sets: Vec<BTreeSet<String>>,
 }
 
@@ -85,6 +87,10 @@ pub struct TablePlan {
     pub cols: HashMap<String, String>,
     /// Database data type per column of `cols`.
     pub db_types: BTreeMap<String, String>,
+    /// Default expression per column of `cols` that has one: the staging
+    /// table gets it too, so a key absent from a whole batch takes the
+    /// column's default exactly as the old path's INSERT did.
+    pub defaults: BTreeMap<String, String>,
     pub has_region: bool,
     /// Key columns (without `server_region`) of a unique index matching the
     /// schema key: rows are upserted. `None`: delete + insert.
@@ -248,18 +254,23 @@ impl Target {
         Ok(())
     }
 
-    /// Try the per-(target, region) advisory lock on a dedicated connection
-    /// that is closed (releasing the lock) when the returned guard drops.
+    /// Try the per-(database, schema, region) advisory lock on a dedicated
+    /// connection that is closed (releasing the lock) when the returned guard
+    /// drops. The key names the database rather than the target, so two
+    /// deployments whose targets point at the same tables under different
+    /// names never write a region at the same time.
     pub async fn try_lock(&self, region: ServerRegion) -> Result<Option<RegionLock>> {
         let pool = self.db.get_postgres_connection_pool();
         let mut conn = pool.acquire().await.context("acquiring lock connection")?;
         conn.close_on_drop();
-        let key = format!("master_ingest:{}:{}", self.name, region.as_str());
-        let locked: bool = sea_orm::sqlx::query_scalar("SELECT pg_try_advisory_lock(hashtext($1))")
-            .bind(&key)
-            .fetch_one(&mut *conn)
-            .await
-            .context("advisory lock")?;
+        let locked: bool = sea_orm::sqlx::query_scalar(
+            "SELECT pg_try_advisory_lock(hashtext('master_ingest:' || current_database() \
+             || ':' || current_schema() || ':' || $1))",
+        )
+        .bind(region.as_str())
+        .fetch_one(&mut *conn)
+        .await
+        .context("advisory lock")?;
         Ok(locked.then_some(RegionLock { _conn: conn }))
     }
 
@@ -284,18 +295,21 @@ impl Target {
         let rows = self
             .db
             .query_all_raw(stmt(
-                "SELECT table_name::text AS t, column_name::text AS c, data_type::text AS d \
+                "SELECT table_name::text AS t, column_name::text AS c, data_type::text AS d, \
+                   column_default::text AS def \
                  FROM information_schema.columns WHERE table_schema = current_schema()",
                 vec![],
             ))
             .await?;
         for row in rows {
             let table: String = row.try_get("", "t")?;
-            shapes
-                .entry(table)
-                .or_default()
-                .columns
-                .insert(row.try_get("", "c")?, row.try_get("", "d")?);
+            let column: String = row.try_get("", "c")?;
+            let default: Option<String> = row.try_get("", "def")?;
+            let shape = shapes.entry(table).or_default();
+            if let Some(default) = default {
+                shape.defaults.insert(column.clone(), default);
+            }
+            shape.columns.insert(column, row.try_get("", "d")?);
         }
         let rows = self
             .db
@@ -364,9 +378,18 @@ impl Target {
                 && shape.unique_sets.contains(&set);
             usable.then_some(without_region)
         });
+        let defaults: BTreeMap<String, String> = shape
+            .defaults
+            .iter()
+            .filter(|(c, _)| db_types.contains_key(*c))
+            .map(|(c, d)| (c.clone(), d.clone()))
+            .collect();
         let columns_desc = db_types
             .iter()
-            .map(|(c, t)| format!("{c}:{t}:{}", cols[c]))
+            .map(|(c, t)| match defaults.get(c) {
+                Some(d) => format!("{c}:{t}:{}:default={d}", cols[c]),
+                None => format!("{c}:{t}:{}", cols[c]),
+            })
             .collect::<Vec<_>>()
             .join(",");
         let key_desc = key.as_ref().map(|k| k.join(",")).unwrap_or_default();
@@ -384,6 +407,7 @@ impl Target {
             table: table.to_string(),
             cols,
             db_types,
+            defaults,
             has_region,
             key,
             mapping_hash,
@@ -658,6 +682,35 @@ impl Target {
         Ok(())
     }
 
+    /// Number of rows `table` holds for `region`.
+    pub async fn count_rows(
+        &self,
+        conn: &impl ConnectionTrait,
+        table: &str,
+        region: ServerRegion,
+        has_region: bool,
+    ) -> Result<i64> {
+        let (sql, values) = if has_region {
+            (
+                format!(
+                    "SELECT count(*) AS n FROM {} WHERE server_region = $1",
+                    quote(table)
+                ),
+                vec![region.as_str().into()],
+            )
+        } else {
+            (
+                format!("SELECT count(*) AS n FROM {}", quote(table)),
+                vec![],
+            )
+        };
+        let row = conn
+            .query_one_raw(stmt(sql, values))
+            .await?
+            .ok_or_else(|| anyhow!("count returned no row"))?;
+        Ok(row.try_get("", "n")?)
+    }
+
     /// Whether `table` holds at least one row for `region`.
     pub async fn has_rows(
         &self,
@@ -755,6 +808,14 @@ pub async fn write_file(
     ))
     .await
     .with_context(|| format!("staging {}", plan.table))?;
+    for (col, default) in &plan.defaults {
+        conn.execute_unprepared(&format!(
+            "ALTER TABLE pg_temp.{STAGE} ALTER COLUMN {} SET DEFAULT {default}",
+            quote(col)
+        ))
+        .await
+        .with_context(|| format!("staging default of {}.{col}", plan.table))?;
+    }
 
     let mut out = FileWrite::default();
     let mut ord: i64 = 0;
@@ -807,6 +868,9 @@ pub async fn write_file(
         Err(_) => bail!("parser ended without an outcome"),
     }
     out.rows = ord;
+    // Planner statistics for the anti-join and upsert below.
+    conn.execute_unprepared(&format!("ANALYZE pg_temp.{STAGE}"))
+        .await?;
 
     let region_param = || vec![SeaValue::from(region.as_str())];
     let insert_cols = if plan.has_region {

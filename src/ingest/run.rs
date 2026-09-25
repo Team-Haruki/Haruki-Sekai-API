@@ -64,7 +64,9 @@ pub enum TargetOutcome {
 struct WriteJob {
     file: MasterManifestFile,
     plan: TablePlan,
-    prev_rows: Option<i64>,
+    /// Rows before this write: the recorded count, else the table's rows for
+    /// the region.
+    prev_rows: i64,
 }
 
 /// A target that has work in this run.
@@ -80,7 +82,11 @@ struct Prepared {
     /// Manifest files per category, for the file-count check.
     counted: usize,
     staged: bool,
+    /// Tables of the target that exist, with whether they have `server_region`.
     table_has_region: HashMap<String, bool>,
+    /// Tables some file of the manifest maps to (a removed file whose table
+    /// is one of these was renamed: its table is not cleared).
+    listed_tables: HashSet<String>,
 }
 
 enum Prep {
@@ -443,6 +449,7 @@ async fn prepare(
     let mut returned = Vec::new();
     let mut table_has_region = HashMap::new();
     let mut unchanged = 0usize;
+    let listed_tables: HashSet<String> = resolved.iter().filter_map(|(_, t)| t.clone()).collect();
     for (file, table) in &resolved {
         let prev = state.get(&file.name);
         if prev.is_some_and(|p| p.missing_since.is_some()) {
@@ -475,10 +482,21 @@ async fn prepare(
             unchanged += 1;
             continue;
         }
+        // Without a recorded count (a new target, or a database the old path
+        // filled) the table's current rows are the baseline, so a `[]` or
+        // truncated file cannot silently empty a live table.
+        let prev_rows = match prev.and_then(|p| p.rows) {
+            Some(n) => n,
+            None => {
+                target
+                    .count_rows(&target.db, &table, region, plan.has_region)
+                    .await?
+            }
+        };
         writes.push(WriteJob {
             file: (*file).clone(),
             plan,
-            prev_rows: prev.and_then(|p| p.rows),
+            prev_rows,
         });
     }
     let listed: HashSet<&str> = manifest.files.iter().map(|f| f.name.as_str()).collect();
@@ -505,9 +523,19 @@ async fn prepare(
     let at_version = version.as_ref().is_some_and(|v: &VersionRow| {
         v.status == "ok" && v.content_hash.as_deref() == Some(manifest.content_hash.as_str())
     });
+    // A removed file already recorded missing at this contentHash needs
+    // nothing until the next version: the timer does not rewrite the version.
+    let removal_pending = removed.iter().any(|(_, row)| match &row.table_name {
+        Some(t) => {
+            listed_tables.contains(t)
+                || target.is_protected(t)
+                || row.missing_since.as_deref() != Some(manifest.content_hash.as_str())
+        }
+        None => true,
+    });
     if writes.is_empty()
         && skips.is_empty()
-        && removed.is_empty()
+        && !removal_pending
         && returned.is_empty()
         && at_version
     {
@@ -528,6 +556,7 @@ async fn prepare(
         counted,
         staged,
         table_has_region,
+        listed_tables,
     })))
 }
 
@@ -642,21 +671,20 @@ async fn run_target(
                 )
                 .await
                 .map_err(|e| e.context(format!("writing {name}")))?;
-                if let Some(prev) = job.prev_rows.filter(|p| *p > 0) {
-                    if (write.rows as f64) < target.cfg.min_ratio * prev as f64 {
-                        if allowed.contains(&job.plan.table) {
-                            shrink_overrides.push(format!(
-                                "{} {} -> {} rows (allow-shrink)",
-                                job.plan.table, prev, write.rows
-                            ));
-                        } else {
-                            bail!(
-                                "{name}: {} rows, fewer than min_ratio {} of the previous {prev} \
-                                 (allow it with allow-shrink for contentHash {content_hash})",
-                                write.rows,
-                                target.cfg.min_ratio
-                            );
-                        }
+                let prev = job.prev_rows;
+                if prev > 0 && (write.rows as f64) < target.cfg.min_ratio * prev as f64 {
+                    if allowed.contains(&job.plan.table) {
+                        shrink_overrides.push(format!(
+                            "{} {} -> {} rows (allow-shrink)",
+                            job.plan.table, prev, write.rows
+                        ));
+                    } else {
+                        bail!(
+                            "{name}: {} rows, fewer than min_ratio {} of the previous {prev} \
+                             (allow it with allow-shrink for contentHash {content_hash})",
+                            write.rows,
+                            target.cfg.min_ratio
+                        );
                     }
                 }
                 if !write.unknown_keys.is_empty() {
@@ -783,6 +811,19 @@ async fn finish(
             target.delete_state(txn, region, name).await?;
             continue;
         };
+        if p.listed_tables.contains(table) {
+            // Renamed: another listed file writes this table now.
+            target.delete_state(txn, region, name).await?;
+            info!(
+                "{} Target {}: {} left the manifest but {} is still mapped by another file; \
+                 its rows are kept",
+                region.as_str().to_uppercase(),
+                target.name,
+                name,
+                table
+            );
+            continue;
+        }
         if target.is_protected(table) {
             bail!(
                 "{name} (table {table}) is missing from the manifest but is protected/required; \
@@ -791,7 +832,18 @@ async fn finish(
         }
         match row.missing_since.as_deref() {
             Some(since) if since != content_hash => {
-                let has_region = p.table_has_region.get(table).copied().unwrap_or(true);
+                let Some(has_region) = p.table_has_region.get(table).copied() else {
+                    warn!(
+                        "{} Target {}: {} missing from two consecutive versions, but table {} \
+                         does not exist in the target database; dropping its state only",
+                        region.as_str().to_uppercase(),
+                        target.name,
+                        name,
+                        table
+                    );
+                    target.delete_state(txn, region, name).await?;
+                    continue;
+                };
                 target.clear_table(txn, table, region, has_region).await?;
                 target.delete_state(txn, region, name).await?;
                 cleared += 1;

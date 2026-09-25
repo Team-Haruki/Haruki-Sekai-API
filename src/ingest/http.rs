@@ -53,10 +53,22 @@ fn check_token(ingester: &Ingester, headers: &HeaderMap) -> Result<(), Box<Respo
         .get("authorization")
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "));
-    if presented != Some(expected.as_str()) {
+    if !presented.is_some_and(|p| token_matches(p, expected)) {
         return Err(Box::new(StatusCode::UNAUTHORIZED.into_response()));
     }
     Ok(())
+}
+
+/// Constant-time comparison: both sides are hashed first, so neither the
+/// content nor the length of the token leaks through timing.
+fn token_matches(presented: &str, expected: &str) -> bool {
+    use sha2::Digest as _;
+    let a = sha2::Sha256::digest(presented.as_bytes());
+    let b = sha2::Sha256::digest(expected.as_bytes());
+    a.iter()
+        .zip(b.iter())
+        .fold(0u8, |acc, (x, y)| acc | (x ^ y))
+        == 0
 }
 
 async fn health(State(ingester): State<Shared>) -> Response {

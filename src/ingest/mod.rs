@@ -67,6 +67,7 @@ pub fn validate(config: &IngestConfig) -> Result<()> {
         bail!("ingest.parse_concurrency must be at least 1");
     }
     let mut names = std::collections::HashSet::new();
+    let mut databases: HashMap<String, &str> = HashMap::new();
     for t in &config.targets {
         let valid = !t.name.is_empty()
             && t.name
@@ -81,8 +82,55 @@ pub fn validate(config: &IngestConfig) -> Result<()> {
         if t.dsn.trim().is_empty() {
             bail!("ingest target {}: dsn is empty", t.name);
         }
+        // Two targets on one database would share its typed tables and
+        // `master_raw` while keeping separate state: they would undo each
+        // other's writes.
+        if let Some(other) = databases.insert(database_identity(&t.dsn), &t.name) {
+            bail!(
+                "ingest targets {other} and {} point at the same database",
+                t.name
+            );
+        }
     }
     Ok(())
+}
+
+/// `host:port/dbname` of a PostgreSQL DSN, normalized (case of the host,
+/// default port, loopback spellings, unix-socket `host=`/`port=`/`dbname=`
+/// parameters); the trimmed DSN itself when it does not parse as a URL.
+pub(crate) fn database_identity(dsn: &str) -> String {
+    let dsn = dsn.trim();
+    let Ok(url) = reqwest::Url::parse(dsn) else {
+        return dsn.to_string();
+    };
+    let param = |key: &str| {
+        url.query_pairs()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.into_owned())
+    };
+    let host = url
+        .host_str()
+        .filter(|h| !h.is_empty())
+        .map(str::to_string)
+        .or_else(|| param("host"))
+        .unwrap_or_else(|| "localhost".into())
+        .trim_matches(|c| c == '[' || c == ']')
+        .to_ascii_lowercase();
+    let host = match host.as_str() {
+        "127.0.0.1" | "::1" => "localhost".to_string(),
+        _ => host,
+    };
+    let port = url
+        .port()
+        .or_else(|| param("port").and_then(|p| p.parse().ok()))
+        .unwrap_or(5432);
+    let path_db = url.path().trim_start_matches('/');
+    let dbname = if path_db.is_empty() {
+        param("dbname").unwrap_or_else(|| url.username().to_string())
+    } else {
+        path_db.to_string()
+    };
+    format!("{host}:{port}/{dbname}")
 }
 
 impl Ingester {

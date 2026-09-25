@@ -613,8 +613,26 @@ async fn removed_table_is_cleared_after_two_consecutive_missing_versions() {
         "first miss keeps rows"
     );
     assert_eq!(missing(db.clone()).await, 1);
-    // Re-running the same version is not a second miss.
-    ing.reconcile_region(JP).await;
+    // Re-running the same version is not a second miss, and a true no-op:
+    // the version row is not rewritten.
+    let finished = |db: DatabaseConnection| async move {
+        let row = db
+            .query_one_raw(Statement::from_string(
+                DbBackend::Postgres,
+                "SELECT finished_at::text AS f FROM master_ingest_version",
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+        row.try_get::<String>("", "f").unwrap()
+    };
+    let before = finished(db.clone()).await;
+    let outcomes = ing.reconcile_region(JP).await;
+    assert!(
+        matches!(outcome(&outcomes, "main"), TargetOutcome::UpToDate { .. }),
+        "{outcomes:?}"
+    );
+    assert_eq!(finished(db.clone()).await, before);
     assert_eq!(digest(&db, "musictags").await, tags);
 
     // Back in between: the count restarts.
@@ -865,6 +883,178 @@ async fn pruned_blob_restarts_from_the_new_current() {
     dbs.drop_all().await;
 }
 
+/// Against a database the old path filled (no `master_ingest_state`, as at
+/// the cutover), `min_ratio` compares with the table's live row count: an
+/// empty file is refused until allow-shrink names the table.
+#[tokio::test]
+#[ignore] // Requires PostgreSQL (HARUKI_TEST_INGEST_DSN)
+async fn min_ratio_uses_live_counts_without_state() {
+    let mut dbs = Dbs::new().await;
+    let (dsn, db) = dbs.create("ing_live").await;
+    let (url, mock) = mock_registry("pg").await;
+    let files = fixture();
+    old_path_ingest(&db, &files).await;
+    let musics = digest(&db, "musics").await;
+    assert_eq!(musics.0, 40);
+
+    let v1_files = with_rows(&files, "musics.json", |rows| rows.clear());
+    let v1 = publish(&mock, &v1_files, "1.0.0.1");
+    let ing = ingester(&url, 100, vec![target_cfg("main", &dsn)]).await;
+    let outcomes = ing.reconcile_region(JP).await;
+    match outcome(&outcomes, "main") {
+        TargetOutcome::Failed { error } => assert!(error.contains("min_ratio"), "{error}"),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(digest(&db, "musics").await, musics, "rolled back");
+
+    ing.target("main")
+        .unwrap()
+        .store_allow_shrink(JP, &v1.content_hash, &["musics".to_string()])
+        .await
+        .unwrap();
+    let outcomes = ing.reconcile_region(JP).await;
+    assert!(
+        matches!(outcome(&outcomes, "main"), TargetOutcome::Ingested { .. }),
+        "{outcomes:?}"
+    );
+    assert_eq!(digest(&db, "musics").await.0, 0);
+    dbs.drop_all().await;
+}
+
+/// A column with a DEFAULT that no row of a file carries gets the default,
+/// as the old path's INSERT (which omitted the column) gave it.
+#[tokio::test]
+#[ignore] // Requires PostgreSQL (HARUKI_TEST_INGEST_DSN)
+async fn absent_keys_take_the_column_default_like_the_old_path() {
+    let mut dbs = Dbs::new().await;
+    let (dsn, db) = dbs.create("ing_def_new").await;
+    let (_, old) = dbs.create("ing_def_old").await;
+    for conn in [&db, &old] {
+        conn.execute_unprepared("ALTER TABLE musics ALTER COLUMN lyricist SET DEFAULT 'unknown'")
+            .await
+            .unwrap();
+    }
+    let (url, mock) = mock_registry("pg").await;
+    let files = with_rows(&fixture(), "musics.json", |rows| {
+        for row in rows.iter_mut() {
+            row.as_object_mut().unwrap().remove("lyricist");
+        }
+    });
+    publish(&mock, &files, "1.0.0.1");
+    old_path_ingest(&old, &files).await;
+    let ing = ingester(&url, 100, vec![target_cfg("main", &dsn)]).await;
+    let outcomes = ing.reconcile_region(JP).await;
+    assert!(
+        matches!(outcome(&outcomes, "main"), TargetOutcome::Ingested { .. }),
+        "{outcomes:?}"
+    );
+    assert_eq!(
+        scalar_i64(
+            &db,
+            "SELECT count(*) FROM musics WHERE lyricist = 'unknown'"
+        )
+        .await,
+        40
+    );
+    assert_same_as_old(&old, &db, mapped_tables(&files).values()).await;
+    dbs.drop_all().await;
+}
+
+/// A renamed file (the new name maps to the same table) keeps the table's
+/// rows; a vanished file whose table was dropped by hand drops its state.
+#[tokio::test]
+#[ignore] // Requires PostgreSQL (HARUKI_TEST_INGEST_DSN)
+async fn renamed_file_keeps_rows_and_dropped_table_is_skipped() {
+    let mut dbs = Dbs::new().await;
+    let (dsn, db) = dbs.create("ing_ren").await;
+    let (url, mock) = mock_registry("pg").await;
+    let files = fixture();
+    publish(&mock, &files, "1.0.0.1");
+    let ing = ingester(&url, 100, vec![target_cfg("main", &dsn)]).await;
+    ing.reconcile_region(JP).await;
+    let tags = digest(&db, "musictags").await;
+    assert!(tags.0 > 0);
+    let state = |db: DatabaseConnection, file: &'static str| async move {
+        scalar_i64(
+            &db,
+            &format!("SELECT count(*) FROM master_ingest_state WHERE file = '{file}'"),
+        )
+        .await
+    };
+
+    let mut renamed = files.clone();
+    let bytes = renamed.remove("musicTags.json").unwrap();
+    renamed.insert("musicTag.json".into(), bytes);
+    for (i, version) in ["1.0.0.2", "1.0.0.3"].into_iter().enumerate() {
+        let v = with_rows(&renamed, "events.json", |rows| {
+            rows[0]["name"] = serde_json::json!(format!("v{i}"));
+        });
+        publish(&mock, &v, version);
+        let outcomes = ing.reconcile_region(JP).await;
+        assert!(
+            matches!(
+                outcome(&outcomes, "main"),
+                TargetOutcome::Ingested { removed: 0, .. }
+            ),
+            "{outcomes:?}"
+        );
+        assert_eq!(digest(&db, "musictags").await, tags, "{version}");
+        assert_eq!(state(db.clone(), "musicTags.json").await, 0);
+        assert_eq!(state(db.clone(), "musicTag.json").await, 1);
+    }
+
+    // ngWords vanishes twice, but its table was dropped in between.
+    let mut without_profiles = renamed.clone();
+    without_profiles.remove("ngWords.json");
+    publish(&mock, &without_profiles, "1.0.0.4");
+    ing.reconcile_region(JP).await;
+    db.execute_unprepared("DROP TABLE ngwords").await.unwrap();
+    let v5 = with_rows(&without_profiles, "events.json", |rows| {
+        rows[0]["name"] = serde_json::json!("v5");
+    });
+    publish(&mock, &v5, "1.0.0.5");
+    let outcomes = ing.reconcile_region(JP).await;
+    assert!(
+        matches!(
+            outcome(&outcomes, "main"),
+            TargetOutcome::Ingested { removed: 0, .. }
+        ),
+        "{outcomes:?}"
+    );
+    assert_eq!(state(db.clone(), "ngWords.json").await, 0);
+    dbs.drop_all().await;
+}
+
+/// The region lock is keyed by database, not target name: a second target
+/// (another deployment) on the same database is busy while one runs.
+#[tokio::test]
+#[ignore] // Requires PostgreSQL (HARUKI_TEST_INGEST_DSN)
+async fn region_lock_is_per_database() {
+    let mut dbs = Dbs::new().await;
+    let (dsn, _db) = dbs.create("ing_lock").await;
+    let (dsn_other, _other) = dbs.create("ing_lock_other").await;
+    let a = Target::open(target_cfg("a", &dsn), 3).await.unwrap();
+    let b = Target::open(target_cfg("b", &dsn), 3).await.unwrap();
+    let c = Target::open(target_cfg("c", &dsn_other), 3).await.unwrap();
+    let held = a.try_lock(JP).await.unwrap();
+    assert!(held.is_some());
+    assert!(b.try_lock(JP).await.unwrap().is_none(), "same database");
+    assert!(b.try_lock(ServerRegion::En).await.unwrap().is_some());
+    assert!(c.try_lock(JP).await.unwrap().is_some(), "other database");
+    drop(held);
+    let mut free = false;
+    for _ in 0..50 {
+        if b.try_lock(JP).await.unwrap().is_some() {
+            free = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(free, "released on drop");
+    drop((a, b, c));
+    dbs.drop_all().await;
+}
+
 // ---------------------------------------------------------------- without a database
 
 fn lazy_target(name: &str) -> Arc<Target> {
@@ -1063,8 +1253,34 @@ fn config_validation() {
     assert!(super::validate(&cfg).is_err());
     cfg.targets[1].name = "b".into();
     super::validate(&cfg).unwrap();
+    // The same database under another spelling is refused.
+    for dsn in [
+        "postgres://x/y",
+        "postgres://u:p@X:5432/y",
+        "postgresql://other@x/y?sslmode=disable",
+    ] {
+        cfg.targets[1].dsn = dsn.into();
+        assert!(super::validate(&cfg).is_err(), "{dsn}");
+    }
+    cfg.targets[1].dsn = "postgres://x:5433/y".into();
+    super::validate(&cfg).unwrap();
+    cfg.targets[1].dsn = "postgres://x/z".into();
     cfg.parse_concurrency = 0;
     assert!(super::validate(&cfg).is_err());
+}
+
+#[test]
+fn database_identity_normalizes_dsns() {
+    use super::database_identity as id;
+    assert_eq!(id("postgres://u:p@LocalHost/db"), "localhost:5432/db");
+    assert_eq!(id("postgres://u@127.0.0.1:5432/db"), "localhost:5432/db");
+    assert_eq!(id("postgres://u@[::1]/db"), "localhost:5432/db");
+    assert_eq!(
+        id("postgres:///db?host=/run/postgresql&port=5433"),
+        "/run/postgresql:5433/db"
+    );
+    assert_eq!(id("postgres://haruki@h/"), "h:5432/haruki");
+    assert_eq!(id("  not a url "), "not a url");
 }
 
 #[test]
