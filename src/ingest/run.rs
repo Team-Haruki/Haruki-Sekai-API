@@ -19,6 +19,19 @@ use crate::client::helper::compare_version;
 use crate::config::ServerRegion;
 use crate::ingest_engine::{is_legacy_skipped_table, stream_rows, CHANNEL_DEPTH, ROWS_PER_BATCH};
 
+/// Every receiver of a file went away (each target that needed it already
+/// failed): not a problem with the blob, the other targets carry on.
+#[derive(Debug)]
+struct NoReceivers;
+
+impl std::fmt::Display for NoReceivers {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("no target is receiving this file")
+    }
+}
+
+impl std::error::Error for NoReceivers {}
+
 /// Restarts of a run whose blobs vanished (the registry moved on).
 const MAX_RESTARTS: usize = 3;
 
@@ -288,6 +301,14 @@ async fn run_once(
         for otx in outcome_txs {
             let _ = otx.send(message.clone());
         }
+        if parsed
+            .as_ref()
+            .err()
+            .is_some_and(|e| e.downcast_ref::<NoReceivers>().is_some())
+        {
+            // Only failed targets needed this file; they are already gone.
+            continue;
+        }
         if message.is_err() {
             // The blob itself is bad or truncated: nothing else of this run
             // can commit consistently.
@@ -332,7 +353,8 @@ fn parse_fan_out(
     let mut senders: Vec<Option<mpsc::Sender<Arc<Vec<Value>>>>> =
         senders.into_iter().map(Some).collect();
     let reader = std::io::BufReader::with_capacity(256 * 1024, reader);
-    stream_rows(reader, ROWS_PER_BATCH, |rows| {
+    let mut no_receivers = false;
+    let parsed = stream_rows(reader, ROWS_PER_BATCH, |rows| {
         let batch = Arc::new(rows);
         let mut live = 0;
         for slot in senders.iter_mut() {
@@ -345,10 +367,15 @@ fn parse_fan_out(
             }
         }
         if live == 0 {
-            bail!("no target is receiving");
+            no_receivers = true;
+            bail!(NoReceivers);
         }
         Ok(())
-    })
+    });
+    match parsed {
+        Err(_) if no_receivers => Err(NoReceivers.into()),
+        other => other,
+    }
 }
 
 async fn prepare(

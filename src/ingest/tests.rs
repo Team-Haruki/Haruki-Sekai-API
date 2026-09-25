@@ -786,6 +786,58 @@ async fn min_ratio_blocks_a_shrink_until_allowed_and_webhook_auth() {
     dbs.drop_all().await;
 }
 
+/// A target that fails while it is the only receiver of a file does not take
+/// the other targets down with it.
+#[tokio::test]
+#[ignore] // Requires PostgreSQL (HARUKI_TEST_INGEST_DSN)
+async fn a_failing_sole_receiver_does_not_fail_other_targets() {
+    let mut dbs = Dbs::new().await;
+    let (dsn_a, db_a) = dbs.create("ing_iso_a").await;
+    let (dsn_b, db_b) = dbs.create("ing_iso_b").await;
+    let (url, mock) = mock_registry("pg").await;
+    let files = fixture();
+    publish(&mock, &files, "1.0.0.1");
+    let a = target_cfg("wide", &dsn_a);
+    let mut b = target_cfg("narrow", &dsn_b);
+    b.tables = TableSelection::List(vec!["cards".into(), "musics".into()]);
+    let ing = ingester(&url, 100, vec![a, b]).await;
+    ing.reconcile_region(JP).await;
+
+    // honors (only `wide` reads it) grows past several row batches and no
+    // longer fits `wide`'s column type: `wide` fails while staging it.
+    db_a.execute_unprepared("ALTER TABLE honors ALTER COLUMN name TYPE bigint USING NULL")
+        .await
+        .unwrap();
+    let mut v2 = with_rows(&files, "honors.json", |rows| {
+        let template = rows[0].clone();
+        rows.clear();
+        for i in 0..(crate::ingest_engine::ROWS_PER_BATCH * 4) {
+            let mut row = template.clone();
+            row["id"] = serde_json::json!(i + 1);
+            rows.push(row);
+        }
+    });
+    v2 = with_rows(&v2, "musics.json", |rows| {
+        rows[0]["title"] = serde_json::json!("retitled");
+    });
+    publish(&mock, &v2, "1.0.0.2");
+    let outcomes = ing.reconcile_region(JP).await;
+    assert!(
+        matches!(outcome(&outcomes, "wide"), TargetOutcome::Failed { .. }),
+        "{outcomes:?}"
+    );
+    assert_eq!(written(outcome(&outcomes, "narrow")), (1, 0, false));
+    assert_eq!(
+        scalar_i64(
+            &db_b,
+            "SELECT count(*) FROM musics WHERE title = 'retitled'"
+        )
+        .await,
+        1
+    );
+    dbs.drop_all().await;
+}
+
 /// A blob that 404s mid-run (the registry pruned that manifest) abandons the
 /// run without recording anything and restarts from the new `current`.
 #[tokio::test]
