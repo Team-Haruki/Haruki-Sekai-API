@@ -120,9 +120,14 @@ ingest: # registry-driven ingest (`master_ingest` binary); absent = role off. Ig
 # {"server":"jp","appVersion":"...","appHash":"..."}) — the registry's
 # `PUT /v1/app/{region}` does that for every `registry.account_nodes` entry.
 
-asset_updater_servers: # Haruki Sekai Asset Updater server instances
+# Haruki Sekai Asset Updater server instances, called on every asset version change.
+# `regions` (lowercase jp/en/tw/kr/cn) limits which regions' updates go to a server;
+# omit it or leave it empty to send every region. A 409 whose body says the region
+# "is disabled" is logged once and not retried; other 409s (job busy) retry 10x at 60 s.
+asset_updater_servers:
   - url: "http://127.0.0.1:12345/update_asset"
     authorization: ""
+    # regions: [jp, en, cn]
 
 servers:
   jp:

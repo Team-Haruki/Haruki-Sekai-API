@@ -142,6 +142,10 @@ haruki-sekai-configs.example.yaml – Configuration template
 5. Optionally ingests into PostgreSQL via `IngestionEngine`
 6. `IngestionEngine` maps JSON filenames → table names using `schema_info.json`
 
+- On an asset version change the updater first calls every `asset_updater_servers` entry
+  whose `regions` list is empty or contains the region (awaited before the master download).
+  A 409 containing "is disabled" (node does not own the region) is not retried; other 409s
+  mean a job is running and retry `ASSET_UPDATER_MAX_CONFLICT_RETRIES`x at 60 s
 - Downloaded payloads are decoded table by table with rows streamed (`master_stream.rs`),
   so the producer's peak memory is bounded by one row rather than the whole payload.
   Keep new master consumers on that path — never `unpack_ordered` a whole master

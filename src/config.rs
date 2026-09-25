@@ -679,6 +679,16 @@ pub struct AssetUpdaterInfo {
     pub url: String,
     #[serde(default)]
     pub authorization: String,
+    /// Regions this server accepts (lowercase names, e.g. `[jp, en, cn]`).
+    /// Empty means every region.
+    #[serde(default)]
+    pub regions: Vec<ServerRegion>,
+}
+
+impl AssetUpdaterInfo {
+    pub fn accepts(&self, region: ServerRegion) -> bool {
+        self.regions.is_empty() || self.regions.contains(&region)
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
