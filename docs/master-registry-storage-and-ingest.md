@@ -295,6 +295,8 @@ ingest:
       min_ratio: 0.5
       max_connections: 4            # raised to 2 x parse_concurrency + 1 when lower
       create_tables: false
+      # statement_timeout_secs: 600          # optional session guards
+      # idle_in_transaction_timeout_secs: 600
       allow_shrink: []              # [{content_hash, tables}]
     - name: analytics
       dsn: "postgres://.../analytics"
@@ -525,9 +527,27 @@ rule (`updater/prune.rs`), not immediately:
 Peak memory is `parse_concurrency` × (one blob read buffer + about 4 row
 batches of at most ~1 MiB of parsed values, plus each target's typed copy of
 the batch it is writing). No file is ever held whole in memory, and the
-compressed transport stays on the registry side. The target pools keep no
-prepared-statement cache: the multi-row INSERTs (up to 65535 parameters) are
-all distinct and would otherwise stay cached on every pooled connection.
+compressed transport stays on the registry side. The target pools keep a
+one-entry prepared-statement cache: the multi-row INSERTs (up to 65535
+parameters, ~640 KB of server-side plan source each) are nearly all
+distinct, so a larger cache would keep up to 100 of them on every pooled
+connection, client side and in the backend.
+
+The cache must not be disabled (`statement_cache_capacity(0)`, as 6.25.1
+did): sqlx then still prepares each statement under a *name* and only ever
+closes named statements on cache eviction, so every statement stayed
+prepared in its PostgreSQL backend until the connection closed. A TW first
+ingest (staged, `costume3ds.json` 122k rows) grew one CN08 backend to
+520 MB anon RSS and the container's OOM killer took it at `COMMIT`,
+restarting the whole server. Reproduced on real TW data against
+`postgres:17` with CN08's settings: the backend's memory contexts held
+~1300 `CachedPlanSource` children (290 MB); peak RssAnon was 368 MB staged
+and 456 MB in one transaction. With one cached entry: 38-63 MB RssAnon,
+3-19 MB of contexts, the region run as fast (10.3 s vs 11.0 s).
+`first_ingest_keeps_backend_memory_bounded` checks every pooled
+backend's `pg_prepared_statements` and `pg_backend_memory_contexts` after
+a 150k-row first ingest, and `tools/pg_backend_memory_sampler.sh` samples
+backend RSS (and dumps memory contexts) during a real-data run.
 
 Batches used to be bounded by row count only; `gachas.json` (48 MB in 1011
 rows) or `cards.json` then became one batch holding the whole file as a

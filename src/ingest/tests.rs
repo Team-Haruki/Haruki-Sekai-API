@@ -1295,3 +1295,124 @@ fn typed_table_ddl_matches_the_ent_shape() {
     assert!(!ddl.contains("UNIQUE"));
     assert!(typed_table_ddl(&schema, "nope").is_none());
 }
+
+/// Synthetic `resourceBoxes.json` with `n` rows (~75 staging INSERTs for
+/// 150k rows, like TW/KR/CN `costume3ds.json`).
+fn many_resource_boxes(n: usize) -> Vec<u8> {
+    let purposes = [
+        "ad_reward",
+        "mission_reward",
+        "shop_item",
+        "event_ranking_reward",
+    ];
+    let rows: Vec<serde_json::Value> = (0..n)
+        .map(|i| {
+            let purpose = purposes[i % purposes.len()];
+            let id = i / purposes.len() + 1;
+            serde_json::json!({"resourceBoxPurpose": purpose, "id": id,
+                "resourceBoxType": "expand", "description": format!("box {i}"),
+                "details": [{"resourceBoxPurpose": purpose, "resourceBoxId": id, "seq": 1,
+                             "resourceType": "jewel", "resourceId": 1,
+                             "resourceQuantity": i % 100 + 1}]})
+        })
+        .collect();
+    serde_json::to_vec(&rows).unwrap()
+}
+
+/// Prepared statements and memory-context bytes of every connection in a
+/// target's pool, read on each connection itself (a backend's memory
+/// contexts are only visible to its own session). Every idle connection is
+/// held at once so each is inspected.
+async fn pool_backend_memory(target: &Target) -> Vec<(i64, i64)> {
+    let pool = target.db.get_postgres_connection_pool();
+    let mut conns = Vec::new();
+    for _ in 0..pool.num_idle() {
+        conns.push(pool.acquire().await.unwrap());
+    }
+    let mut out = Vec::new();
+    for conn in &mut conns {
+        // Unnamed statements: the probe itself leaves nothing behind.
+        let prepared: i64 = sea_orm::sqlx::query_scalar(
+            "SELECT count(*) FROM pg_prepared_statements WHERE NOT from_sql",
+        )
+        .persistent(false)
+        .fetch_one(&mut **conn)
+        .await
+        .unwrap();
+        let bytes: i64 = sea_orm::sqlx::query_scalar(
+            "SELECT sum(total_bytes)::bigint FROM pg_backend_memory_contexts",
+        )
+        .persistent(false)
+        .fetch_one(&mut **conn)
+        .await
+        .unwrap();
+        out.push((prepared, bytes));
+    }
+    out
+}
+
+/// A first ingest over a database the old path filled keeps each backend of
+/// the target's pool bounded: no prepared statement outlives the next one,
+/// staged (a transaction per file) or not (one transaction). With sqlx's
+/// statement cache disabled, every staging INSERT (up to 65535 parameters,
+/// ~640 KB of plan source each) stayed prepared in its backend for the
+/// connection's lifetime: a TW first ingest grew one backend to 520 MB.
+#[tokio::test]
+#[ignore] // Requires PostgreSQL (HARUKI_TEST_INGEST_DSN)
+async fn first_ingest_keeps_backend_memory_bounded() {
+    /// Memory contexts of an ingest backend after the run: measured at
+    /// 3-12 MiB; the leak left 271 statements and 145 MiB here (290 MiB of
+    /// contexts, 368 MB RSS on real TW data).
+    const LIMIT: i64 = 24 * 1024 * 1024;
+    let mut dbs = Dbs::new().await;
+    for (label, stage_tables) in [("staged", 0), ("one transaction", 1000)] {
+        let (dsn, db) = dbs.create("ing_pgmem").await;
+        let mut files = fixture();
+        files.insert("resourceBoxes.json".into(), many_resource_boxes(150_000));
+        old_path_ingest(&db, &files).await;
+        let (url, mock) = mock_registry("pg").await;
+        publish(&mock, &files, "1.0.0.1");
+        let ing = ingester(&url, stage_tables, vec![target_cfg("main", &dsn)]).await;
+        let outcomes = ing.reconcile_region(JP).await;
+        let (_, _, staged) = written(outcome(&outcomes, "main"));
+        assert_eq!(staged, stage_tables == 0, "{label}");
+        let backends = pool_backend_memory(ing.target("main").unwrap()).await;
+        eprintln!("{label}: (prepared statements, context bytes) per backend: {backends:?}");
+        assert!(!backends.is_empty(), "{label}");
+        for (prepared, bytes) in backends {
+            assert!(
+                prepared <= super::target::STATEMENT_CACHE_CAPACITY as i64,
+                "{label}: {prepared} prepared statements left in a backend"
+            );
+            assert!(bytes < LIMIT, "{label}: backend holds {bytes} bytes");
+        }
+        assert_eq!(digest(&db, "resourceboxes").await.0, 150_000, "{label}");
+    }
+    dbs.drop_all().await;
+}
+
+/// The optional session guards reach every connection of the target's pool.
+#[tokio::test]
+#[ignore] // Requires PostgreSQL (HARUKI_TEST_INGEST_DSN)
+async fn session_guards_apply_to_target_connections() {
+    let mut dbs = Dbs::new().await;
+    let (dsn, _db) = dbs.create("ing_guard").await;
+    let mut cfg = target_cfg("main", &dsn);
+    cfg.statement_timeout_secs = Some(7);
+    cfg.idle_in_transaction_timeout_secs = Some(90);
+    let target = Target::open(cfg, 2).await.unwrap();
+    let row = target
+        .db
+        .query_one_raw(Statement::from_string(
+            DbBackend::Postgres,
+            "SELECT current_setting('statement_timeout') AS s, \
+             current_setting('idle_in_transaction_session_timeout') AS i",
+        ))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.try_get::<String>("", "s").unwrap(), "7s");
+    assert_eq!(row.try_get::<String>("", "i").unwrap(), "90s");
+    drop(target);
+    dbs.drop_all().await;
+}

@@ -51,6 +51,25 @@ CREATE TABLE IF NOT EXISTS master_ingest_allow_shrink (
     tables jsonb NOT NULL, created_at timestamptz NOT NULL DEFAULT now(),
     PRIMARY KEY (target, region, content_hash));";
 
+/// Prepared statements kept per pooled connection (see `Target::open`).
+pub const STATEMENT_CACHE_CAPACITY: usize = 1;
+
+/// Session settings for a target's connections (`statement_timeout`,
+/// `idle_in_transaction_session_timeout`), when configured.
+fn session_options(cfg: &IngestTargetConfig) -> Vec<(&'static str, String)> {
+    let mut out = Vec::new();
+    if let Some(secs) = cfg.statement_timeout_secs.filter(|s| *s > 0) {
+        out.push(("statement_timeout", format!("{}", secs * 1000)));
+    }
+    if let Some(secs) = cfg.idle_in_transaction_timeout_secs.filter(|s| *s > 0) {
+        out.push((
+            "idle_in_transaction_session_timeout",
+            format!("{}", secs * 1000),
+        ));
+    }
+    out
+}
+
 pub(crate) fn quote(ident: &str) -> String {
     format!("\"{}\"", ident.replace('"', "\"\""))
 }
@@ -134,6 +153,7 @@ impl Target {
         let schema = MasterSchema::load(&cfg.schema)
             .await
             .with_context(|| format!("target {}: schema", cfg.name))?;
+        let session = session_options(&cfg);
         let mut opts = ConnectOptions::new(&cfg.dsn);
         opts.max_connections(pool_size.max(2))
             .min_connections(0)
@@ -141,12 +161,23 @@ impl Target {
             .connect_timeout(Duration::from_secs(10))
             .acquire_timeout(Duration::from_secs(60))
             .sqlx_logging(false)
-            // No prepared-statement cache: nearly every statement here is a
-            // multi-row INSERT with up to 65535 parameters, and each distinct
-            // one (per table, batch shape and tail) would stay cached on
-            // every pooled connection, client side (~100 KB+ each, 100 per
-            // connection) and in the server backend alike.
-            .map_sqlx_postgres_opts(|o| o.statement_cache_capacity(0));
+            // A one-entry prepared-statement cache. Nearly every statement
+            // here is a multi-row INSERT with up to 65535 parameters, whose
+            // server-side plan source alone is ~640 KB. The cache must not be
+            // disabled (capacity 0): sqlx still prepares every SeaORM
+            // statement as a *named* statement then, and only closes named
+            // statements when they are evicted from the cache, so each one
+            // stayed in the backend for the connection's lifetime (a TW
+            // first ingest grew one backend to 520 MB and got it OOM-killed).
+            // With one entry each new statement closes the previous one.
+            .map_sqlx_postgres_opts(move |o| {
+                let o = o.statement_cache_capacity(STATEMENT_CACHE_CAPACITY);
+                if session.is_empty() {
+                    o
+                } else {
+                    o.options(session.iter().cloned())
+                }
+            });
         let db = Database::connect(opts)
             .await
             .with_context(|| format!("target {}: database", cfg.name))?;

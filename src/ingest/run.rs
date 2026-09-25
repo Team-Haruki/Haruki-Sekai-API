@@ -10,7 +10,7 @@ use anyhow::{anyhow, bail, Result};
 use sea_orm::{DatabaseTransaction, TransactionTrait};
 use serde_json::Value;
 use tokio::sync::{mpsc, oneshot};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use super::registry_client::{Gone, RegistryClient};
 use super::target::{write_file, RegionLock, StateRow, TablePlan, Target, VersionRow};
@@ -653,6 +653,7 @@ async fn run_target(
                 let job = jobs
                     .get(name.as_str())
                     .ok_or_else(|| anyhow!("unexpected file {name}"))?;
+                let file_started = std::time::Instant::now();
                 let file_txn = match &steady {
                     Some(_) => None,
                     None => Some(target.db.begin().await?),
@@ -708,6 +709,15 @@ async fn run_target(
                 if let Some(txn) = file_txn {
                     txn.commit().await?;
                 }
+                debug!(
+                    "{} Target {}: {} -> {} ({} rows) in {:?}",
+                    region.as_str().to_uppercase(),
+                    target.name,
+                    name,
+                    job.plan.table,
+                    write.rows,
+                    file_started.elapsed()
+                );
                 written += 1;
             }
             Msg::Finish => break,
