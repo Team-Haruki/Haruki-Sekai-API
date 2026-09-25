@@ -925,6 +925,28 @@ mod tests {
     }
 
     #[test]
+    fn committed_bundle_restores_user_scoped_ranking_border() {
+        let bundle: NuverseSchemaBundle = serde_json::from_str(include_str!(
+            "../../Data/structures/6.4.0/nuverse_schema_bundle.json"
+        ))
+        .unwrap();
+        let store = NuverseSchemaStore::from_bundle(bundle).unwrap();
+        for path in [
+            "/user/{userId}/event/180/ranking-border",
+            "/user/7613536587049704235/event/180/ranking-border",
+            "/event/180/ranking-border",
+        ] {
+            let value = json!({"borderRankings":[{"rank":100,"userCard":[85,9]}]});
+            let restored = store.restore_api_json(path, value).unwrap();
+            assert_eq!(
+                restored["borderRankings"][0]["userCard"]["cardId"],
+                json!(85),
+                "{path}"
+            );
+        }
+    }
+
+    #[test]
     fn restores_object_record_without_duplicate_source_keys() {
         let schema = json!({
             "type": "record",

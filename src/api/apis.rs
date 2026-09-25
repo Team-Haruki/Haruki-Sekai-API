@@ -463,15 +463,45 @@ pub async fn get_event_ranking_border(
     if !event_id.chars().all(|c| c.is_ascii_digit()) {
         return Err(AppError::ParseError("event_id must be numeric".to_string()));
     }
-    let path = format!("/event/{}/ranking-border", event_id);
+    let path = ranking_border_path(&server, &event_id);
     let ttls = cache_ttls(&state, &server);
     proxy_game_api_cached(&state, &server, &path, ttls.ranking_border, ttls.max_stale).await
+}
+
+/// Nuverse servers (tw/kr/cn) moved the border endpoint under `/user/{userId}`
+/// with the 6.4.0 client; the old `/event/{id}/ranking-border` is a 404 there.
+fn ranking_border_path(server: &str, event_id: &str) -> String {
+    let nuverse = server
+        .parse::<ServerRegion>()
+        .map(|region| !region.is_cp_server())
+        .unwrap_or(false);
+    if nuverse {
+        format!("/user/{{userId}}/event/{}/ranking-border", event_id)
+    } else {
+        format!("/event/{}/ranking-border", event_id)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
+
+    #[test]
+    fn ranking_border_path_is_user_scoped_on_nuverse() {
+        for server in ["tw", "kr", "cn", "CN"] {
+            assert_eq!(
+                super::ranking_border_path(server, "180"),
+                "/user/{userId}/event/180/ranking-border"
+            );
+        }
+        for server in ["jp", "en", "unknown"] {
+            assert_eq!(
+                super::ranking_border_path(server, "218"),
+                "/event/218/ranking-border"
+            );
+        }
+    }
 
     use axum::body::{to_bytes, Body};
     use axum::extract::{Path, Query, State};

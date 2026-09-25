@@ -64,6 +64,12 @@ var api = new JsonArray
     {
         FieldMapping("borderRankings[].userCard", "Sekai.UserCard"),
         FieldMapping("userWorldBloomChapterRankingBorders[].borderRankings[].userCard", "Sekai.UserCard")
+    }),
+    // 6.4.0+: Nuverse moved the border endpoint under /user/{userId} (the old path is a 404).
+    ApiMapping("/user/{userId}/event/{eventId}/ranking-border", new []
+    {
+        FieldMapping("borderRankings[].userCard", "Sekai.UserCard"),
+        FieldMapping("userWorldBloomChapterRankingBorders[].borderRankings[].userCard", "Sekai.UserCard")
     })
 };
 
