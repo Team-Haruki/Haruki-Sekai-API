@@ -140,7 +140,13 @@ impl Target {
             .connect_lazy(true)
             .connect_timeout(Duration::from_secs(10))
             .acquire_timeout(Duration::from_secs(60))
-            .sqlx_logging(false);
+            .sqlx_logging(false)
+            // No prepared-statement cache: nearly every statement here is a
+            // multi-row INSERT with up to 65535 parameters, and each distinct
+            // one (per table, batch shape and tail) would stay cached on
+            // every pooled connection, client side (~100 KB+ each, 100 per
+            // connection) and in the server backend alike.
+            .map_sqlx_postgres_opts(|o| o.statement_cache_capacity(0));
         let db = Database::connect(opts)
             .await
             .with_context(|| format!("target {}: database", cfg.name))?;
@@ -851,6 +857,9 @@ pub async fn write_file(
                 row
             })
             .collect();
+        // This receiver's handle on the parsed rows: once the other targets
+        // are done with the batch too, it is freed before the INSERT is built.
+        drop(rows);
         insert_batch(
             conn,
             STAGE,

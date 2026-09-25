@@ -97,7 +97,7 @@ ingest: # registry-driven ingest (`master_ingest` binary); absent = role off. Ig
   listen: "127.0.0.1:9997" # POST /internal/master-updated, POST /v1/ingest/{target}/{region}/allow-shrink, GET /health
   webhook_token: "" # bearer on both POSTs (= the registry's subscribers[].token); empty = webhook off (404)
   reconcile_cron: "0 */5 * * * *" # fallback reconcile of every region; "" disables the timer
-  parse_concurrency: 2 # regions reconciled at once (memory knob: ~2 row batches per target per region)
+  parse_concurrency: 2 # regions reconciled at once (memory knob: a few ~1 MiB row batches per target per region)
   stage_tables: 25 # a run rewriting more tables than this (or stage_bytes of JSON) commits per table
   stage_bytes: 52428800
   targets:
