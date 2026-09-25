@@ -339,11 +339,14 @@ place (drop them by hand).
 
 ### Concurrency and ordering
 
-- One reconcile per `(target, region)` at a time: a PostgreSQL advisory lock
-  on the target database, keyed by `hashtext('master_ingest:' || target || ':'
-  || region)`, taken with `pg_try_advisory_lock` for the whole run (a second
-  ingester process against the same target skips the region instead of
-  interleaving). In-process, a per-`(target, region)` mutex coalesces
+- One reconcile per `(database, region)` at a time: a PostgreSQL advisory
+  lock on the target database, keyed by `hashtext('master_ingest:' ||
+  current_database() || ':' || current_schema() || ':' || region)`, taken with
+  `pg_try_advisory_lock` for the whole run (a second ingester process against
+  the same database skips the region instead of interleaving, whatever its
+  target is named). Two targets of one config may not point at the same
+  database (host, port and database name normalized): they would share the
+  typed tables and `master_raw`. In-process, a per-`(target, region)` mutex coalesces
   triggers: a trigger that arrives during a run schedules exactly one follow-up
   run.
 - **Never backwards.** A target's version only moves forward. Before a run
@@ -428,10 +431,12 @@ rewrite the full ~417 MB in one transaction per region (huge WAL, long locks,
 one failure redoes everything). Instead, when a run would rewrite more than a
 threshold (default: 25 tables or 50 MB of JSON), it is **staged per table**:
 
-- Each table is loaded into a staging table (`<table>__ingest`), checked, and
-  swapped in its own short transaction (upsert/delete from staging, or
-  `ALTER TABLE … RENAME` for a table that is empty for the other regions),
-  recording that file's `master_ingest_state` row in the same transaction.
+- Each changed file is written in its own short transaction: its rows are
+  loaded into a temporary staging table (`pg_temp._master_ingest_stage`,
+  dropped at commit), then applied to the live table with the same
+  upsert/delete as a steady-state run (see *Write strategy* and
+  *Implementation notes*), and that file's `master_ingest_state` row is
+  recorded in the same transaction. No table is renamed or swapped.
 - `master_ingest_version.status` stays `staging` until every table is done,
   then the final transaction sets the version. Readers see a mix of old and
   new tables during a first load; that is acceptable once and is reported by
@@ -485,6 +490,12 @@ rule (`updater/prune.rs`), not immediately:
   target's `required_tables` are never cleared this way; a manifest that drops
   one of them fails the `required_tables` check below instead, so the
   operator sees it.
+- A file that vanished while another listed file maps to the same table (a
+  rename) only loses its state row; the table is written by the new file.
+- A table that no longer exists in the target database is not cleared; the
+  file's state row is dropped and a warning logged.
+- While a file stays missing at the same `contentHash`, a timer reconcile is a
+  no-op (`upToDate`); the version row is not rewritten.
 
 ### Integrity checks, before a region's commit
 
@@ -495,7 +506,10 @@ rule (`updater/prune.rs`), not immediately:
   (`BUILTIN_PROTECTED_TABLES`), which is already kept in sync with consumers.
 - Each changed file's row count is at least `min_ratio` times its previous row
   count (0.5 by default). This guards against a truncated upstream table. A
-  failed check aborts that target's transaction.
+  failed check aborts that target's transaction. The previous count is the
+  one recorded in `master_ingest_state`; a file without a recorded count (a
+  new target, or a database filled by the old path, as at the cutover) is
+  compared with the table's current rows for the region.
 - **Manual override for `min_ratio`.** A legitimate large shrink (the game
   really removed most rows of a table) would otherwise fail forever. The
   operator allows it for one specific version: `POST
@@ -530,7 +544,7 @@ Where the implementation refines the design above:
   target of the region); a trigger during a run schedules exactly one
   follow-up. Up to `parse_concurrency` regions run at once; within a region
   each target's files are written in order on its own connection.
-- **Lock.** `pg_try_advisory_lock(hashtext('master_ingest:<target>:<region>'))`
+- **Lock.** `pg_try_advisory_lock(hashtext('master_ingest:<database>:<schema>:<region>'))`
   is taken on a dedicated connection that is closed when the run ends (also on
   a panic), so a lock is never left on a pooled connection. A busy target is
   reported as `busy` and retried on the next trigger.
@@ -543,20 +557,24 @@ Where the implementation refines the design above:
   that), parsed once, and its row batches are sent to every target that needs
   it. A target stages the rows in a temporary table (`CREATE TEMP TABLE … AS
   SELECT <columns> FROM <table> WITH NO DATA`, so values bind exactly as in
-  the old path), then:
+  the old path; the live columns' `DEFAULT`s are copied onto it, so a key
+  absent from every row of a batch takes the column default exactly as the
+  old path's INSERT, which omitted that column, did), runs `ANALYZE` on it,
+  then:
   - keyed tables: `DELETE` rows of the region whose key is not in the file,
     `INSERT … SELECT … ON CONFLICT (key, server_region) DO UPDATE … WHERE
     (columns) IS DISTINCT FROM (excluded)`; rows with a NULL key column never
     conflict, so they are replaced wholesale;
   - keyless tables, and keyed tables whose database has no unique index that
     matches the schema key: `DELETE` the region, then `INSERT`.
-- **Mapping hash** also covers the columns (and their database types) that
-  exist in the target, and the chosen key, so dropping or adding a column by
+- **Mapping hash** also covers the columns (and their database types and
+  defaults) that exist in the target, and the chosen key, so dropping or adding a column by
   hand rewrites exactly that table. Files that are not written (no table,
   legacy-skipped, outside the allow-list) get a state row with a skip hash,
   so a later schema or allow-list change picks them up.
 - **Empty file.** A file with `[]` now empties the table for the region (the
-  old path left the rows); `min_ratio` guards this like any other shrink.
+  old path left the rows); `min_ratio` guards this like any other shrink,
+  also on the first run against a database without ingest state.
 - **Unknown keys** are stored per table in `master_ingest_version.unknown_keys`
   (jsonb) and logged; with `raw: true` they are also in `master_raw`.
 - **Allow-shrink** overrides from the HTTP endpoint are stored in
@@ -597,7 +615,22 @@ fields to its webhook body, and the ingester runs only when started with an
    set `master_database.enabled: false` and restart it; then point the
    ingester target at CN08 `haruki_sekai` and restart the ingester. Its first
    run against the live database writes only what differs (upserts with
-   `IS DISTINCT FROM`), staged per table.
+   `IS DISTINCT FROM`), staged per table. There is no `master_ingest_state`
+   yet, so `min_ratio` compares each file with the table's **live** row count
+   for the region: an empty or truncated file fails the run instead of
+   emptying a table.
+
+   Before this step, list the column defaults on CN08 `haruki_sekai`:
+
+   ```sql
+   SELECT table_name, column_name, column_default
+   FROM information_schema.columns
+   WHERE table_schema = 'public' AND column_default IS NOT NULL;
+   ```
+
+   Apart from the serial `id` columns, every listed default is copied onto
+   the staging table and applies to keys a file does not carry, as with the
+   old path; check that each one is intended.
 5. Watch `master_ingest_version` (`status`, `error`, `unknown_keys`) and the
    ingester's `/health`.
 
