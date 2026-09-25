@@ -17,6 +17,47 @@ use crate::config::{Config, ServerRegion};
 use crate::error::AppError;
 use crate::updater::sync::MasterSyncer;
 
+/// The subscriber notice for a publish. `server` and `dataVersion` are what
+/// every receiver has always read; `contentHash`, `gitCommit` and the file
+/// diff against the previous `current` (`changedFiles`: new or modified,
+/// `removedFiles`) are additions older receivers ignore. The notice is a
+/// trigger only: a receiver must re-read `current` rather than trust it.
+pub fn publish_notice(
+    manifest: &MasterManifest,
+    previous: Option<&MasterManifest>,
+) -> serde_json::Value {
+    let before: HashMap<&str, &str> = previous
+        .map(|p| {
+            p.files
+                .iter()
+                .map(|f| (f.name.as_str(), f.sha256.as_str()))
+                .collect()
+        })
+        .unwrap_or_default();
+    let changed: Vec<&str> = manifest
+        .files
+        .iter()
+        .filter(|f| before.get(f.name.as_str()) != Some(&f.sha256.as_str()))
+        .map(|f| f.name.as_str())
+        .collect();
+    let now: std::collections::HashSet<&str> =
+        manifest.files.iter().map(|f| f.name.as_str()).collect();
+    let mut removed: Vec<&str> = before
+        .keys()
+        .copied()
+        .filter(|n| !now.contains(n))
+        .collect();
+    removed.sort_unstable();
+    serde_json::json!({
+        "server": manifest.server,
+        "dataVersion": manifest.data_version,
+        "contentHash": super::state::content_hash(manifest),
+        "gitCommit": manifest.git_commit,
+        "changedFiles": changed,
+        "removedFiles": removed,
+    })
+}
+
 /// Outcome of pushing an app identity to one account node.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct AppIdentityPush {
@@ -213,7 +254,7 @@ impl Registry {
     /// subscribers when it changed. Returns the manifest and whether it was
     /// a new publish.
     pub async fn publish(&self, region: ServerRegion) -> Result<(MasterManifest, bool), AppError> {
-        let (manifest, changed) = {
+        let (manifest, changed, previous) = {
             // The lock covers manifest build and state write only; the
             // subscriber fan-out (up to one timeout per unreachable peer)
             // runs after it is released so a concurrent refresh is not held up.
@@ -247,8 +288,9 @@ impl Registry {
                     stats.bytes_stored
                 );
             }
+            let previous = self.state.current(region).await.ok().flatten();
             let changed = self.state.publish(region, &manifest).await?;
-            (manifest, changed)
+            (manifest, changed, previous)
         };
         if changed {
             info!(
@@ -257,7 +299,7 @@ impl Registry {
                 manifest.data_version,
                 manifest.files.len()
             );
-            self.notify_subscribers(region, &manifest.data_version)
+            self.notify_subscribers(region, &publish_notice(&manifest, previous.as_ref()))
                 .await;
             self.collect_garbage().await;
         }
@@ -498,14 +540,10 @@ impl Registry {
         }
     }
 
-    async fn notify_subscribers(&self, region: ServerRegion, data_version: &str) {
-        let payload = serde_json::json!({
-            "server": region.as_str(),
-            "dataVersion": data_version,
-        });
+    async fn notify_subscribers(&self, region: ServerRegion, payload: &serde_json::Value) {
         for peer in &self.config.registry.subscribers {
             let endpoint = format!("{}/internal/master-updated", peer.url.trim_end_matches('/'));
-            let mut req = self.http.post(&endpoint).json(&payload);
+            let mut req = self.http.post(&endpoint).json(payload);
             if !peer.token.is_empty() {
                 req = req.bearer_auth(&peer.token);
             }
@@ -607,5 +645,56 @@ impl Registry {
         }
         scheduler.start().await?;
         Ok(scheduler)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::internal::MasterManifestFile;
+
+    fn manifest(files: &[(&str, &str)]) -> MasterManifest {
+        MasterManifest {
+            server: "jp".into(),
+            app_version: String::new(),
+            app_hash: String::new(),
+            data_version: "1.0.0".into(),
+            asset_version: String::new(),
+            asset_hash: String::new(),
+            cdn_version: 0,
+            generated_at: String::new(),
+            content_hash: String::new(),
+            git_commit: Some("abc".into()),
+            files: files
+                .iter()
+                .map(|(name, sha)| MasterManifestFile {
+                    name: name.to_string(),
+                    size: 1,
+                    sha256: sha.to_string(),
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn publish_notice_lists_the_file_diff() {
+        let old = manifest(&[("a.json", "1"), ("b.json", "2"), ("gone.json", "3")]);
+        let new = manifest(&[("a.json", "1"), ("b.json", "9"), ("new.json", "4")]);
+        let notice = publish_notice(&new, Some(&old));
+        assert_eq!(notice["server"], "jp");
+        assert_eq!(notice["dataVersion"], "1.0.0");
+        assert_eq!(notice["gitCommit"], "abc");
+        assert_eq!(
+            notice["contentHash"],
+            super::super::state::content_hash(&new)
+        );
+        assert_eq!(
+            notice["changedFiles"],
+            serde_json::json!(["b.json", "new.json"])
+        );
+        assert_eq!(notice["removedFiles"], serde_json::json!(["gone.json"]));
+        let first = publish_notice(&new, None);
+        assert_eq!(first["changedFiles"].as_array().unwrap().len(), 3);
+        assert_eq!(first["removedFiles"], serde_json::json!([]));
     }
 }

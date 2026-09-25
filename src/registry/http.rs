@@ -2071,9 +2071,23 @@ mod tests {
         assert!(hits
             .iter()
             .any(|h| h.contains("/internal/master/jp/bundle")));
-        assert!(hits
+        let notice = hits
             .iter()
-            .any(|h| h.contains("/internal/master-updated") && h.contains("9.0.0.1")));
+            .find(|h| h.contains("/internal/master-updated") && h.contains("9.0.0.1"))
+            .expect("subscriber notified");
+        let body: serde_json::Value =
+            serde_json::from_str(notice.split_once(' ').unwrap().1).unwrap();
+        assert_eq!(body["server"], "jp");
+        assert_eq!(body["dataVersion"], "9.0.0.1");
+        assert_eq!(
+            body["contentHash"],
+            super::super::state::content_hash(&manifest)
+        );
+        assert_eq!(body["changedFiles"], serde_json::json!(["cards.json"]));
+        assert_eq!(body["removedFiles"], serde_json::json!([]));
+        // Old receivers read only `server`/`dataVersion` and still parse it.
+        let old: MasterUpdatedNotice = serde_json::from_value(body).unwrap();
+        assert_eq!(old.data_version, "9.0.0.1");
 
         // A second refresh finds nothing new and publishes nothing.
         assert!(!registry.refresh(ServerRegion::Jp).await.unwrap());
