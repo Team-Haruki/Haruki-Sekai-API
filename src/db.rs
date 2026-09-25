@@ -67,17 +67,33 @@ pub async fn init_master_db(config: &DatabaseConfig) -> Result<DatabaseConnectio
     Ok(db)
 }
 
+/// Registry state pool size with `registry.blob_store: fs`.
+pub const REGISTRY_STATE_POOL: u32 = 4;
+
+/// The registry state pool size: blob row queries (`registry.blob_store: pg`)
+/// share the pool and are capped at 4 at once (`registry::blobs`), so the pg
+/// store doubles it to leave connections for state writes.
+pub fn registry_state_pool_size(blob_store: crate::config::BlobStoreKind) -> u32 {
+    match blob_store {
+        crate::config::BlobStoreKind::Fs => REGISTRY_STATE_POOL,
+        crate::config::BlobStoreKind::Pg => REGISTRY_STATE_POOL * 2,
+    }
+}
+
 /// Connect to the registry state database (`registry.state_dsn`) and create
 /// its tables when missing. Any SeaORM backend works; PostgreSQL is the
 /// production target (the value columns are JSONB there).
-pub async fn init_registry_state_db(dsn: &str) -> Result<DatabaseConnection, AppError> {
+pub async fn init_registry_state_db(
+    dsn: &str,
+    max_connections: u32,
+) -> Result<DatabaseConnection, AppError> {
     if dsn.trim().is_empty() {
         return Err(AppError::DatabaseError(
             "Registry state DSN is empty".to_string(),
         ));
     }
     let mut opts = ConnectOptions::new(dsn.trim());
-    opts.max_connections(4)
+    opts.max_connections(max_connections.max(1))
         .min_connections(1)
         .connect_timeout(std::time::Duration::from_secs(30))
         .acquire_timeout(std::time::Duration::from_secs(30))
@@ -113,6 +129,25 @@ pub async fn init_registry_state_db(dsn: &str) -> Result<DatabaseConnection, App
     }
     info!("Registry state database initialized successfully (SeaORM)");
     Ok(db)
+}
+
+/// Create the registry blob table (`registry.blob_store: pg`) on the
+/// registry state database when missing.
+pub async fn init_registry_blob_table(db: &DatabaseConnection) -> Result<(), AppError> {
+    let schema = Schema::new(db.get_database_backend());
+    let stmt = schema
+        .create_table_from_entity(entity::RegistryBlob)
+        .if_not_exists()
+        .to_owned();
+    db.execute(&stmt)
+        .await
+        .map_err(|e| AppError::DatabaseError(format!("Failed to create registry_blobs: {}", e)))?;
+    for mut stmt in schema.create_index_from_entity(entity::RegistryBlob) {
+        db.execute(stmt.if_not_exists()).await.map_err(|e| {
+            AppError::DatabaseError(format!("Failed to create registry_blobs index: {}", e))
+        })?;
+    }
+    Ok(())
 }
 
 /// Percent-encode a URL userinfo component so passwords containing URL-special

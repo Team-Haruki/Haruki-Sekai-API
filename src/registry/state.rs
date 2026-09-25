@@ -23,9 +23,12 @@
 //!   empty tables the files above are imported once and left in place.
 //!
 //! music_metas blobs are content, not state: they stay under
-//! `<state_dir>/metas/<region>/` with either backend.
+//! `<state_dir>/metas/<region>/` with either backend. Master file content
+//! lives in the master directories, or in `registry_blobs` next to these
+//! tables with `registry.blob_store: pg` (`registry::blobs`); then a publish
+//! commits only when every file it lists is already stored.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -118,6 +121,9 @@ pub struct RegistryState {
     /// instance is the only writer (one registry per state database), so the
     /// cache is refreshed by its own publishes and writes.
     cache: SingletonCache,
+    /// Database backend with `registry.blob_store: pg`: a publish refuses to
+    /// commit a manifest listing a digest missing from `registry_blobs`.
+    require_blobs: bool,
 }
 
 type SingletonCache = Arc<RwLock<HashMap<(ServerRegion, &'static str), Option<serde_json::Value>>>>;
@@ -129,6 +135,7 @@ impl RegistryState {
             dir: dir.into(),
             db: None,
             cache: Arc::default(),
+            require_blobs: false,
         }
     }
 
@@ -136,11 +143,22 @@ impl RegistryState {
     /// missing and, when they are empty, import the file state under `dir`
     /// once. `dir` still holds the music_metas blobs.
     pub async fn connect(dir: impl Into<PathBuf>, dsn: &str) -> Result<Self, AppError> {
-        let db = crate::db::init_registry_state_db(dsn).await?;
+        Self::connect_with_pool(dir, dsn, crate::db::REGISTRY_STATE_POOL).await
+    }
+
+    /// [`Self::connect`] with a pool of `max_connections` (see
+    /// [`crate::db::registry_state_pool_size`]).
+    pub async fn connect_with_pool(
+        dir: impl Into<PathBuf>,
+        dsn: &str,
+        max_connections: u32,
+    ) -> Result<Self, AppError> {
+        let db = crate::db::init_registry_state_db(dsn, max_connections).await?;
         let state = Self {
             dir: dir.into(),
             db: Some(db),
             cache: Arc::default(),
+            require_blobs: false,
         };
         state.import_files_if_empty().await?;
         state.load_cache().await?;
@@ -154,6 +172,101 @@ impl RegistryState {
     /// Whether the state lives in a database (else in files under `dir`).
     pub fn is_database(&self) -> bool {
         self.db.is_some()
+    }
+
+    /// The state database connection, when the state lives in one.
+    pub fn database(&self) -> Option<&DatabaseConnection> {
+        self.db.as_ref()
+    }
+
+    /// Make every database publish check, inside its transaction, that the
+    /// manifest's files are all in `registry_blobs` (`blob_store: pg`).
+    pub fn require_blobs(&mut self) {
+        self.require_blobs = true;
+    }
+
+    /// The retained manifest snapshots of a region, newest first. Unreadable
+    /// snapshots are skipped.
+    pub async fn snapshots(&self, region: ServerRegion) -> Result<Vec<MasterManifest>, AppError> {
+        self.read_snapshots(region, false).await
+    }
+
+    /// Like [`Self::snapshots`], but any unreadable snapshot is an error
+    /// (garbage collection must not treat its blobs as unreferenced).
+    pub async fn snapshots_strict(
+        &self,
+        region: ServerRegion,
+    ) -> Result<Vec<MasterManifest>, AppError> {
+        self.read_snapshots(region, true).await
+    }
+
+    async fn read_snapshots(
+        &self,
+        region: ServerRegion,
+        strict: bool,
+    ) -> Result<Vec<MasterManifest>, AppError> {
+        if let Some(db) = &self.db {
+            let rows = registry_state::Entity::find()
+                .filter(registry_state::Column::Region.eq(region.as_str()))
+                .filter(registry_state::Column::Kind.eq(KIND_SNAPSHOT))
+                .order_by_desc(registry_state::Column::UpdatedAt)
+                .order_by_desc(registry_state::Column::Name)
+                .all(db)
+                .await?;
+            let mut manifests = Vec::with_capacity(rows.len());
+            for row in rows {
+                match serde_json::from_value(row.value) {
+                    Ok(manifest) => manifests.push(manifest),
+                    Err(e) if strict => {
+                        return Err(AppError::ParseError(format!(
+                            "{} snapshot {}: {e}",
+                            region.as_str(),
+                            row.name
+                        )))
+                    }
+                    Err(_) => {}
+                }
+            }
+            return Ok(manifests);
+        }
+        let mut entries = Vec::new();
+        if let Ok(mut rd) = tokio::fs::read_dir(self.snapshot_dir(region)).await {
+            while let Ok(Some(entry)) = rd.next_entry().await {
+                let modified = entry
+                    .metadata()
+                    .await
+                    .and_then(|m| m.modified())
+                    .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                entries.push((modified, entry.path()));
+            }
+        }
+        entries.sort_by_key(|entry| std::cmp::Reverse(entry.0));
+        let mut manifests = Vec::new();
+        for (_, path) in entries {
+            match read_json::<MasterManifest>(&path).await {
+                Ok(Some(manifest)) => manifests.push(manifest),
+                Ok(None) => {}
+                Err(e) if strict => return Err(e),
+                Err(_) => {}
+            }
+        }
+        Ok(manifests)
+    }
+
+    /// Every file digest a region's current manifest or a retained snapshot
+    /// lists, over all regions: the blobs garbage collection must keep.
+    pub async fn referenced_digests(&self) -> Result<HashSet<String>, AppError> {
+        let mut digests = HashSet::new();
+        for region in ALL_REGIONS {
+            let current = self.current(region).await?;
+            for manifest in current
+                .into_iter()
+                .chain(self.snapshots_strict(region).await?)
+            {
+                digests.extend(manifest.files.into_iter().map(|f| f.sha256));
+            }
+        }
+        Ok(digests)
     }
 
     fn manifest_dir(&self, region: ServerRegion) -> PathBuf {
@@ -302,6 +415,17 @@ impl RegistryState {
         record: &PublishRecord,
     ) -> Result<bool, AppError> {
         let txn = db.begin().await?;
+        if self.require_blobs {
+            let digests: Vec<String> = manifest.files.iter().map(|f| f.sha256.clone()).collect();
+            let missing = super::blobs::missing_digests(&txn, &digests, true).await?;
+            if !missing.is_empty() {
+                return Err(AppError::Internal(format!(
+                    "{} publish refused: {} listed file(s) missing from registry_blobs",
+                    region.as_str(),
+                    missing.len()
+                )));
+            }
+        }
         let previous: Option<MasterManifest> =
             db_get(&txn, region, KIND_MANIFEST, NAME_CURRENT).await?;
         let changed = is_changed(previous.as_ref(), manifest, record);

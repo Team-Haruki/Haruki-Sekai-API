@@ -8,6 +8,7 @@ use std::sync::Arc;
 use tokio_cron_scheduler::{Job, JobScheduler, JobSchedulerError};
 use tracing::{error, info, warn};
 
+use super::blobs::{BlobStore, FsBlobStore, StoreMode, StoreStats};
 use super::metas::MusicMetasManager;
 use super::state::RegistryState;
 use crate::api::internal::{build_master_manifest, MasterManifest};
@@ -28,6 +29,8 @@ pub struct AppIdentityPush {
 pub struct Registry {
     pub config: Arc<Config>,
     pub state: RegistryState,
+    /// Where master file content is served from (`registry.blob_store`).
+    pub blobs: Arc<dyn BlobStore>,
     pub syncers: HashMap<ServerRegion, Arc<MasterSyncer>>,
     /// The music_metas feed, when `registry.music_metas.enabled`.
     pub metas: Option<MusicMetasManager>,
@@ -77,6 +80,7 @@ impl Registry {
         Self {
             config,
             state,
+            blobs: Arc::new(FsBlobStore),
             syncers,
             metas,
             http,
@@ -92,6 +96,13 @@ impl Registry {
             .map(|region| (region, tokio::sync::Mutex::new(())))
             .collect(),
         }
+    }
+
+    /// Serve master file content from `blobs` instead of the master
+    /// directories (see [`super::blobs::open_blob_store`]).
+    pub fn with_blob_store(mut self, blobs: Arc<dyn BlobStore>) -> Self {
+        self.blobs = blobs;
+        self
     }
 
     /// Store a (possibly partial) app-identity override and deliver the
@@ -211,11 +222,31 @@ impl Registry {
                 None => return Err(AppError::InvalidServerRegion(region.as_str().to_string())),
             };
             let (master_dir, version_path) = self.region_paths(region)?;
+            let dir = master_dir.clone();
             let manifest = tokio::task::spawn_blocking(move || {
-                build_master_manifest(region, &master_dir, &version_path)
+                build_master_manifest(region, &dir, &version_path)
             })
             .await
             .map_err(|e| AppError::Internal(format!("manifest task: {e}")))??;
+            // Content first: the manifest is committed only once every file
+            // it lists can be served from the blob store.
+            let stats = self
+                .blobs
+                .store_manifest(
+                    std::path::Path::new(&master_dir),
+                    &manifest,
+                    StoreMode::Strict,
+                )
+                .await?;
+            if stats.stored > 0 {
+                info!(
+                    "{} Stored {} new blob(s): {} -> {} bytes",
+                    region.as_str().to_uppercase(),
+                    stats.stored,
+                    stats.bytes_in,
+                    stats.bytes_stored
+                );
+            }
             let changed = self.state.publish(region, &manifest).await?;
             (manifest, changed)
         };
@@ -228,8 +259,93 @@ impl Registry {
             );
             self.notify_subscribers(region, &manifest.data_version)
                 .await;
+            self.collect_garbage().await;
         }
         Ok((manifest, changed))
+    }
+
+    /// One bounded blob garbage collection pass (pg store; failures only
+    /// logged, the next publish retries).
+    pub async fn collect_garbage(&self) {
+        if let Err(e) = self.blobs.collect_garbage(&self.state).await {
+            warn!("Registry blob GC failed: {}", e);
+        }
+    }
+
+    /// Store the blobs of every region's current manifest and retained
+    /// snapshots that the blob store is missing (switching an existing
+    /// deployment to `blob_store: pg`). Files come from the master directory
+    /// when they still match, else from the manifest's git commit; anything
+    /// found nowhere is skipped with a warning. Idempotent and a no-op for
+    /// the fs store; one file in memory at a time.
+    pub async fn import_blobs(&self) -> StoreStats {
+        let mut total = StoreStats::default();
+        if self.blobs.kind() == crate::config::BlobStoreKind::Fs {
+            return total;
+        }
+        let started = std::time::Instant::now();
+        for region in self.regions() {
+            let Ok((master_dir, _)) = self.region_paths(region) else {
+                continue;
+            };
+            let dir = std::path::Path::new(&master_dir);
+            let mut manifests = Vec::new();
+            match self.state.current(region).await {
+                Ok(Some(current)) => manifests.push(current),
+                Ok(None) => {}
+                Err(e) => warn!(
+                    "{} Blob import: unreadable current manifest: {}",
+                    region.as_str().to_uppercase(),
+                    e
+                ),
+            }
+            match self.state.snapshots(region).await {
+                Ok(snapshots) => manifests.extend(snapshots),
+                Err(e) => warn!(
+                    "{} Blob import: unreadable snapshots: {}",
+                    region.as_str().to_uppercase(),
+                    e
+                ),
+            }
+            let mut seen = std::collections::HashSet::new();
+            for manifest in manifests {
+                if !seen.insert(super::state::content_hash(&manifest)) {
+                    continue;
+                }
+                // Hold the publish lock so an import never races a publish
+                // of the same region over the same files.
+                let _guard = match self.publish_locks.get(&region) {
+                    Some(lock) => lock.lock().await,
+                    None => continue,
+                };
+                match self
+                    .blobs
+                    .store_manifest(dir, &manifest, StoreMode::Lenient)
+                    .await
+                {
+                    Ok(stats) => total += stats,
+                    Err(e) => warn!(
+                        "{} Blob import of {} failed: {}",
+                        region.as_str().to_uppercase(),
+                        super::state::content_hash(&manifest),
+                        e
+                    ),
+                }
+            }
+        }
+        if total.stored > 0 || total.unavailable > 0 {
+            info!(
+                "Blob import done in {:.1}s: {} stored ({} -> {} bytes), {} present, {} unavailable",
+                started.elapsed().as_secs_f64(),
+                total.stored,
+                total.bytes_in,
+                total.bytes_stored,
+                total.reused,
+                total.unavailable
+            );
+        }
+        self.collect_garbage().await;
+        total
     }
 
     /// Pull the region from its owner if newer, then publish. Returns whether

@@ -11,6 +11,7 @@ use tracing::{error, info};
 
 use haruki_sekai_api::config::Config;
 use haruki_sekai_api::db;
+use haruki_sekai_api::registry::blobs::open_blob_store;
 use haruki_sekai_api::registry::state::RegistryState;
 use haruki_sekai_api::registry::{http, Registry};
 use haruki_sekai_api::updater::sync::build_syncers;
@@ -38,17 +39,24 @@ async fn main() -> anyhow::Result<()> {
         .map(|region| (*region, Arc::new(tokio::sync::Mutex::new(()))))
         .collect();
     let syncers = build_syncers(&config, &HashMap::new(), master_db, &version_locks);
-    let state = if config.registry.state_dsn.trim().is_empty() {
+    let mut state = if config.registry.state_dsn.trim().is_empty() {
         info!("Registry state: files under {}", config.registry.state_dir);
         RegistryState::new(&config.registry.state_dir)
     } else {
-        let state =
-            RegistryState::connect(&config.registry.state_dir, &config.registry.state_dsn).await?;
+        let state = RegistryState::connect_with_pool(
+            &config.registry.state_dir,
+            &config.registry.state_dsn,
+            db::registry_state_pool_size(config.registry.blob_store),
+        )
+        .await?;
         info!("Registry state: database (registry.state_dsn)");
         state
     };
+    let blobs = open_blob_store(&config.registry, &mut state).await?;
+    info!("Registry blob store: {:?}", config.registry.blob_store);
     let config = Arc::new(config);
-    let registry = Arc::new(Registry::with_state(config.clone(), syncers, state));
+    let registry =
+        Arc::new(Registry::with_state(config.clone(), syncers, state).with_blob_store(blobs));
     for region in registry.regions() {
         info!(
             "{} managed (owner: {})",
@@ -61,6 +69,14 @@ async fn main() -> anyhow::Result<()> {
         );
     }
     registry.publish_missing().await;
+    // Blobs of existing manifests (first start on `blob_store: pg`): in the
+    // background, reads fall back to the master directories meanwhile.
+    tokio::spawn({
+        let registry = registry.clone();
+        async move {
+            registry.import_blobs().await;
+        }
+    });
     let _scheduler = registry.start_polls().await?;
 
     let addr: SocketAddr = format!("{}:{}", config.registry.host, config.registry.port).parse()?;

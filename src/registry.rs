@@ -6,6 +6,7 @@
 //! serves files and bundles, holds the app-identity override, and fans out
 //! update notices to subscribers. Runs as the `master_registry` binary.
 
+pub mod blobs;
 pub mod http;
 pub mod metas;
 pub mod service;

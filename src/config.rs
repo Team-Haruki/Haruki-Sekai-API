@@ -414,6 +414,20 @@ pub struct RegistryConfig {
     /// blobs stay under `state_dir` either way.
     #[serde(default)]
     pub state_dsn: String,
+    /// Where the registry serves master file content from: `fs` (default) reads
+    /// the region's master directory (the git worktree), `pg` keeps every
+    /// published file content-addressed and zstd-compressed in the state
+    /// database (`registry_blobs`), so `blob/{sha256}` also serves files of
+    /// retained snapshots and `files/`/`bundle` always match `current`.
+    /// `pg` requires `state_dsn`.
+    #[serde(default)]
+    pub blob_store: BlobStoreKind,
+    /// `blob_store: pg` only: an unreferenced blob (in no region's current or
+    /// retained snapshot manifest) is deleted once it has not been referenced
+    /// by a publish for this many seconds (at least 300; smaller values are
+    /// raised with a warning).
+    #[serde(default = "default_blob_gc_grace_secs")]
+    pub blob_gc_grace_secs: u64,
     /// Peers to notify (`POST <url>/internal/master-updated`) after a region
     /// is published.
     #[serde(default)]
@@ -471,6 +485,21 @@ impl Default for MusicMetasConfig {
     }
 }
 
+/// Registry master file content store (`registry.blob_store`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BlobStoreKind {
+    /// The region's master directory on disk.
+    #[default]
+    Fs,
+    /// The `registry_blobs` table of the registry state database.
+    Pg,
+}
+
+fn default_blob_gc_grace_secs() -> u64 {
+    86_400
+}
+
 fn default_registry_port() -> u16 {
     9998
 }
@@ -487,6 +516,8 @@ impl Default for RegistryConfig {
             token: String::new(),
             state_dir: default_registry_state_dir(),
             state_dsn: String::new(),
+            blob_store: BlobStoreKind::default(),
+            blob_gc_grace_secs: default_blob_gc_grace_secs(),
             subscribers: Vec::new(),
             music_metas: MusicMetasConfig::default(),
             account_nodes: Vec::new(),
@@ -672,6 +703,8 @@ servers:
         assert_eq!(config.master_database.ingest_concurrency, 2);
         assert_eq!(config.registry.port, 9998);
         assert_eq!(config.registry.state_dir, "./Data/registry");
+        assert_eq!(config.registry.blob_store, BlobStoreKind::Fs);
+        assert_eq!(config.registry.blob_gc_grace_secs, 86_400);
         assert!(config.registry.token.is_empty());
         assert!(config.registry.music_metas.enabled);
         assert!(config.registry.account_nodes.is_empty());
