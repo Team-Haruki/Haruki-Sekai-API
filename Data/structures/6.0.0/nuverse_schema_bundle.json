@@ -34915,6 +34915,19 @@
           "schema": "Sekai.UserCard"
         }
       ]
+    },
+    {
+      "path": "/user/{userId}/event/{eventId}/ranking-border",
+      "fields": [
+        {
+          "selector": "borderRankings[].userCard",
+          "schema": "Sekai.UserCard"
+        },
+        {
+          "selector": "userWorldBloomChapterRankingBorders[].borderRankings[].userCard",
+          "schema": "Sekai.UserCard"
+        }
+      ]
     }
   ]
 }

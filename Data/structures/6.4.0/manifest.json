@@ -5,6 +5,6 @@
   "sha256": {
     "master.avsc": "9976f93c102f17204763cb764d70b20679bbfee81aa271fece3bcc7d55fdeceb",
     "suite.avsc": "0f58a0fb86eac890ed99417d34ec4948aa08644a9dc7873fa58408232d6471aa",
-    "nuverse_schema_bundle.json": "842e95652502b9edf87a4719fd128e82763c4688f796fa3975fe4593c098814e"
+    "nuverse_schema_bundle.json": "f89f6bec165dba36b8a3de35f2ca172ad788e9567694f7f179317a15961f87a9"
   }
 }
