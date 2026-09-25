@@ -23,6 +23,13 @@ const CP_MASTER_SPLIT_MAX_RETRIES: u8 = 3;
 const CP_MASTER_SPLIT_RETRY_DELAY_SECS: u64 = 2;
 const CP_MASTER_SPLIT_TIMEOUT_SECS: u64 = 120;
 
+/// The asset updater answers 409 both for "a job is already running" (worth
+/// retrying) and for "region `xx` is disabled" on a node that does not own the
+/// region (never going to succeed). Only the latter is matched here.
+fn is_region_disabled_conflict(body: &str) -> bool {
+    body.to_ascii_lowercase().contains("is disabled")
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct AssetUpdaterPayload {
     region: String,
@@ -630,12 +637,18 @@ treating difference as an update",
     }
 
     async fn call_all_asset_updaters(&self, asset_version: &str, asset_hash: &str) {
-        if self.asset_updater_servers.is_empty() {
+        let targets: Vec<&AssetUpdaterInfo> = self
+            .asset_updater_servers
+            .iter()
+            .filter(|info| info.accepts(self.region))
+            .collect();
+        if targets.is_empty() {
             return;
         }
         info!(
-            "{} Calling {} asset updater server(s)...",
+            "{} Calling {} of {} asset updater server(s)...",
             self.region.as_str().to_uppercase(),
+            targets.len(),
             self.asset_updater_servers.len()
         );
         let payload = AssetUpdaterPayload {
@@ -644,9 +657,8 @@ treating difference as an update",
             asset_hash: asset_hash.to_string(),
             dry_run: false,
         };
-        let futures: Vec<_> = self
-            .asset_updater_servers
-            .iter()
+        let futures: Vec<_> = targets
+            .into_iter()
             .map(|info| self.call_asset_updater(info, &payload))
             .collect();
         futures::future::join_all(futures).await;
@@ -675,6 +687,17 @@ treating difference as an update",
             match result {
                 Ok(resp) => {
                     if resp.status().as_u16() == 409 {
+                        let body = resp.text().await.unwrap_or_default();
+                        if is_region_disabled_conflict(&body) {
+                            warn!(
+                                "{} Asset updater {} does not accept this region (409: {}); skipping. \
+                                 Set `regions` on this asset_updater_servers entry to avoid the call",
+                                self.region.as_str().to_uppercase(),
+                                endpoint,
+                                body.chars().take(200).collect::<String>()
+                            );
+                            return;
+                        }
                         if conflict_retries >= ASSET_UPDATER_MAX_CONFLICT_RETRIES {
                             warn!(
                                 "{} Asset updater call to {} kept returning 409; giving up after {} retries",
@@ -1601,6 +1624,7 @@ mod tests {
                 vec![AssetUpdaterInfo {
                     url,
                     authorization: "token".to_string(),
+                    regions: Vec::new(),
                 }],
             )
             .await;
@@ -1617,10 +1641,140 @@ mod tests {
             vec![AssetUpdaterInfo {
                 url: "http://127.0.0.1:1".to_string(),
                 authorization: String::new(),
+                regions: Vec::new(),
             }],
         )
         .await;
         updater.call_all_asset_updaters("asset", "hash").await;
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    async fn spawn_counting_server(
+        status: u16,
+        body: &'static str,
+    ) -> (
+        String,
+        Arc<std::sync::atomic::AtomicUsize>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = hits.clone();
+        let app = Router::new().fallback(move || {
+            let counter = counter.clone();
+            async move {
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Response::builder()
+                    .status(status)
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap()
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (format!("http://{address}"), hits, task)
+    }
+
+    #[test]
+    fn asset_updater_regions_filter_and_deserialize() {
+        let all: AssetUpdaterInfo = serde_yaml::from_str("url: http://a").unwrap();
+        assert!(all.regions.is_empty());
+        assert!(all.accepts(ServerRegion::Cn));
+        let some: AssetUpdaterInfo =
+            serde_yaml::from_str("url: http://a\nregions: [jp, en, cn]").unwrap();
+        assert_eq!(
+            some.regions,
+            vec![ServerRegion::Jp, ServerRegion::En, ServerRegion::Cn]
+        );
+        assert!(some.accepts(ServerRegion::Cn));
+        assert!(!some.accepts(ServerRegion::Tw));
+        assert!(serde_yaml::from_str::<AssetUpdaterInfo>("url: x\nregions: [xx]").is_err());
+    }
+
+    #[test]
+    fn matches_only_region_disabled_conflicts() {
+        assert!(is_region_disabled_conflict(
+            r#"{"error":"region `cn` is disabled"}"#
+        ));
+        assert!(is_region_disabled_conflict("Region `tw` Is Disabled"));
+        assert!(!is_region_disabled_conflict(
+            r#"{"error":"an update job is already running"}"#
+        ));
+        assert!(!is_region_disabled_conflict(""));
+    }
+
+    #[tokio::test]
+    async fn skips_asset_updaters_for_other_regions_and_disabled_409() {
+        let (jp_only, jp_hits, jp_task) = spawn_counting_server(204, "").await;
+        let (disabled, disabled_hits, disabled_task) =
+            spawn_counting_server(409, r#"{"error":"region `cn` is disabled"}"#).await;
+        let (open, open_hits, open_task) = spawn_counting_server(200, "{}").await;
+        let root = temp_dir();
+        let updater = make_updater(
+            ServerRegion::Cn,
+            "http://127.0.0.1:1",
+            &root,
+            vec![
+                AssetUpdaterInfo {
+                    url: jp_only,
+                    authorization: String::new(),
+                    regions: vec![ServerRegion::Jp],
+                },
+                AssetUpdaterInfo {
+                    url: disabled,
+                    authorization: String::new(),
+                    regions: Vec::new(),
+                },
+                AssetUpdaterInfo {
+                    url: open,
+                    authorization: String::new(),
+                    regions: vec![ServerRegion::Cn, ServerRegion::Tw],
+                },
+            ],
+        )
+        .await;
+        // A retried 409 would sleep 60 s; the timeout proves it was not retried.
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            updater.call_all_asset_updaters("asset", "hash"),
+        )
+        .await
+        .expect("disabled-region 409 must not be retried");
+        assert_eq!(jp_hits.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(disabled_hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(open_hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+        jp_task.abort();
+        disabled_task.abort();
+        open_task.abort();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn retries_busy_409() {
+        let (busy, hits, task) =
+            spawn_counting_server(409, r#"{"error":"job already running"}"#).await;
+        let root = temp_dir();
+        let updater = make_updater(
+            ServerRegion::Jp,
+            "http://127.0.0.1:1",
+            &root,
+            vec![AssetUpdaterInfo {
+                url: busy,
+                authorization: String::new(),
+                regions: Vec::new(),
+            }],
+        )
+        .await;
+        // A busy 409 goes into the 60 s retry sleep, so the call must still be pending.
+        assert!(tokio::time::timeout(
+            Duration::from_secs(2),
+            updater.call_all_asset_updaters("asset", "hash"),
+        )
+        .await
+        .is_err());
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+        task.abort();
         std::fs::remove_dir_all(root).unwrap();
     }
 
