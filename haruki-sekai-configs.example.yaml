@@ -111,6 +111,8 @@ ingest: # registry-driven ingest (`master_ingest` binary); absent = role off. Ig
       min_ratio: 0.5 # a changed file must keep at least this share of its previous rows
       max_connections: 4 # raised to 2 x parse_concurrency + 1 if lower
       create_tables: false # create missing typed tables from the schema
+      # statement_timeout_secs: 600 # optional session guards (unset: server setting)
+      # idle_in_transaction_timeout_secs: 600
       allow_shrink: [] # - content_hash: "<hex>"  tables: [musics]
 
 # App identity (appVersion/appHash) is no longer polled. Push it to this node

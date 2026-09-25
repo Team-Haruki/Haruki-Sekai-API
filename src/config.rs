@@ -614,6 +614,16 @@ pub struct IngestTargetConfig {
     pub create_tables: bool,
     #[serde(default)]
     pub allow_shrink: Vec<AllowShrinkConfig>,
+    /// `statement_timeout` of the target's ingest sessions, in seconds
+    /// (unset or 0: the server's setting).
+    #[serde(default)]
+    pub statement_timeout_secs: Option<u64>,
+    /// `idle_in_transaction_session_timeout` of the target's ingest
+    /// sessions, in seconds (unset or 0: the server's setting). A file's
+    /// transaction waits for the file to be fetched and parsed, and a
+    /// one-transaction run for every file, so keep it generous.
+    #[serde(default)]
+    pub idle_in_transaction_timeout_secs: Option<u64>,
 }
 
 fn default_ingest_listen() -> String {
