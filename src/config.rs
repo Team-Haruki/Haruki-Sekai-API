@@ -525,6 +525,134 @@ impl Default for RegistryConfig {
     }
 }
 
+/// Settings for the `master_ingest` binary: registry-driven ingest of master
+/// data into one or more databases (see
+/// `docs/master-registry-storage-and-ingest.md`, part B). Reads only the
+/// registry's HTTP surface; requires the registry to run `blob_store: pg`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct IngestConfig {
+    /// Base URL of the master registry, e.g. `http://127.0.0.1:9998`.
+    pub registry_url: String,
+    /// Listen address for the webhook, allow-shrink and health endpoints.
+    #[serde(default = "default_ingest_listen")]
+    pub listen: String,
+    /// Bearer token required on `POST /internal/master-updated` (the
+    /// registry's `subscribers[].token`) and on allow-shrink. Empty disables
+    /// both endpoints (404); reconciliation still runs.
+    #[serde(default)]
+    pub webhook_token: String,
+    /// 6-field cron: compare every target with the registry's `current`.
+    /// Empty disables the timer (startup and webhooks still reconcile).
+    #[serde(default = "default_reconcile_cron")]
+    pub reconcile_cron: String,
+    /// Regions reconciled (files parsed) at once: the memory knob.
+    #[serde(default = "default_parse_concurrency")]
+    pub parse_concurrency: usize,
+    /// A target run that would rewrite more than this many tables is staged
+    /// per table (first full ingest) instead of one region transaction.
+    #[serde(default = "default_stage_tables")]
+    pub stage_tables: usize,
+    /// Same, by the total size of the changed JSON files in bytes.
+    #[serde(default = "default_stage_bytes")]
+    pub stage_bytes: u64,
+    #[serde(default)]
+    pub targets: Vec<IngestTargetConfig>,
+}
+
+/// `tables:` of an ingest target: `all` or an allow-list.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(untagged)]
+pub enum TableSelection {
+    /// The literal `all` (any other string is rejected at startup).
+    Keyword(String),
+    List(Vec<String>),
+}
+
+impl Default for TableSelection {
+    fn default() -> Self {
+        TableSelection::Keyword("all".to_string())
+    }
+}
+
+/// A table-shrink override: `tables` of `content_hash` may lose more rows
+/// than `min_ratio` allows.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AllowShrinkConfig {
+    pub content_hash: String,
+    #[serde(default)]
+    pub tables: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct IngestTargetConfig {
+    /// Key of this target's state rows in its database; never reuse or rename.
+    pub name: String,
+    pub dsn: String,
+    #[serde(default = "default_ingest_regions")]
+    pub regions: Vec<ServerRegion>,
+    /// `all` or a list of table names / file stems.
+    #[serde(default)]
+    pub tables: TableSelection,
+    /// Typed column map (`schema_info.json` layout).
+    #[serde(default = "default_ingest_schema")]
+    pub schema: String,
+    /// Keep every original row in `master_raw` (unknown keys included).
+    #[serde(default)]
+    pub raw: bool,
+    /// Tables that must hold rows for the region after every run and are
+    /// never cleared as removed. `default` is the prune protect list.
+    #[serde(default = "default_required_tables")]
+    pub required_tables: TableSelection,
+    /// A changed file must keep at least this fraction of its previous rows.
+    #[serde(default = "default_ingest_min_ratio")]
+    pub min_ratio: f64,
+    #[serde(default = "default_ingest_max_connections")]
+    pub max_connections: u32,
+    /// Create missing typed tables from the schema (otherwise the target
+    /// fails its check).
+    #[serde(default)]
+    pub create_tables: bool,
+    #[serde(default)]
+    pub allow_shrink: Vec<AllowShrinkConfig>,
+}
+
+fn default_ingest_listen() -> String {
+    "127.0.0.1:9997".to_string()
+}
+fn default_reconcile_cron() -> String {
+    "0 */5 * * * *".to_string()
+}
+fn default_parse_concurrency() -> usize {
+    2
+}
+fn default_stage_tables() -> usize {
+    25
+}
+fn default_stage_bytes() -> u64 {
+    50 * 1024 * 1024
+}
+fn default_ingest_regions() -> Vec<ServerRegion> {
+    vec![
+        ServerRegion::Jp,
+        ServerRegion::En,
+        ServerRegion::Tw,
+        ServerRegion::Kr,
+        ServerRegion::Cn,
+    ]
+}
+fn default_ingest_schema() -> String {
+    "schema_info.json".to_string()
+}
+fn default_required_tables() -> TableSelection {
+    TableSelection::Keyword("default".to_string())
+}
+fn default_ingest_min_ratio() -> f64 {
+    0.5
+}
+fn default_ingest_max_connections() -> u32 {
+    4
+}
+
 /// Deprecated and ignored: kept only so existing config files still parse.
 #[derive(Debug, Clone, Deserialize)]
 pub struct AppHashSource {
@@ -566,6 +694,9 @@ pub struct Config {
     pub servers: HashMap<ServerRegion, ServerConfig>,
     #[serde(default)]
     pub registry: RegistryConfig,
+    /// The `master_ingest` role; absent unless that binary runs on this file.
+    #[serde(default)]
+    pub ingest: Option<IngestConfig>,
 }
 
 impl Default for RedisConfig {
@@ -714,6 +845,56 @@ servers:
         assert_eq!(config.git.username, "");
         assert!(!config.git.sign_commits);
         assert!(config.servers.is_empty());
+        assert!(config.ingest.is_none());
+    }
+
+    #[test]
+    fn ingest_section_defaults() {
+        let config: Config = serde_yaml::from_str(
+            r#"
+backend: {}
+ingest:
+  registry_url: "http://127.0.0.1:9998"
+  targets:
+    - name: main
+      dsn: "postgres://x/y"
+    - name: subset
+      dsn: "postgres://x/z"
+      regions: [jp]
+      tables: [cards, events]
+      required_tables: [cards]
+      raw: true
+      allow_shrink:
+        - content_hash: "abc"
+          tables: [cards]
+"#,
+        )
+        .unwrap();
+        let ingest = config.ingest.unwrap();
+        assert_eq!(ingest.listen, "127.0.0.1:9997");
+        assert!(ingest.webhook_token.is_empty());
+        assert_eq!(ingest.reconcile_cron, "0 */5 * * * *");
+        assert_eq!(ingest.parse_concurrency, 2);
+        assert_eq!(ingest.stage_tables, 25);
+        assert_eq!(ingest.stage_bytes, 50 * 1024 * 1024);
+        let main = &ingest.targets[0];
+        assert_eq!(main.regions.len(), 5);
+        assert_eq!(main.tables, TableSelection::Keyword("all".into()));
+        assert_eq!(
+            main.required_tables,
+            TableSelection::Keyword("default".into())
+        );
+        assert_eq!(main.schema, "schema_info.json");
+        assert!(!main.raw && !main.create_tables);
+        assert_eq!(main.min_ratio, 0.5);
+        assert_eq!(main.max_connections, 4);
+        let subset = &ingest.targets[1];
+        assert_eq!(subset.regions, vec![ServerRegion::Jp]);
+        assert_eq!(
+            subset.tables,
+            TableSelection::List(vec!["cards".into(), "events".into()])
+        );
+        assert_eq!(subset.allow_shrink[0].tables, vec!["cards".to_string()]);
     }
 
     #[test]
