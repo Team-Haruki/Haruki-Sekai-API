@@ -1423,6 +1423,24 @@
   {
     "columns": [
       "game_id:int64",
+      "mysekai_character_talk_id:int64",
+      "mysekai_character_talk_tweet_id:int64",
+      "mysekai_character_talk_fixture_timeline_group_id:int64",
+      "mysekai_character_talk_free_timeline_group_id:int64",
+      "mysekai_character_talk_fixture_together_communication_id:int64",
+      "server_region:string"
+    ],
+    "name": "mysekaicharactertalkpreactions",
+    "unique_keys": [
+      [
+        "id",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "game_id:int64",
       "mysekai_game_character_unit_group_id:int64",
       "mysekai_character_talk_condition_group_id:int64",
       "mysekai_site_group_id:int64",
@@ -2027,6 +2045,53 @@
       "server_region:string"
     ],
     "name": "mysekaisitelevels",
+    "unique_keys": [
+      [
+        "id",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "game_id:int64",
+      "mysekai_site_type:string",
+      "mysekai_site_category:string",
+      "assetbundle_name:string",
+      "name:string",
+      "position_x:int64",
+      "position_y:int64",
+      "position_z:int64",
+      "is_base:bool",
+      "is_enabled_for_multi:bool",
+      "preset_group_id:int64",
+      "server_region:string"
+    ],
+    "name": "mysekaisites",
+    "unique_keys": [
+      [
+        "id",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "game_id:int64",
+      "seq:int64",
+      "mysekai_tool_type:string",
+      "tool_level:int64",
+      "name:string",
+      "pronunciation:string",
+      "description:string",
+      "assetbundle_name:string",
+      "sprite_name:string",
+      "attack_power:int64",
+      "max_durability:int64",
+      "cool_time_micro_seconds:float64",
+      "server_region:string"
+    ],
+    "name": "mysekaitools",
     "unique_keys": [
       [
         "id",

@@ -1,0 +1,30 @@
+[
+  {
+    "id": 5,
+    "seq": 5,
+    "mysekaiToolType": "pickaxe",
+    "toolLevel": 5,
+    "name": "石掘りマシン",
+    "pronunciation": "いしほりましん",
+    "description": "電動で動く削岩機で岩を砕くのに使用する。\nすべての石掘りツールの中で最高性能を誇る。\n使用可能回数：400回",
+    "assetbundleName": "pickax0005",
+    "spriteName": "pickax0005",
+    "attackPower": 40,
+    "maxDurability": 400,
+    "coolTimeMicroSeconds": 500.0
+  },
+  {
+    "id": 10,
+    "seq": 5,
+    "mysekaiToolType": "axe",
+    "toolLevel": 5,
+    "name": "チェーンソー",
+    "pronunciation": "ちぇーんそー",
+    "description": "チェーンソーで木を切るのに使用する。\nすべての木こりツールの中で最高性能を誇る。\n使用可能回数：400回",
+    "assetbundleName": "ax0005",
+    "spriteName": "ax0005",
+    "attackPower": 40,
+    "maxDurability": 400,
+    "coolTimeMicroSeconds": 500.0
+  }
+]

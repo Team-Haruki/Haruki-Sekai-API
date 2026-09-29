@@ -1564,6 +1564,89 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ingests_mysekai_followups_without_losing_region_or_optional_data() {
+        use sea_orm::Statement;
+        let mut opt = ConnectOptions::new("sqlite::memory:".to_string());
+        opt.max_connections(1);
+        let db = Database::connect(opt).await.unwrap();
+        let schema =
+            MasterSchema::parse(&std::fs::read_to_string("schema_info.json").unwrap()).unwrap();
+        let files = [
+            (
+                "mysekaiTools",
+                include_str!("testdata/ingest_fixture/mysekaiTools.json"),
+            ),
+            (
+                "mysekaiSites",
+                include_str!("testdata/ingest_fixture/mysekaiSites.json"),
+            ),
+            (
+                "mysekaiCharacterTalkPreActions",
+                include_str!("testdata/ingest_fixture/mysekaiCharacterTalkPreActions.json"),
+            ),
+        ];
+        let root = std::env::temp_dir().join(format!("haruki_mysekai_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        for (stem, body) in files {
+            let table = schema.resolve_table_name(stem).unwrap();
+            let (cols, _) = schema.table(&table).unwrap();
+            let columns = cols.keys().cloned().collect::<Vec<_>>().join(", ");
+            db.execute_unprepared(&format!("CREATE TABLE {table} ({columns})"))
+                .await
+                .unwrap();
+            std::fs::write(root.join(format!("{stem}.json")), body).unwrap();
+        }
+        let engine = IngestionEngine::new(db.clone()).await.unwrap();
+        // Identical IDs in different regions must coexist; re-ingest replaces only its region.
+        for region in ["en", "jp", "jp"] {
+            engine
+                .ingest_master_data(root.to_str().unwrap(), region)
+                .await
+                .unwrap();
+        }
+        let row = db.query_one_raw(Statement::from_string(db.get_database_backend(),
+            "SELECT COUNT(*) AS n, MIN(cool_time_micro_seconds) AS cool, MIN(assetbundle_name) AS bundle FROM mysekaitools WHERE game_id = 5"
+        )).await.unwrap().unwrap();
+        assert_eq!(row.try_get::<i64>("", "n").unwrap(), 2);
+        assert_eq!(row.try_get::<f64>("", "cool").unwrap(), 500.0);
+        assert_eq!(row.try_get::<String>("", "bundle").unwrap(), "pickax0005");
+        let row = db.query_one_raw(Statement::from_string(db.get_database_backend(),
+            "SELECT is_enabled_for_multi, preset_group_id FROM mysekaisites WHERE game_id = 5 AND server_region = 'jp'"
+        )).await.unwrap().unwrap();
+        assert!(!row.try_get::<bool>("", "is_enabled_for_multi").unwrap());
+        assert_eq!(
+            row.try_get::<Option<i64>>("", "preset_group_id").unwrap(),
+            None
+        );
+        std::fs::write(
+            root.join("mysekaiCharacterTalkPreActions.json"),
+            r#"[{"id":1,"mysekaiCharacterTalkFreeTimelineGroupId":42}]"#,
+        )
+        .unwrap();
+        engine
+            .ingest_master_data(root.to_str().unwrap(), "jp")
+            .await
+            .unwrap();
+        let rows = db.query_all_raw(Statement::from_string(db.get_database_backend(),
+            "SELECT server_region, mysekai_character_talk_free_timeline_group_id AS timeline FROM mysekaicharactertalkpreactions ORDER BY server_region"
+        )).await.unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(
+            rows[0].try_get::<String>("", "server_region").unwrap(),
+            "en"
+        );
+        assert_eq!(
+            rows[0].try_get::<Option<i64>>("", "timeline").unwrap(),
+            None
+        );
+        assert_eq!(
+            rows[1].try_get::<Option<i64>>("", "timeline").unwrap(),
+            Some(42)
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
     async fn ingests_jp_700_tables_columns_and_virtual_items() {
         use sea_orm::Statement;
         let mut opt = ConnectOptions::new("sqlite::memory:".to_string());

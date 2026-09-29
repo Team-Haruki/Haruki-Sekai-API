@@ -1,0 +1,27 @@
+[
+  {
+    "id": 1,
+    "mysekaiSiteType": "home_site",
+    "mysekaiSiteCategory": "housing_home",
+    "assetbundleName": "home",
+    "name": "マイホーム",
+    "positionX": 0,
+    "positionY": 0,
+    "positionZ": 0,
+    "isBase": true,
+    "isEnabledForMulti": true,
+    "presetGroupId": 1
+  },
+  {
+    "id": 5,
+    "mysekaiSiteType": "grassland",
+    "mysekaiSiteCategory": "harvest",
+    "assetbundleName": "grasslands",
+    "name": "さいしょの原っぱ",
+    "positionX": 600,
+    "positionY": 0,
+    "positionZ": 0,
+    "isBase": true,
+    "isEnabledForMulti": false
+  }
+]

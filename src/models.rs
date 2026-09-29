@@ -70,6 +70,7 @@ pub mod mysekaicharactertalkconditiongroups;
 pub mod mysekaicharactertalkconditions;
 pub mod mysekaicharactertalkfixturecommonmysekaifixturegroups;
 pub mod mysekaicharactertalkfixturecommons;
+pub mod mysekaicharactertalkpreactions;
 pub mod mysekaicharactertalks;
 pub mod mysekaicustomfixtures;
 pub mod mysekaifixturegamecharactergroupperformancebonuses;
@@ -104,6 +105,8 @@ pub mod mysekaisitebulkharvesttargets;
 pub mod mysekaisiteharvestfixtures;
 pub mod mysekaisitelayouts;
 pub mod mysekaisitelevels;
+pub mod mysekaisites;
+pub mod mysekaitools;
 pub mod ngwords;
 pub mod omikujis;
 pub mod outsidecharacters;
@@ -129,6 +132,39 @@ pub mod worldbloomsupportdeckuniteventlimitedbonuses;
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn mysekai_followups_preserve_names_icons_and_optional_fields() {
+        let tools: super::mysekaitools::Mysekaitool =
+            serde_json::from_str(include_str!("testdata/ingest_fixture/mysekaiTools.json"))
+                .unwrap();
+        assert_eq!(tools[0].name.as_deref(), Some("石掘りマシン"));
+        assert_eq!(tools[0].assetbundle_name.as_deref(), Some("pickax0005"));
+        assert_eq!(tools[1].sprite_name.as_deref(), Some("ax0005"));
+        assert_eq!(tools[0].cool_time_micro_seconds, Some(500.0));
+        let sites: super::mysekaisites::Mysekaisite =
+            serde_json::from_str(include_str!("testdata/ingest_fixture/mysekaiSites.json"))
+                .unwrap();
+        assert_eq!(sites[0].is_enabled_for_multi, Some(true));
+        assert_eq!(sites[1].preset_group_id, None);
+        let actions: super::mysekaicharactertalkpreactions::Mysekaicharactertalkpreaction =
+            serde_json::from_str(include_str!(
+                "testdata/ingest_fixture/mysekaiCharacterTalkPreActions.json"
+            ))
+            .unwrap();
+        assert_eq!(
+            actions[0].mysekai_character_talk_free_timeline_group_id,
+            None
+        );
+        // The client declares this field, but current master rows omit it.
+        let action: super::mysekaicharactertalkpreactions::MysekaicharactertalkpreactionElement =
+            serde_json::from_str(r#"{"id":1,"mysekaiCharacterTalkFreeTimelineGroupId":42}"#)
+                .unwrap();
+        assert_eq!(
+            action.mysekai_character_talk_free_timeline_group_id,
+            Some(42)
+        );
+    }
+
     use serde::de::DeserializeOwned;
 
     fn parse<T: DeserializeOwned>(json: &str) -> Vec<T> {
