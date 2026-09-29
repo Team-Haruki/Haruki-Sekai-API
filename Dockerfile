@@ -1,14 +1,21 @@
-FROM rust:1.98-alpine AS builder
-RUN apk add --no-cache musl-dev
+FROM rust:1.98-alpine AS chef
+RUN apk add --no-cache musl-dev \
+    && cargo install cargo-chef --version 0.1.78 --locked
 WORKDIR /app
-COPY . .
-ARG VERSION=dev
-RUN if [ "$VERSION" != "dev" ]; then \
-    CLEAN_VERSION=$(echo "$VERSION" | sed 's/^v//'); \
-    sed -i "s/^version = \".*\"/version = \"${CLEAN_VERSION}\"/" Cargo.toml; \
-    echo "Building version: ${CLEAN_VERSION}"; \
-    fi
-RUN cargo build --release --locked
+
+FROM chef AS planner
+COPY Cargo.toml Cargo.lock ./
+COPY src ./src
+RUN cargo chef prepare --recipe-path recipe.json
+
+FROM chef AS builder
+COPY --from=planner /app/recipe.json ./recipe.json
+RUN cargo chef cook --release --locked --recipe-path recipe.json \
+    --bin haruki-sekai-api --bin master_registry --bin master_ingest --bin run_ingest
+COPY Cargo.toml Cargo.lock ./
+COPY src ./src
+RUN cargo build --release --locked \
+    --bin haruki-sekai-api --bin master_registry --bin master_ingest --bin run_ingest
 
 FROM alpine:3.24
 RUN apk --no-cache add \
@@ -25,7 +32,7 @@ COPY --chown=haruki:haruki --from=builder /app/target/release/run_ingest .
 COPY --chown=haruki:haruki --from=builder /app/target/release/master_registry .
 COPY --chown=haruki:haruki --from=builder /app/target/release/master_ingest .
 COPY --chown=haruki:haruki schema_info.json ./schema_info.json
-COPY --chown=haruki:haruki Data ./Data
+COPY --chown=haruki:haruki Data/structures ./Data/structures
 RUN mkdir -p logs && chown haruki:haruki logs
 EXPOSE 9999 9998 9997
 ENV TZ=Asia/Shanghai

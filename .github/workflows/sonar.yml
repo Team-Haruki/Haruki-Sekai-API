@@ -55,12 +55,19 @@ jobs:
           tool: cargo-llvm-cov@0.9.0
           fallback: none
 
+      - name: Cache instrumented Rust dependencies
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          shared-key: coverage-linux
+          workspaces: . -> target/llvm-cov-target
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
       - name: Generate coverage report
         env:
           HARUKI_TEST_REGISTRY_DSN: postgres://haruki:sekai@localhost:5432/registry_test
           HARUKI_TEST_INGEST_DSN: postgres://haruki:sekai@localhost:5432/registry_test
         run: |
-          cargo llvm-cov --locked --all-targets --no-report
+          cargo llvm-cov --locked --lib --no-report
           # The PostgreSQL-gated tests; one at a time (the registry ones share tables).
           cargo llvm-cov --locked --lib --no-report -- --ignored --test-threads=1 ingest::tests postgres
           cargo llvm-cov report --lcov --output-path lcov.info
@@ -68,7 +75,7 @@ jobs:
       - name: Test model generator and collect Python coverage
         run: |
           python3 -m pip install --only-binary :all: coverage==7.6.1
-          python3 -m coverage run --branch --include='*/tools/generate_mysekai_followups.py' -m unittest discover -s tools -p 'test_*.py'
+          python3 -m coverage run --branch --include='*/tools/generate_mysekai_followups.py,*/tools/ci_reuse.py' -m unittest discover -s tools -p 'test_*.py'
           python3 -m coverage xml -o python-coverage.xml
 
       - name: SonarQube scan
