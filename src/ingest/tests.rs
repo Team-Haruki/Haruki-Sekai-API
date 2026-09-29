@@ -1217,6 +1217,35 @@ fn plan_uses_the_matching_unique_index_and_hashes_the_mapping() {
 }
 
 #[test]
+fn plan_keys_areaitemlevels_on_target_unit() {
+    // JP 7.0.0.13 repeats (areaItemId, level) per targetUnit; the old index no
+    // longer matches the schema key, so a target still on it falls back to
+    // delete + insert instead of a colliding upsert.
+    let target = lazy_target("main");
+    let (cols, _) = target.schema.table("areaitemlevels").unwrap();
+    let mut shape = TableShape::default();
+    for col in cols.keys() {
+        shape.columns.insert(col.clone(), "text".into());
+    }
+    shape.unique_sets.push(
+        ["area_item_id", "level", "server_region"]
+            .map(String::from)
+            .into(),
+    );
+    assert!(target.plan("areaitemlevels", &shape).unwrap().key.is_none());
+    shape.unique_sets.push(
+        ["area_item_id", "level", "target_unit", "server_region"]
+            .map(String::from)
+            .into(),
+    );
+    let plan = target.plan("areaitemlevels", &shape).unwrap();
+    assert_eq!(
+        plan.key.as_deref(),
+        Some(&["area_item_id", "level", "target_unit"].map(String::from)[..])
+    );
+}
+
+#[test]
 fn target_table_lists_resolve_and_validate() {
     let schema =
         || MasterSchema::parse(&std::fs::read_to_string("schema_info.json").unwrap()).unwrap();
