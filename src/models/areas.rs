@@ -47,6 +47,12 @@ pub struct AreaElement {
     pub end_at: Option<i64>,
 
     pub release_condition_id2: Option<i64>,
+
+    pub name2: Option<String>,
+
+    pub evolve_release_condition_id1: Option<i64>,
+
+    pub evolve_release_condition_id2: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

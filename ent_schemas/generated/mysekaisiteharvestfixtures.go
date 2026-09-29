@@ -21,6 +21,7 @@ func (Mysekaisiteharvestfixture) Fields() []ent.Field {
 		field.Int64("last_attack_stamina").Optional(),
 		field.String("mysekai_site_harvest_fixture_rarity_type").Optional(),
 		field.String("assetbundle_name").Optional(),
+		field.Int64("mysekai_site_bulk_harvest_target_id").Optional(),
 		field.String("server_region"),
 	}
 }

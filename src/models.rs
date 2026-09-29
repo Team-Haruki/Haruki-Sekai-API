@@ -48,8 +48,10 @@ pub mod gachas;
 pub mod gachatickets;
 pub mod gamecharacters;
 pub mod gamecharacterunits;
+pub mod honorbackgrounds;
 pub mod honorgroups;
 pub mod honors;
+pub mod honorwords;
 pub mod levels;
 pub mod limitedtimemusics;
 pub mod masterlessons;
@@ -62,6 +64,8 @@ pub mod musictags;
 pub mod musicvocals;
 pub mod mysekaiblueprintmysekaimaterialcosts;
 pub mod mysekaiblueprints;
+pub mod mysekaiblueprinttermmysekaimaterialcosts;
+pub mod mysekaiblueprintterms;
 pub mod mysekaicharactertalkconditiongroups;
 pub mod mysekaicharactertalkconditions;
 pub mod mysekaicharactertalkfixturecommonmysekaifixturegroups;
@@ -92,12 +96,18 @@ pub mod mysekaimusicrecords;
 pub mod mysekaiphenomenabackgroundcolors;
 pub mod mysekaiphenomenas;
 pub mod mysekairankreleases;
+pub mod mysekaishopcosts;
+pub mod mysekaishops;
+pub mod mysekaisitebulkharvests;
+pub mod mysekaisitebulkharvesttargetgroups;
+pub mod mysekaisitebulkharvesttargets;
 pub mod mysekaisiteharvestfixtures;
 pub mod mysekaisitelayouts;
 pub mod mysekaisitelevels;
 pub mod ngwords;
 pub mod omikujis;
 pub mod outsidecharacters;
+pub mod panelmissioncampaigns;
 pub mod playerframegroups;
 pub mod playerframes;
 pub mod practicetickets;
@@ -108,6 +118,8 @@ pub mod skillpracticetickets;
 pub mod skills;
 pub mod stamps;
 pub mod unitstoryepisodegroups;
+pub mod virtualitems;
+pub mod virtuallivegroups;
 pub mod virtuallives;
 pub mod worldbloomchapterrankingrewardranges;
 pub mod worldbloomdifferentattributebonuses;
@@ -439,5 +451,216 @@ mod tests {
                 .skill_level,
             Some(1)
         );
+    }
+
+    #[test]
+    fn jp_700_new_tables_parse_real_rows() {
+        use super::honorbackgrounds::HonorbackgroundElement;
+        use super::honorwords::HonorwordElement;
+        use super::mysekaiblueprinttermmysekaimaterialcosts::MysekaiblueprinttermmysekaimaterialcostElement;
+        use super::mysekaiblueprintterms::MysekaiblueprinttermElement;
+        use super::mysekaishopcosts::MysekaishopcostElement;
+        use super::mysekaishops::MysekaishopElement;
+        use super::mysekaisitebulkharvests::MysekaisitebulkharvestElement;
+        use super::mysekaisitebulkharvesttargetgroups::MysekaisitebulkharvesttargetgroupElement;
+        use super::mysekaisitebulkharvesttargets::MysekaisitebulkharvesttargetElement;
+        use super::virtualitems::VirtualitemElement;
+        use super::virtuallivegroups::VirtuallivegroupElement;
+        // Rows from JP 7.0.0.13.
+        let rows: Vec<HonorbackgroundElement> = parse(
+            r#"[{"id":10101,"seq":1,"honorGroupId":1,"assetbundleName":"honor_bg_style_01_01",
+                 "name":"一歌（スタイル1）","description":"d"}]"#,
+        );
+        assert_eq!(rows[0].honor_group_id, Some(1));
+        let rows: Vec<HonorwordElement> = parse(
+            r#"[{"id":10101,"seq":1,"honorGroupId":1,"assetbundleName":"honor_word_01_01",
+                 "name":"一歌ファン","description":"d"}]"#,
+        );
+        assert_eq!(
+            rows[0].assetbundle_name.as_deref(),
+            Some("honor_word_01_01")
+        );
+        let rows: Vec<MysekaishopElement> = parse(
+            r#"[{"id":1,"mysekaiShopType":"material","seq":1,"resourceBoxId":1,
+                 "mysekaiShopExchangeLimitType":"limited_per_mysekai_colorful_pass",
+                 "mysekaiShopExchangeLimitValue":3},
+                {"id":6,"mysekaiShopType":"tool","seq":6,"resourceBoxId":6,
+                 "mysekaiShopExchangeLimitType":"none"}]"#,
+        );
+        assert_eq!(rows[0].mysekai_shop_exchange_limit_value, Some(3));
+        assert_eq!(rows[1].mysekai_shop_exchange_limit_value, None);
+        // resourceId is a client key that jewel costs omit.
+        let rows: Vec<MysekaishopcostElement> =
+            parse(r#"[{"id":1,"mysekaiShopId":1,"seq":1,"resourceType":"jewel","quantity":500}]"#);
+        assert_eq!(rows[0].resource_type.as_deref(), Some("jewel"));
+        assert_eq!(rows[0].resource_id, None);
+        let rows: Vec<MysekaisitebulkharvestElement> =
+            parse(r#"[{"id":1,"mysekaiSiteId":5,"mysekaiSiteBulkHarvestTargetId":1}]"#);
+        assert_eq!(rows[0].mysekai_site_bulk_harvest_target_id, Some(1));
+        let rows: Vec<MysekaisitebulkharvesttargetElement> =
+            parse(r#"[{"id":1,"mysekaiSiteBulkHarvestTargetGroupId":1,"seq":1,"name":"広葉樹"}]"#);
+        assert_eq!(rows[0].mysekai_site_bulk_harvest_target_group_id, Some(1));
+        let rows: Vec<MysekaisitebulkharvesttargetgroupElement> = parse(
+            r#"[{"id":1,"seq":1,"name":"木","requiredToolId":10},{"id":4,"seq":4,"name":"その他"}]"#,
+        );
+        assert_eq!(rows[0].required_tool_id, Some(10));
+        assert_eq!(rows[1].required_tool_id, None);
+        let rows: Vec<MysekaiblueprinttermmysekaimaterialcostElement> =
+            parse(r#"[{"id":1,"groupId":26844,"mysekaiMaterialId":103,"seq":1,"quantity":3}]"#);
+        assert_eq!(rows[0].group_id, Some(26844));
+        let rows: Vec<MysekaiblueprinttermElement> = parse(
+            r#"[{"id":136,"mysekaiBlueprintId":844,"startAt":1790866800000,"endAt":1791385199000,
+                 "mysekaiBlueprintTermTabType":"birthday_anniversary",
+                 "mysekaiBlueprintTermMysekaiMaterialCostGroupId":26844},
+                {"endAt":1791388799000,"id":1,"mysekaiBlueprintId":844,"startAt":1790870400000}]"#,
+        );
+        assert_eq!(
+            rows[0].mysekai_blueprint_term_tab_type.as_deref(),
+            Some("birthday_anniversary")
+        );
+        assert_eq!(
+            rows[0].mysekai_blueprint_term_mysekai_material_cost_group_id,
+            Some(26844)
+        );
+        assert_eq!(rows[1].mysekai_blueprint_term_tab_type, None);
+        let rows: Vec<VirtuallivegroupElement> = parse(
+            r#"[{"id":2,"name":"6th Anniversary スペシャルソロライブ",
+                 "virtualLiveGroupType":"solo_virtual_live",
+                 "assetbundleName":"6th_anniversary_soro_live","startAt":1790694000000,
+                 "endAt":1792767599000}]"#,
+        );
+        assert_eq!(
+            rows[0].virtual_live_group_type.as_deref(),
+            Some("solo_virtual_live")
+        );
+        let rows: Vec<VirtualitemElement> = parse(
+            r#"[{"id":9,"virtualItemCategory":"spread","virtualItemType":"permanent","seq":110,
+                 "priority":100,"name":"三つ葉のクローバー","assetbundleName":"unit_clover_morejump",
+                 "costVirtualCoin":300,"costJewel":100,
+                 "effectAssetbundleName":"unit_clover_morejump",
+                 "effectExpressionType":"throw_effect","unit":"idol"}]"#,
+        );
+        assert_eq!(rows[0].virtual_item_type.as_deref(), Some("permanent"));
+        assert_eq!(rows[0].cost_virtual_coin, Some(300));
+    }
+
+    #[test]
+    fn jp_700_new_columns_and_enum_values_parse_real_rows() {
+        use super::areaitemlevels::{AreaitemlevelElement, TargetUnit};
+        use super::areas::AreaElement;
+        use super::bondshonors::{BondshonorElement, HonorRarity};
+        use super::charactermissionv2s::{CharacterMissionType, Charactermissionv2Element};
+        use super::eventstoryunits::{EventstoryunitElement, Unit};
+        use super::honorgroups::HonorgroupElement;
+        use super::mysekaigates::MysekaigateElement;
+        use super::mysekaisiteharvestfixtures::MysekaisiteharvestfixtureElement;
+        use super::resourceboxes::{ResourceType, ResourceboxeElement};
+        use super::virtuallives::{VirtualLiveType, VirtualliveElement};
+        let rows: Vec<MysekaigateElement> = parse(
+            r#"[{"id":6,"unit":"none","mysekaiGateType":"shuffle","name":"交わるセカイのゲート",
+                 "assetbundleName":"mdl_non0006_gate_sff1"}]"#,
+        );
+        assert_eq!(rows[0].mysekai_gate_type.as_deref(), Some("shuffle"));
+        let rows: Vec<MysekaisiteharvestfixtureElement> = parse(
+            r#"[{"id":111,"mysekaiSiteHarvestFixtureType":"treasure_box_transport",
+                 "mysekaiSiteBulkHarvestTargetId":18,"hp":0,"lastAttackStamina":20,
+                 "mysekaiSiteHarvestFixtureRarityType":"rarity_1","assetbundleName":"treasure_box"}]"#,
+        );
+        assert_eq!(rows[0].mysekai_site_bulk_harvest_target_id, Some(18));
+        let rows: Vec<HonorgroupElement> = parse(
+            r#"[{"id":1,"name":"一歌ファン","pronunciation":"いちかふぁん","honorType":"character",
+                 "isMedalDisplayed":true}]"#,
+        );
+        assert_eq!(rows[0].is_medal_displayed, Some(true));
+        let rows: Vec<AreaElement> = parse(
+            r#"[{"id":27,"assetbundleName":"area27","groupId":300,"isBaseArea":true,
+                 "areaType":"spirit_world","viewType":"side_view","displayTimelineType":"next_grade",
+                 "additionalAreaType":"center_of_ring","name":"？？？のセカイ","name2":"大樹のセカイ",
+                 "startAt":1759057200000,"releaseConditionId":117902,"releaseConditionId2":1,
+                 "evolveReleaseConditionId1":121702,"evolveReleaseConditionId2":121703}]"#,
+        );
+        assert_eq!(rows[0].name2.as_deref(), Some("大樹のセカイ"));
+        assert_eq!(rows[0].evolve_release_condition_id1, Some(121702));
+        assert_eq!(rows[0].evolve_release_condition_id2, Some(121703));
+        let rows: Vec<AreaitemlevelElement> = parse(
+            r#"[{"areaItemId":56,"level":1,"targetUnit":"any","targetCardAttr":"any",
+                 "power1BonusRate":0.5,"power1AllMatchBonusRate":0.0,"power2BonusRate":0.5,
+                 "power2AllMatchBonusRate":0.0,"power3BonusRate":0.5,"power3AllMatchBonusRate":0.0,
+                 "sentence":"a"},
+                {"areaItemId":56,"level":1,"targetUnit":"multi_unit","targetCardAttr":"any",
+                 "power1BonusRate":0.5,"power1AllMatchBonusRate":0.0,"power2BonusRate":0.5,
+                 "power2AllMatchBonusRate":0.0,"power3BonusRate":0.5,"power3AllMatchBonusRate":0.0,
+                 "sentence":"b"}]"#,
+        );
+        assert_eq!(rows[0].target_unit, Some(TargetUnit::Any));
+        assert_eq!(rows[1].target_unit, Some(TargetUnit::MultiUnit));
+        let rows: Vec<Charactermissionv2Element> = parse(
+            r#"[{"id":1023,"characterMissionType":"area_item_level_up_all_character",
+                 "characterId":1,"parameterGroupId":23,"sentence":"s","progressSentence":"p",
+                 "isAchievementMission":true}]"#,
+        );
+        assert_eq!(
+            rows[0].character_mission_type,
+            Some(CharacterMissionType::AreaItemLevelUpAllCharacter)
+        );
+        let rows: Vec<EventstoryunitElement> = parse(
+            r#"[{"id":429,"seq":429,"eventStoryId":202,"unit":"none","eventStoryUnitRelation":"sub"}]"#,
+        );
+        assert_eq!(rows[0].unit, Some(Unit::None));
+        let rows: Vec<BondshonorElement> = parse(r#"[{"id":1,"honorRarity":"high"}]"#);
+        assert_eq!(rows[0].honor_rarity, Some(HonorRarity::High));
+        let rows: Vec<ResourceboxeElement> = parse(
+            r#"[{"resourceBoxPurpose":"mysekai_shop","id":1,"resourceBoxType":"expand",
+                 "details":[{"resourceBoxPurpose":"mysekai_shop","resourceBoxId":1,"seq":1,
+                   "resourceType":"honor_background","resourceId":10101,"resourceQuantity":1},
+                  {"resourceBoxPurpose":"mysekai_shop","resourceBoxId":1,"seq":2,
+                   "resourceType":"virtual_item","resourceId":117,"resourceQuantity":1}]}]"#,
+        );
+        let details = rows[0].details.as_ref().unwrap();
+        assert_eq!(
+            details[0].resource_type,
+            Some(ResourceType::HonorBackground)
+        );
+        assert_eq!(details[1].resource_type, Some(ResourceType::VirtualItem));
+        let rows: Vec<VirtualliveElement> = parse(
+            r#"[{"id":491,"virtualLiveType":"solo_virtual_live","virtualLiveGroupId":2,
+                 "virtualLiveTotalCheerPointRewards":[{"id":1,"virtualLiveId":491,"threshold":300,
+                   "resourceBoxId":101001}],
+                 "virtualLiveTotalCheerPointSurplusReward":{"id":1,"virtualLiveId":491,
+                   "basePoint":10,"resourceBoxId":1},
+                 "virtualLiveVirtualItemOverrideCost":{"id":1,"virtualLiveId":491,
+                   "costResourceType":"material","costResourceId":282,
+                   "assetbundleName":"virtual_cheer_coin"}},
+                {"id":1,"virtualLiveType":"normal","virtualLiveTotalCheerPointRewards":[]}]"#,
+        );
+        assert_eq!(
+            rows[0].virtual_live_type,
+            Some(VirtualLiveType::SoloVirtualLive)
+        );
+        assert_eq!(
+            rows[0]
+                .virtual_live_total_cheer_point_rewards
+                .as_ref()
+                .unwrap()[0]
+                .threshold,
+            Some(300)
+        );
+        assert_eq!(
+            rows[0]
+                .virtual_live_total_cheer_point_surplus_reward
+                .as_ref()
+                .unwrap()
+                .base_point,
+            Some(10)
+        );
+        assert_eq!(
+            rows[0]
+                .virtual_live_virtual_item_override_cost
+                .as_ref()
+                .unwrap()
+                .cost_resource_id,
+            Some(282)
+        );
+        assert_eq!(rows[1].virtual_live_virtual_item_override_cost, None);
     }
 }

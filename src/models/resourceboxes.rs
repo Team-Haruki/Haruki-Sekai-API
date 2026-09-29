@@ -57,6 +57,9 @@ pub enum ResourceBoxPurpose {
     #[serde(rename = "ad_reward")]
     AdReward,
 
+    #[serde(rename = "ad_reward_gl")]
+    AdRewardGl,
+
     #[serde(rename = "ad_reward_random_box")]
     AdRewardRandomBox,
 
@@ -68,6 +71,12 @@ pub enum ResourceBoxPurpose {
 
     #[serde(rename = "billing_shop_item_count_bonus")]
     BillingShopItemCountBonus,
+
+    #[serde(rename = "billing_shop_item_random_box")]
+    BillingShopItemRandomBox,
+
+    #[serde(rename = "billing_shop_item_xsolla_bonus")]
+    BillingShopItemXsollaBonus,
 
     #[serde(rename = "billing_shop_item_zenpay_bonus")]
     BillingShopItemZenpayBonus,
@@ -146,6 +155,9 @@ pub enum ResourceBoxPurpose {
     #[serde(rename = "gacha_ceil_exchange")]
     GachaCeilExchange,
 
+    #[serde(rename = "gacha_character_bonus")]
+    GachaCharacterBonus,
+
     #[serde(rename = "gacha_extra")]
     GachaExtra,
 
@@ -157,6 +169,9 @@ pub enum ResourceBoxPurpose {
 
     #[serde(rename = "gift_gacha_extra")]
     GiftGachaExtra,
+
+    #[serde(rename = "gold_ticket_reward")]
+    GoldTicketReward,
 
     #[serde(rename = "limited_term_score_rank_reward_detail")]
     LimitedTermScoreRankRewardDetail,
@@ -200,11 +215,17 @@ pub enum ResourceBoxPurpose {
     #[serde(rename = "mysekai_recycle")]
     MysekaiRecycle,
 
+    #[serde(rename = "mysekai_shop")]
+    MysekaiShop,
+
     #[serde(rename = "paid_virtual_live_shop_item")]
     PaidVirtualLiveShopItem,
 
     #[serde(rename = "player_rank_reward")]
     PlayerRankReward,
+
+    #[serde(rename = "random_box_gl")]
+    RandomBoxGl,
 
     #[serde(rename = "rank_match_score_rank_reward_detail")]
     RankMatchScoreRankRewardDetail,
@@ -217,6 +238,9 @@ pub enum ResourceBoxPurpose {
 
     #[serde(rename = "score_rank_reward_detail")]
     ScoreRankRewardDetail,
+
+    #[serde(rename = "sega_account_reward_gl")]
+    SegaAccountRewardGl,
 
     #[serde(rename = "serial_code_campaign_reward")]
     SerialCodeCampaignReward,
@@ -242,6 +266,15 @@ pub enum ResourceBoxPurpose {
     #[serde(rename = "story_mission")]
     StoryMission,
 
+    #[serde(rename = "subscription_item")]
+    SubscriptionItem,
+
+    #[serde(rename = "subscription_item_bonus")]
+    SubscriptionItemBonus,
+
+    #[serde(rename = "subscription_item_daily")]
+    SubscriptionItemDaily,
+
     #[serde(rename = "super_fever_reward")]
     SuperFeverReward,
 
@@ -259,6 +292,12 @@ pub enum ResourceBoxPurpose {
 
     #[serde(rename = "virtual_live_reward")]
     VirtualLiveReward,
+
+    #[serde(rename = "virtual_live_total_cheer_point_reward")]
+    VirtualLiveTotalCheerPointReward,
+
+    #[serde(rename = "virtual_live_total_cheer_point_surplus_reward")]
+    VirtualLiveTotalCheerPointSurplusReward,
 
     #[serde(rename = "virtual_shop_bonus_item")]
     VirtualShopBonusItem,
@@ -339,6 +378,12 @@ pub enum ResourceType {
 
     Honor,
 
+    #[serde(rename = "honor_background")]
+    HonorBackground,
+
+    #[serde(rename = "honor_word")]
+    HonorWord,
+
     Jewel,
 
     #[serde(rename = "live_point")]
@@ -383,6 +428,9 @@ pub enum ResourceType {
     #[serde(rename = "practice_ticket")]
     PracticeTicket,
 
+    #[serde(rename = "random_box_gl")]
+    RandomBoxGl,
+
     #[serde(rename = "serial_code_item")]
     SerialCodeItem,
 
@@ -393,6 +441,9 @@ pub enum ResourceType {
 
     #[serde(rename = "virtual_coin")]
     VirtualCoin,
+
+    #[serde(rename = "virtual_item")]
+    VirtualItem,
 
     #[serde(rename = "virtual_live_pamphlet")]
     VirtualLivePamphlet,

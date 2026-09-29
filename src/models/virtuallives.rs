@@ -65,6 +65,13 @@ pub struct VirtualliveElement {
     pub sub_game_character_penlight_color_group_id: Option<i64>,
 
     pub virtual_live_group_id: Option<i64>,
+
+    pub virtual_live_total_cheer_point_rewards: Option<Vec<VirtualLiveTotalCheerPointReward>>,
+
+    pub virtual_live_total_cheer_point_surplus_reward:
+        Option<VirtualLiveTotalCheerPointSurplusReward>,
+
+    pub virtual_live_virtual_item_override_cost: Option<VirtualLiveVirtualItemOverrideCost>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -232,15 +239,9 @@ pub enum VirtualLivePerformanceType {
 pub struct VirtualLiveInformation {
     pub virtual_live_id: Option<i64>,
 
-    pub summary: Option<Summary>,
+    pub summary: Option<String>,
 
     pub description: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum Summary {
-    #[serde(rename = "コネクトライブ")]
-    Empty,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -276,6 +277,9 @@ pub enum VirtualLiveType {
     Normal,
 
     Paid,
+
+    #[serde(rename = "solo_virtual_live")]
+    SoloVirtualLive,
 
     Streaming,
 
@@ -389,4 +393,42 @@ pub enum AssetbundleName {
 pub enum LobbyAssetbundleName {
     #[serde(rename = "new_year_2022")]
     NewYear2022,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VirtualLiveTotalCheerPointReward {
+    pub id: Option<i64>,
+
+    pub virtual_live_id: Option<i64>,
+
+    pub threshold: Option<i64>,
+
+    pub resource_box_id: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VirtualLiveTotalCheerPointSurplusReward {
+    pub id: Option<i64>,
+
+    pub virtual_live_id: Option<i64>,
+
+    pub base_point: Option<i64>,
+
+    pub resource_box_id: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VirtualLiveVirtualItemOverrideCost {
+    pub id: Option<i64>,
+
+    pub virtual_live_id: Option<i64>,
+
+    pub cost_resource_type: Option<String>,
+
+    pub cost_resource_id: Option<i64>,
+
+    pub assetbundle_name: Option<String>,
 }

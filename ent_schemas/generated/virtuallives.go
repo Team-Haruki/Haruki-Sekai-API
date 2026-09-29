@@ -41,6 +41,9 @@ func (Virtuallive) Fields() []ent.Field {
 		field.Int64("archive_release_condition_id").Optional(),
 		field.Int64("sub_game_character_penlight_color_group_id").Optional(),
 		field.Int64("virtual_live_group_id").Optional(),
+		field.JSON("virtual_live_total_cheer_point_rewards", json.RawMessage{}).Optional(),
+		field.JSON("virtual_live_total_cheer_point_surplus_reward", json.RawMessage{}).Optional(),
+		field.JSON("virtual_live_virtual_item_override_cost", json.RawMessage{}).Optional(),
 		field.String("server_region"),
 	}
 }

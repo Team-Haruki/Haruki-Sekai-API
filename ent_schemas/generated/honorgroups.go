@@ -21,6 +21,7 @@ func (Honorgroup) Fields() []ent.Field {
 		field.String("honor_type").Optional(),
 		field.String("background_assetbundle_name").Optional(),
 		field.String("frame_name").Optional(),
+		field.Bool("is_medal_displayed").Optional(),
 		field.String("server_region"),
 	}
 }

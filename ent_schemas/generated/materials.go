@@ -23,6 +23,7 @@ func (Material) Fields() []ent.Field {
 		field.String("material_type").Optional(),
 		field.String("flavor_text2").Optional(),
 		field.Int64("change_flavor_text_at").Optional(),
+		field.Int64("expired_at").Optional(),
 		field.String("server_region"),
 	}
 }

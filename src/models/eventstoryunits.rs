@@ -45,6 +45,8 @@ pub enum Unit {
     #[serde(rename = "light_sound")]
     LightSound,
 
+    None,
+
     #[serde(rename = "school_refusal")]
     SchoolRefusal,
 

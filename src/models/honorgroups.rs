@@ -29,6 +29,8 @@ pub struct HonorgroupElement {
     pub background_assetbundle_name: Option<String>,
 
     pub frame_name: Option<String>,
+
+    pub is_medal_displayed: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -43,6 +45,9 @@ pub enum HonorType {
     Event,
 
     Limitevent,
+
+    #[serde(rename = "limitevent_v2")]
+    LimiteventV2,
 
     #[serde(rename = "rank_match")]
     RankMatch,

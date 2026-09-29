@@ -39,14 +39,11 @@ pub(crate) const BATCH_BYTES: usize = 1024 * 1024;
 pub(crate) const CHANNEL_DEPTH: usize = 2;
 
 /// Tables dropped from the schema long ago whose files are never ingested.
-/// Note the generator would name a future characterProfiles model
-/// `characterprofiles` (not in this list) but a virtualItems model
-/// `virtualitems` (in it) — remove the entry before adding that model.
+/// The generator would name a future characterProfiles model
+/// `characterprofiles`, which this does not match. virtualItems was skipped here
+/// too until JP 7.0.0 made it a resource type; it is a modeled table now.
 pub(crate) fn is_legacy_skipped_table(table: &str) -> bool {
-    matches!(
-        table,
-        "character_profiles" | "virtual_items" | "virtualitems"
-    )
+    table == "character_profiles"
 }
 
 /// The typed table map from `schema_info.json`: table -> (column -> type,
@@ -1406,8 +1403,16 @@ mod tests {
             ("customprofilematerialresources", &["jp"][..]),
             ("customprofileuserinterfaceiconresources", &["jp"][..]),
             ("musiccategories", &["jp"][..]),
-            ("mysekaihousingcompetitions", &["jp", "tw", "kr", "cn"][..]),
             ("resourceboxdetails", &["tw", "kr", "cn"][..]),
+            // JP 7.0.0 tables; the other regions are still on 6.x clients.
+            ("honorbackgrounds", &["jp"][..]),
+            ("honorwords", &["jp"][..]),
+            ("mysekaiblueprinttermmysekaimaterialcosts", &["jp"][..]),
+            ("mysekaishopcosts", &["jp"][..]),
+            ("mysekaishops", &["jp"][..]),
+            ("mysekaisitebulkharvests", &["jp"][..]),
+            ("mysekaisitebulkharvesttargetgroups", &["jp"][..]),
+            ("mysekaisitebulkharvesttargets", &["jp"][..]),
         ]);
         for region in ["jp", "en", "tw", "kr", "cn"] {
             let mut resolved: HashMap<String, Vec<&str>> = HashMap::new();
@@ -1555,6 +1560,140 @@ mod tests {
             row.try_get::<i64>("", "published").unwrap(),
             1_788_404_400_000
         );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn ingests_jp_700_tables_columns_and_virtual_items() {
+        use sea_orm::Statement;
+        let mut opt = ConnectOptions::new("sqlite::memory:".to_string());
+        opt.max_connections(1);
+        let db = Database::connect(opt).await.unwrap();
+        let schema =
+            MasterSchema::parse(&std::fs::read_to_string("schema_info.json").unwrap()).unwrap();
+        for table in [
+            "areas",
+            "areaitemlevels",
+            "honorbackgrounds",
+            "mysekaigates",
+            "virtualitems",
+            "virtuallives",
+        ] {
+            let (cols, _) = schema.table(table).unwrap();
+            let mut names: Vec<&String> = cols.keys().collect();
+            names.sort();
+            let cols = names
+                .iter()
+                .map(|c| c.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            db.execute_unprepared(&format!("CREATE TABLE {table} ({cols})"))
+                .await
+                .unwrap();
+        }
+        let engine = IngestionEngine::new(db.clone()).await.unwrap();
+        let root = std::env::temp_dir().join(format!("haruki_ingest_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        // Trimmed JP 7.0.0.13 rows.
+        let files = [
+            (
+                "areas.json",
+                r#"[{"id":1,"assetbundleName":"area1","name":"a"},
+                    {"id":27,"assetbundleName":"area27","name":"？？？のセカイ","name2":"大樹のセカイ",
+                     "evolveReleaseConditionId1":121702,"evolveReleaseConditionId2":121703}]"#,
+            ),
+            (
+                "areaItemLevels.json",
+                r#"[{"areaItemId":56,"level":1,"targetUnit":"any","targetCardAttr":"any",
+                     "power1BonusRate":0.5,"sentence":"a"},
+                    {"areaItemId":56,"level":1,"targetUnit":"multi_unit","targetCardAttr":"any",
+                     "power1BonusRate":0.5,"sentence":"b"}]"#,
+            ),
+            (
+                "honorBackgrounds.json",
+                r#"[{"id":10101,"seq":1,"honorGroupId":1,"assetbundleName":"honor_bg_style_01_01",
+                     "name":"n","description":"d"}]"#,
+            ),
+            (
+                "mysekaiGates.json",
+                r#"[{"id":1,"unit":"light_sound","mysekaiGateType":"unit"},
+                    {"id":6,"unit":"none","mysekaiGateType":"shuffle"}]"#,
+            ),
+            (
+                "virtualItems.json",
+                r#"[{"id":9,"virtualItemCategory":"spread","virtualItemType":"permanent",
+                     "costVirtualCoin":300,"unit":"idol"}]"#,
+            ),
+            (
+                "virtualLives.json",
+                r#"[{"id":491,"virtualLiveType":"solo_virtual_live","virtualLiveGroupId":2,
+                     "virtualLiveTotalCheerPointRewards":[{"id":1,"virtualLiveId":491,
+                       "threshold":300,"resourceBoxId":101001}],
+                     "virtualLiveTotalCheerPointSurplusReward":{"id":1,"virtualLiveId":491,
+                       "basePoint":10,"resourceBoxId":1},
+                     "virtualLiveVirtualItemOverrideCost":{"id":1,"virtualLiveId":491,
+                       "costResourceType":"material","costResourceId":282}}]"#,
+            ),
+        ];
+        for (name, body) in files {
+            std::fs::write(root.join(name), body).unwrap();
+        }
+        engine
+            .ingest_master_data(root.to_str().unwrap(), "jp")
+            .await
+            .unwrap();
+
+        let query = |sql: &'static str| {
+            let db = db.clone();
+            async move {
+                db.query_one_raw(Statement::from_string(db.get_database_backend(), sql))
+                    .await
+                    .unwrap()
+                    .unwrap()
+            }
+        };
+        let row = query(
+            "SELECT COUNT(*) AS n, MAX(name2) AS name2, MAX(evolve_release_condition_id2) AS ev \
+             FROM areas WHERE server_region = 'jp'",
+        )
+        .await;
+        assert_eq!(row.try_get::<i64>("", "n").unwrap(), 2);
+        assert_eq!(row.try_get::<String>("", "name2").unwrap(), "大樹のセカイ");
+        assert_eq!(row.try_get::<i64>("", "ev").unwrap(), 121703);
+        let row = query(
+            "SELECT COUNT(*) AS n, SUM(target_unit = 'multi_unit') AS multi \
+             FROM areaitemlevels WHERE server_region = 'jp' AND area_item_id = 56",
+        )
+        .await;
+        assert_eq!(row.try_get::<i64>("", "n").unwrap(), 2);
+        assert_eq!(row.try_get::<i64>("", "multi").unwrap(), 1);
+        let row =
+            query("SELECT honor_group_id AS g FROM honorbackgrounds WHERE game_id = 10101").await;
+        assert_eq!(row.try_get::<i64>("", "g").unwrap(), 1);
+        let row = query("SELECT mysekai_gate_type AS t FROM mysekaigates WHERE game_id = 6").await;
+        assert_eq!(row.try_get::<String>("", "t").unwrap(), "shuffle");
+        // No longer skipped as a legacy table.
+        let row = query(
+            "SELECT virtual_item_type AS t, cost_virtual_coin AS c FROM virtualitems \
+             WHERE game_id = 9 AND server_region = 'jp'",
+        )
+        .await;
+        assert_eq!(row.try_get::<String>("", "t").unwrap(), "permanent");
+        assert_eq!(row.try_get::<i64>("", "c").unwrap(), 300);
+        let row = query(
+            "SELECT virtual_live_total_cheer_point_rewards AS r, \
+             virtual_live_total_cheer_point_surplus_reward AS s, \
+             virtual_live_virtual_item_override_cost AS o FROM virtuallives WHERE game_id = 491",
+        )
+        .await;
+        let rewards: Value =
+            serde_json::from_str(&row.try_get::<String>("", "r").unwrap()).unwrap();
+        assert_eq!(rewards[0]["threshold"], json!(300));
+        let surplus: Value =
+            serde_json::from_str(&row.try_get::<String>("", "s").unwrap()).unwrap();
+        assert_eq!(surplus["basePoint"], json!(10));
+        let cost: Value = serde_json::from_str(&row.try_get::<String>("", "o").unwrap()).unwrap();
+        assert_eq!(cost["costResourceId"], json!(282));
         std::fs::remove_dir_all(root).unwrap();
     }
 }

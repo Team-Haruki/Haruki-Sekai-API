@@ -22,71 +22,11 @@ pub struct EventitemElement {
 
     pub event_id: Option<i64>,
 
-    pub name: Option<Name>,
+    pub name: Option<String>,
 
-    pub flavor_text: Option<FlavorText>,
+    pub flavor_text: Option<String>,
 
     pub assetbundle_name: Option<String>,
 
     pub game_character_id: Option<i64>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum FlavorText {
-    #[serde(rename = "イベント交換所でアイテムと交換できます。")]
-    Empty,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum Name {
-    #[serde(rename = "イベントバッジ")]
-    Empty,
-
-    #[serde(rename = "活动徽章")]
-    Fluffy,
-
-    #[serde(rename = "ワールドバッジ")]
-    Name,
-
-    #[serde(rename = "章节1徽章")]
-    Name1,
-
-    #[serde(rename = "章节2徽章")]
-    Name2,
-
-    #[serde(rename = "章节3徽章")]
-    Name3,
-
-    #[serde(rename = "章节4徽章")]
-    Name4,
-
-    #[serde(rename = "章节5徽章")]
-    Name5,
-
-    #[serde(rename = "章节6徽章")]
-    Name6,
-
-    #[serde(rename = "フィナーレバッジ")]
-    Purple,
-
-    #[serde(rename = "世界徽章")]
-    Tentacled,
-
-    #[serde(rename = "チャプター1バッジ")]
-    The1,
-
-    #[serde(rename = "チャプター2バッジ")]
-    The2,
-
-    #[serde(rename = "チャプター3バッジ")]
-    The3,
-
-    #[serde(rename = "チャプター4バッジ")]
-    The4,
-
-    #[serde(rename = "チャプター5バッジ")]
-    The5,
-
-    #[serde(rename = "チャプター6バッジ")]
-    The6,
 }
