@@ -16,7 +16,14 @@ OUTPUT_DIR = pathlib.Path(__file__).resolve().parents[1] / "src/models"
 def generate_models(source):
     types = {"int": "i64", "float": "f64", "string": "String", "bool": "bool"}
     outputs = {}
-    for name in ("MysekaiTool", "MysekaiSite", "MysekaiCharacterTalkPreAction"):
+    identities = {
+        "MysekaiTool": ("id", "int"),
+        "MysekaiSite": ("id", "int"),
+        "MysekaiCharacterTalkPreAction": ("id", "int"),
+        "MysekaiBlueprintShop": ("mysekaiBlueprintShopItemLotteryType", "string"),
+        "MysekaiMaterialPossession": ("id", "int"),
+    }
+    for name, identity in identities.items():
         match = re.search(
             rf"^public class Master{name}\b[^\n]*\n\{{\n(.*?)^\}}",
             source,
@@ -27,7 +34,7 @@ def generate_models(source):
         fields = re.findall(
             r'\[Key\("([^"\n]+)"\)\]\s+public (\w+) \w+;', match[1]
         )
-        if not fields or fields[0] != ("id", "int"):
+        if not fields or fields[0] != identity:
             raise ValueError(f"Unexpected fields for Master{name}")
         alias = name.capitalize()
         body = []
