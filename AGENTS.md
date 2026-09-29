@@ -92,6 +92,9 @@ docs/
   nuverse-schema-guide.md  – Nuverse schema assets: layout, field naming, update workflow
   master-registry-storage-and-ingest.md – registry content in PostgreSQL (blob store) and the
                              registry-driven multi-target ingest design
+  migrations/              – Hand-written, idempotent DDL for ingest targets that run with
+                             `create_tables: false`; apply before shipping a schema_info.json
+                             that adds tables
 Data/master/               – Regional master data JSON files (jp, en, tw, kr, cn)
 Data/registry/             – Registry JSON state (per-region manifests); music_metas blobs
 Data/structures/           – Committed Nuverse schema assets (nuverse_schema_bundle.json, *.avsc)
