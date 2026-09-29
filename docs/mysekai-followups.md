@@ -15,7 +15,9 @@ group ID test is synthetic: the client declares the field, but those current
 master rows omit it.
 
 ```sh
-python3 tools/generate_mysekai_followups.py /path/to/dump.cs
+# In the extracted il2cpp_analysis.zip directory, containing dump/dump.cs:
+python3 /path/to/Haruki-Sekai-API/tools/generate_mysekai_followups.py
+cd /path/to/Haruki-Sekai-API
 cd tools/ent_generator
 cargo run --locked
 cd ../..

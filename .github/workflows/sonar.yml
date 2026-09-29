@@ -65,6 +65,12 @@ jobs:
           cargo llvm-cov --locked --lib --no-report -- --ignored --test-threads=1 ingest::tests postgres
           cargo llvm-cov report --lcov --output-path lcov.info
 
+      - name: Test model generator and collect Python coverage
+        run: |
+          python3 -m pip install coverage==7.6.1
+          python3 -m coverage run --branch --include='*/tools/generate_mysekai_followups.py' -m unittest discover -s tools -p 'test_*.py'
+          python3 -m coverage xml -o python-coverage.xml
+
       - name: SonarQube scan
         uses: SonarSource/sonarqube-scan-action@ba9859eae8dd6bd29e412f25ddbbef3d032000f4 # v8.2.2
         env:
