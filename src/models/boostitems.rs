@@ -28,31 +28,5 @@ pub struct BoostitemElement {
 
     pub asset_bundle_name: Option<String>,
 
-    pub flavor_text: Option<FlavorText>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum FlavorText {
-    #[serde(rename = "恢复1演出能量。")]
-    FlavorText1,
-
-    #[serde(
-        rename = "ライブボーナスを10回復する。\n※テストイベント終了後、メンテナンスにて回収します。"
-    )]
-    FlavorText10,
-
-    #[serde(rename = "恢复99演出能量。")]
-    FlavorText99,
-
-    #[serde(rename = "恢复10演出能量。")]
-    Purple10,
-
-    #[serde(rename = "ライブボーナスを1回復する。")]
-    The1,
-
-    #[serde(rename = "ライブボーナスを10回復する。")]
-    The10,
-
-    #[serde(rename = "ライブボーナスを99回復する。")]
-    The99,
+    pub flavor_text: Option<String>,
 }

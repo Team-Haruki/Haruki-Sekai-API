@@ -69,6 +69,9 @@ pub enum TargetUnit {
     #[serde(rename = "light_sound")]
     LightSound,
 
+    #[serde(rename = "multi_unit")]
+    MultiUnit,
+
     Piapro,
 
     #[serde(rename = "school_refusal")]

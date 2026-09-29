@@ -30,6 +30,9 @@ func (Area) Fields() []ent.Field {
 		field.Int64("start_at").Optional(),
 		field.Int64("end_at").Optional(),
 		field.Int64("release_condition_id2").Optional(),
+		field.String("name2").Optional(),
+		field.Int64("evolve_release_condition_id1").Optional(),
+		field.Int64("evolve_release_condition_id2").Optional(),
 		field.String("server_region"),
 	}
 }

@@ -25,4 +25,6 @@ pub struct MysekaigateElement {
     pub name: Option<String>,
 
     pub assetbundle_name: Option<String>,
+
+    pub mysekai_gate_type: Option<String>,
 }

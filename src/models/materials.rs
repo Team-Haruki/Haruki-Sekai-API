@@ -33,6 +33,8 @@ pub struct MaterialElement {
     pub flavor_text2: Option<String>,
 
     pub change_flavor_text_at: Option<i64>,
+
+    pub expired_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

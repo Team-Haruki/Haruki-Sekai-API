@@ -9,28 +9,26 @@ import (
 	"entgo.io/ent/schema/index"
 )
 
-type Mysekaigate struct {
+type Mysekaisitebulkharvest struct {
 	ent.Schema
 }
 
-func (Mysekaigate) Fields() []ent.Field {
+func (Mysekaisitebulkharvest) Fields() []ent.Field {
 	return []ent.Field{
 		field.Int64("game_id").Optional(),
-		field.String("unit").Optional(),
-		field.String("name").Optional(),
-		field.String("assetbundle_name").Optional(),
-		field.String("mysekai_gate_type").Optional(),
+		field.Int64("mysekai_site_id").Optional(),
+		field.Int64("mysekai_site_bulk_harvest_target_id").Optional(),
 		field.String("server_region"),
 	}
 }
 
-func (Mysekaigate) Annotations() []schema.Annotation {
+func (Mysekaisitebulkharvest) Annotations() []schema.Annotation {
 	return []schema.Annotation{
-		entsql.Annotation{Table: "mysekaigates"},
+		entsql.Annotation{Table: "mysekaisitebulkharvests"},
 	}
 }
 
-func (Mysekaigate) Indexes() []ent.Index {
+func (Mysekaisitebulkharvest) Indexes() []ent.Index {
 	return []ent.Index{
 		index.Fields("game_id", "server_region").Unique(),
 	}

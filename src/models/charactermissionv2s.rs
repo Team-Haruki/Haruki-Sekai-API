@@ -36,6 +36,9 @@ pub struct Charactermissionv2Element {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CharacterMissionType {
+    #[serde(rename = "area_item_level_up_all_character")]
+    AreaItemLevelUpAllCharacter,
+
     #[serde(rename = "area_item_level_up_character")]
     AreaItemLevelUpCharacter,
 

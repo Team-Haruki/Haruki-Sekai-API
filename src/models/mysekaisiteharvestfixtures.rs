@@ -29,6 +29,8 @@ pub struct MysekaisiteharvestfixtureElement {
     pub mysekai_site_harvest_fixture_rarity_type: Option<MysekaiSiteHarvestFixtureRarityType>,
 
     pub assetbundle_name: Option<String>,
+
+    pub mysekai_site_bulk_harvest_target_id: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

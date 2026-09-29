@@ -9,28 +9,29 @@ import (
 	"entgo.io/ent/schema/index"
 )
 
-type Mysekaigate struct {
+type Virtuallivegroup struct {
 	ent.Schema
 }
 
-func (Mysekaigate) Fields() []ent.Field {
+func (Virtuallivegroup) Fields() []ent.Field {
 	return []ent.Field{
 		field.Int64("game_id").Optional(),
-		field.String("unit").Optional(),
 		field.String("name").Optional(),
+		field.String("virtual_live_group_type").Optional(),
 		field.String("assetbundle_name").Optional(),
-		field.String("mysekai_gate_type").Optional(),
+		field.Int64("start_at").Optional(),
+		field.Int64("end_at").Optional(),
 		field.String("server_region"),
 	}
 }
 
-func (Mysekaigate) Annotations() []schema.Annotation {
+func (Virtuallivegroup) Annotations() []schema.Annotation {
 	return []schema.Annotation{
-		entsql.Annotation{Table: "mysekaigates"},
+		entsql.Annotation{Table: "virtuallivegroups"},
 	}
 }
 
-func (Mysekaigate) Indexes() []ent.Index {
+func (Virtuallivegroup) Indexes() []ent.Index {
 	return []ent.Index{
 		index.Fields("game_id", "server_region").Unique(),
 	}
