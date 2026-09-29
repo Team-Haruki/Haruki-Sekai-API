@@ -20,6 +20,7 @@
       [
         "area_item_id",
         "level",
+        "target_unit",
         "server_region"
       ]
     ]

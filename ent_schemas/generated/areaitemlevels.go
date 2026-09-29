@@ -39,6 +39,6 @@ func (Areaitemlevel) Annotations() []schema.Annotation {
 
 func (Areaitemlevel) Indexes() []ent.Index {
 	return []ent.Index{
-		index.Fields("area_item_id", "level", "server_region").Unique(),
+		index.Fields("area_item_id", "level", "target_unit", "server_region").Unique(),
 	}
 }

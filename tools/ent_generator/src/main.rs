@@ -9,7 +9,13 @@ use std::path::Path;
 fn unique_key_override(table_name: &str) -> Option<serde_json::Value> {
     let keys: Option<Vec<Vec<&str>>> = match table_name {
         // Tables without id field — natural composite keys
-        "areaitemlevel" => Some(vec![vec!["area_item_id", "level", "server_region"]]),
+        // JP 7.0.0.13 repeats (areaItemId, level) per targetUnit ("any" / "multi_unit")
+        "areaitemlevel" => Some(vec![vec![
+            "area_item_id",
+            "level",
+            "target_unit",
+            "server_region",
+        ]]),
         "cardcostume3d" => Some(vec![vec!["costume3_d_id", "server_region"]]),
         "cardraritie" => Some(vec![vec!["card_rarity_type", "server_region"]]),
         "eventmusic" => Some(vec![vec!["event_id", "music_id", "server_region"]]),
@@ -542,6 +548,21 @@ pub struct SampleElement {
         );
         assert_eq!(pluralize_table_name("cards"), "cards");
         assert_eq!(pluralize_table_name("box"), "boxes");
+    }
+
+    #[test]
+    fn composite_key_overrides_include_target_unit_for_area_item_levels() {
+        assert_eq!(
+            unique_key_override("areaitemlevel"),
+            Some(serde_json::json!([[
+                "area_item_id",
+                "level",
+                "target_unit",
+                "server_region"
+            ]]))
+        );
+        assert_eq!(unique_key_override("ngword"), Some(serde_json::json!([])));
+        assert!(unique_key_override("card").is_none());
     }
 
     #[test]
