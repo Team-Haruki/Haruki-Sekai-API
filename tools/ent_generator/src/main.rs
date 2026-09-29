@@ -9,6 +9,10 @@ use std::path::Path;
 fn unique_key_override(table_name: &str) -> Option<serde_json::Value> {
     let keys: Option<Vec<Vec<&str>>> = match table_name {
         // Tables without id field — natural composite keys
+        "mysekaiblueprintshop" => Some(vec![vec![
+            "mysekai_blueprint_shop_item_lottery_type",
+            "server_region",
+        ]]),
         // JP 7.0.0.13 repeats (areaItemId, level) per targetUnit ("any" / "multi_unit")
         "areaitemlevel" => Some(vec![vec![
             "area_item_id",
@@ -558,6 +562,13 @@ pub struct SampleElement {
                 "area_item_id",
                 "level",
                 "target_unit",
+                "server_region"
+            ]]))
+        );
+        assert_eq!(
+            unique_key_override("mysekaiblueprintshop"),
+            Some(serde_json::json!([[
+                "mysekai_blueprint_shop_item_lottery_type",
                 "server_region"
             ]]))
         );

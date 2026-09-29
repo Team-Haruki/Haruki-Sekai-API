@@ -1217,6 +1217,26 @@ fn plan_uses_the_matching_unique_index_and_hashes_the_mapping() {
 }
 
 #[test]
+fn blueprint_shops_use_the_lottery_type_without_a_game_id() {
+    let target = lazy_target("main");
+    let (cols, _) = target.schema.table("mysekaiblueprintshops").unwrap();
+    assert!(!cols.contains_key("game_id"));
+    let mut shape = TableShape::default();
+    for col in cols.keys() {
+        shape.columns.insert(col.clone(), "text".into());
+    }
+    shape.unique_sets.push(
+        ["mysekai_blueprint_shop_item_lottery_type", "server_region"]
+            .map(String::from)
+            .into(),
+    );
+    assert_eq!(
+        target.plan("mysekaiblueprintshops", &shape).unwrap().key,
+        Some(vec!["mysekai_blueprint_shop_item_lottery_type".into()])
+    );
+}
+
+#[test]
 fn plan_keys_areaitemlevels_on_target_unit() {
     // JP 7.0.0.13 repeats (areaItemId, level) per targetUnit; the old index no
     // longer matches the schema key, so a target still on it falls back to

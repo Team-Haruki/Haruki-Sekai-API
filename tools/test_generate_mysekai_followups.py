@@ -9,8 +9,14 @@ import generate_mysekai_followups as generator
 
 def dump(fields='[Key("id")]\npublic int id;'):
     return "\n".join(
-        f"public class Master{name} // TypeDefIndex: 1\n{{\n{fields}\n}}"
-        for name in ("MysekaiTool", "MysekaiSite", "MysekaiCharacterTalkPreAction")
+        f"public class Master{name} // TypeDefIndex: 1\n{{\n{body}\n}}"
+        for name, body in [
+            ("MysekaiTool", fields),
+            ("MysekaiSite", fields),
+            ("MysekaiCharacterTalkPreAction", fields),
+            ("MysekaiBlueprintShop", '[Key("mysekaiBlueprintShopItemLotteryType")]\npublic string lottery;'),
+            ("MysekaiMaterialPossession", fields),
+        ]
     )
 
 
@@ -27,7 +33,10 @@ public bool isBase;
 // 日本語コメント
 ''')
         models = generator.generate_models(source)
-        self.assertEqual(len(models), 3)
+        self.assertEqual(len(models), 5)
+        blueprint = models['mysekaiblueprintshops.rs']
+        self.assertIn('pub mysekai_blueprint_shop_item_lottery_type: Option<String>', blueprint)
+        self.assertNotIn('pub id:', blueprint)
         tool = models['mysekaitools.rs']
         self.assertIn('pub type Mysekaitool = Vec<MysekaitoolElement>;', tool)
         self.assertIn('pub cool_time_micro_seconds: Option<f64>', tool)
@@ -59,7 +68,7 @@ public bool isBase;
             with mock.patch.object(generator, 'OUTPUT_DIR', output), mock.patch.object(pathlib.Path, 'cwd', return_value=root):
                 generator.main()
                 saved = {p.name: p.read_bytes() for p in output.iterdir()}
-                self.assertEqual(len(saved), 3)
+                self.assertEqual(len(saved), 5)
                 generator.main()
                 self.assertEqual(saved, {p.name: p.read_bytes() for p in output.iterdir()})
                 source.write_text('invalid dump', encoding='utf-8')

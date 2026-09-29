@@ -33,6 +33,7 @@ jobs:
       - name: Cache Rust artifacts
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           workspaces: |
             . -> target
             tools/ent_generator -> target
@@ -64,3 +65,6 @@ jobs:
       - name: Run ent_generator tests
         working-directory: tools/ent_generator
         run: cargo test --locked
+
+      - name: Test Python tooling
+        run: python3 -m unittest discover -s tools -p 'test_*.py'

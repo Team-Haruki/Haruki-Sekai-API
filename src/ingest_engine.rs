@@ -1573,6 +1573,14 @@ mod tests {
             MasterSchema::parse(&std::fs::read_to_string("schema_info.json").unwrap()).unwrap();
         let files = [
             (
+                "mysekaiBlueprintShops",
+                include_str!("testdata/ingest_fixture/mysekaiBlueprintShops.json"),
+            ),
+            (
+                "mysekaiMaterialPossessions",
+                include_str!("testdata/ingest_fixture/mysekaiMaterialPossessions.json"),
+            ),
+            (
                 "mysekaiTools",
                 include_str!("testdata/ingest_fixture/mysekaiTools.json"),
             ),
@@ -1604,6 +1612,25 @@ mod tests {
                 .await
                 .unwrap();
         }
+        let shops = db.query_all_raw(Statement::from_string(db.get_database_backend(),
+            "SELECT server_region, mysekai_blueprint_shop_item_lottery_type AS kind, consume_jewel_quantity AS cost, purchase_limit FROM mysekaiblueprintshops ORDER BY server_region, kind"
+        )).await.unwrap();
+        assert_eq!(shops.len(), 4);
+        for (row, kind, limit) in [
+            (&shops[0], "daily", 5),
+            (&shops[1], "weekly", 3),
+            (&shops[2], "daily", 5),
+            (&shops[3], "weekly", 3),
+        ] {
+            assert_eq!(row.try_get::<String>("", "kind").unwrap(), kind);
+            assert_eq!(row.try_get::<i64>("", "cost").unwrap(), 100);
+            assert_eq!(row.try_get::<i64>("", "purchase_limit").unwrap(), limit);
+        }
+        let row = db.query_one_raw(Statement::from_string(db.get_database_backend(),
+            "SELECT COUNT(*) AS n, MAX(possession_limit) AS cap FROM mysekaimaterialpossessions WHERE server_region = 'jp'"
+        )).await.unwrap().unwrap();
+        assert_eq!(row.try_get::<i64>("", "n").unwrap(), 11);
+        assert_eq!(row.try_get::<i64>("", "cap").unwrap(), 99999);
         let row = db.query_one_raw(Statement::from_string(db.get_database_backend(),
             "SELECT COUNT(*) AS n, MIN(cool_time_micro_seconds) AS cool, MIN(assetbundle_name) AS bundle FROM mysekaitools WHERE game_id = 5"
         )).await.unwrap().unwrap();

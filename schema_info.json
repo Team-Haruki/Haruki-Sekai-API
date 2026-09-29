@@ -1324,6 +1324,21 @@
   },
   {
     "columns": [
+      "mysekai_blueprint_shop_item_lottery_type:string",
+      "consume_jewel_quantity:int64",
+      "purchase_limit:int64",
+      "server_region:string"
+    ],
+    "name": "mysekaiblueprintshops",
+    "unique_keys": [
+      [
+        "mysekai_blueprint_shop_item_lottery_type",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
       "game_id:int64",
       "group_id:int64",
       "mysekai_material_id:int64",
@@ -1798,6 +1813,21 @@
       "server_region:string"
     ],
     "name": "mysekaimaterialgamecharacterrelations",
+    "unique_keys": [
+      [
+        "id",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "game_id:int64",
+      "level:int64",
+      "possession_limit:int64",
+      "server_region:string"
+    ],
+    "name": "mysekaimaterialpossessions",
     "unique_keys": [
       [
         "id",

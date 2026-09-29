@@ -52,3 +52,17 @@ a typed table until there is a verified master source for it. The nullable
 Cloud still needs its own file-to-table mappings and `mysekai_tool` display
 handling. These tables supply metadata; actual asset paths must be verified
 against the exported assets. No Cloud, Drawing, or Toolbox changes are included.
+
+## Shop dependencies
+
+Cloud also requires `mysekaiBlueprintShops` (daily/weekly jewel costs and
+purchase limits) and `mysekaiMaterialPossessions` (material capacity by level).
+Both files are present in all five regions: 2 and 11 rows per region in the
+2026-09-30 registry snapshot. The former has no game ID: its unique key is
+`(mysekai_blueprint_shop_item_lottery_type, server_region)`. The latter uses
+`(game_id, server_region)`.
+
+Apply `docs/migrations/2026-09-30-mysekai-shop-dependencies.sql` before the
+updated ingester. Verify both per-region row counts, daily/weekly limits and
+level capacity values after startup. The generator now covers these two
+client classes as well; existing user upload and Cloud rendering are separate.
