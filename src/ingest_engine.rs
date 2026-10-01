@@ -1413,6 +1413,8 @@ mod tests {
             ("mysekaisitebulkharvests", &["jp"][..]),
             ("mysekaisitebulkharvesttargetgroups", &["jp"][..]),
             ("mysekaisitebulkharvesttargets", &["jp"][..]),
+            // Combination player frames (JP 6.8+); Nuverse 6.4 and EN 6.0 have none.
+            ("playerframeparts", &["jp"][..]),
         ]);
         for region in ["jp", "en", "tw", "kr", "cn"] {
             let mut resolved: HashMap<String, Vec<&str>> = HashMap::new();

@@ -2229,6 +2229,22 @@
       "game_id:int64",
       "seq:int64",
       "player_frame_group_id:int64",
+      "game_character_id:int64",
+      "server_region:string"
+    ],
+    "name": "playerframeparts",
+    "unique_keys": [
+      [
+        "id",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "game_id:int64",
+      "seq:int64",
+      "player_frame_group_id:int64",
       "description:string",
       "game_character_id:int64",
       "parts_count:int64",
