@@ -114,6 +114,7 @@ pub mod omikujis;
 pub mod outsidecharacters;
 pub mod panelmissioncampaigns;
 pub mod playerframegroups;
+pub mod playerframeparts;
 pub mod playerframes;
 pub mod practicetickets;
 pub mod resourceboxdetails;
@@ -700,5 +701,18 @@ mod tests {
             Some(282)
         );
         assert_eq!(rows[1].virtual_live_virtual_item_override_cost, None);
+    }
+
+    #[test]
+    fn player_frame_parts_parse_real_rows() {
+        use super::playerframeparts::PlayerframepartElement;
+        // Rows from JP 7.0.0.13: one part per character of the combination group.
+        let rows: Vec<PlayerframepartElement> = parse(
+            r#"[{"id":20001,"seq":1,"playerFrameGroupId":2,"gameCharacterId":1},
+                {"id":20026,"seq":26,"playerFrameGroupId":2,"gameCharacterId":26}]"#,
+        );
+        assert_eq!(rows[0].player_frame_group_id, Some(2));
+        assert_eq!(rows[1].id, Some(20026));
+        assert_eq!(rows[1].game_character_id, Some(26));
     }
 }
