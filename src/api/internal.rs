@@ -523,7 +523,15 @@ pub fn file_sha256(path: &std::path::Path, meta: &std::fs::Metadata) -> Result<S
     }
     let mut file = std::fs::File::open(path)?;
     let mut hasher = sha2::Sha256::new();
-    std::io::copy(&mut file, &mut hasher)?;
+    // digest 0.11 dropped the `io::Write` impl, so feed the hasher by hand.
+    let mut buf = vec![0u8; 64 * 1024];
+    loop {
+        let n = std::io::Read::read(&mut file, &mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
     let digest = hex::encode(hasher.finalize());
     DIGEST_CACHE
         .lock()
