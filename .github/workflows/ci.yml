@@ -10,61 +10,94 @@ on:
 permissions:
   contents: read
 
+# PRs: one group per PR, newer pushes cancel older runs. Everything else: one group per
+# event and commit, so a queued main run is never replaced by a newer one (every commit keeps
+# its "CI OK" and :sha-<sha> image for the release gate and promote-on-tag).
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
-
-env:
-  CARGO_TERM_COLOR: always
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('{0}-{1}', github.event_name, github.sha) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   rust:
-    name: Rust checks
+    name: Rust
+    uses: seiunx-dev/ci-templates/.github/workflows/rust-ci.yml@v1
+    with:
+      extra-directories: tools/ent_generator
+      coverage: true
+      msrv: "1.94"
+      postgres-image: postgres:17-alpine
+      env: |
+        HARUKI_TEST_REGISTRY_DSN=${CI_POSTGRES_URL}
+        HARUKI_TEST_INGEST_DSN=${CI_POSTGRES_URL}
+      # PG-gated #[ignore] tests only (same filter as the old sonar.yml), single-threaded,
+      # inside the same coverage run. A bare --ignored would also run
+      # updater::master_stream::tests::peak_memory_probe (~500 MB msgpack) and
+      # ingest_engine::test_direct_ingestion (hard-coded haruki:sekai DSN).
+      extra-test-command: $CARGO_TEST --locked --lib -- --ignored --test-threads=1 ingest::tests postgres
+
+  # Custom job: python-uv-ci.yml expects a uv project; these are stdlib-only unittest scripts
+  # under tools/ with no pyproject, so a plain setup-python job is enough.
+  tools:
+    name: Python tools
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - name: Checkout
-        uses: actions/checkout@v7
-
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          components: rustfmt, clippy
-
-      - name: Cache Rust artifacts
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-          workspaces: |
-            . -> target
-            tools/ent_generator -> target
+          python-version: "3.13"
+      - name: Unit tests with coverage
+        run: |
+          python -m pip install --only-binary :all: coverage==7.15.3
+          python -m coverage run --branch --include='*/tools/generate_mysekai_followups.py,*/tools/ci_reuse.py' -m unittest discover -s tools -p 'test_*.py'
+          python -m coverage xml -o coverage/python.xml
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage-python
+          path: coverage/
+          retention-days: 3
 
-      - name: Check formatting
-        run: cargo fmt --all -- --check
+  sonar:
+    name: Sonar
+    needs: [rust, tools]
+    uses: seiunx-dev/ci-templates/.github/workflows/sonar.yml@v1
+    with:
+      args: -Dsonar.qualitygate.wait=true
+    secrets:
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
 
-      - name: Check build
-        run: cargo check --locked --all-targets
+  docker:
+    name: Docker
+    needs: [rust]
+    permissions:
+      contents: read
+      packages: write
+      pull-requests: read
+    uses: seiunx-dev/ci-templates/.github/workflows/docker.yml@v1
+    with:
+      cache-backend: registry
+      cache-mode: max # keeps the cargo-chef cook layer
+      pr-paths: |
+        Dockerfile
+        .dockerignore
+        Cargo.*
+        src/**
+        schema_info.json
+        Data/structures/**
 
-      - name: Run Clippy
-        run: cargo clippy --locked --all-targets -- -D warnings
+  workflows:
+    name: Workflow lint
+    uses: seiunx-dev/ci-templates/.github/workflows/actionlint.yml@v1
 
-      - name: Run tests
-        run: cargo test --locked
-
-      - name: Check ent_generator formatting
-        working-directory: tools/ent_generator
-        run: cargo fmt --all -- --check
-
-      - name: Check ent_generator build
-        working-directory: tools/ent_generator
-        run: cargo check --locked --all-targets
-
-      - name: Run ent_generator Clippy
-        working-directory: tools/ent_generator
-        run: cargo clippy --locked --all-targets -- -D warnings
-
-      - name: Run ent_generator tests
-        working-directory: tools/ent_generator
-        run: cargo test --locked
-
-      - name: Test Python tooling
-        run: python3 -m unittest discover -s tools -p 'test_*.py'
+  # Aggregate gate (the pattern from the ci-templates README): release-gate waits for it.
+  ci-ok:
+    name: CI OK # the only required status check
+    if: always()
+    needs: [rust, tools, sonar, docker, workflows]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
+        run: exit 1

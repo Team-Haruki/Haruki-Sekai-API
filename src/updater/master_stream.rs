@@ -621,6 +621,8 @@ mod tests {
     /// ```
     #[test]
     #[ignore]
+    // Manual probe, never run in CI (so never covered): keep its hand-rolled CBC loop as is.
+    #[allow(clippy::chunks_exact_to_as_chunks)]
     fn peak_memory_probe() {
         use cipher::{BlockModeEncrypt, KeyIvInit};
         use std::io::{BufReader, BufWriter};

@@ -1,31 +1,47 @@
 version: 2
 updates:
-  - package-ecosystem: "cargo"
-    directory: "/"
+  - package-ecosystem: cargo
+    directories: ["/", "/tools/ent_generator"]
     schedule:
-      interval: "weekly"
-      day: "monday"
+      interval: weekly
+      day: monday
       time: "09:00"
-      timezone: "Asia/Shanghai"
+      timezone: Asia/Shanghai
+    open-pull-requests-limit: 5
     commit-message:
       prefix: "[Chore] "
-
-  - package-ecosystem: "docker"
+    cooldown:
+      default-days: 3
+    groups:
+      cargo-minor-patch:
+        update-types: ["minor", "patch"]
+  - package-ecosystem: docker
     directory: "/"
     schedule:
-      interval: "weekly"
-      day: "monday"
+      interval: weekly
+      day: monday
       time: "09:00"
-      timezone: "Asia/Shanghai"
+      timezone: Asia/Shanghai
+    open-pull-requests-limit: 5
     commit-message:
       prefix: "[Chore] "
-
-  - package-ecosystem: "github-actions"
+    cooldown:
+      default-days: 3
+    groups:
+      docker:
+        patterns: ["*"]
+  - package-ecosystem: github-actions
     directory: "/"
     schedule:
-      interval: "weekly"
-      day: "monday"
+      interval: weekly
+      day: monday
       time: "09:00"
-      timezone: "Asia/Shanghai"
+      timezone: Asia/Shanghai
+    open-pull-requests-limit: 5
     commit-message:
       prefix: "[Chore] "
+    cooldown:
+      default-days: 3
+    groups:
+      github-actions:
+        patterns: ["*"]
