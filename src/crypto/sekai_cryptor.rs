@@ -66,7 +66,7 @@ impl SekaiCryptor {
         if data.is_empty() {
             return Err(AppError::CryptoError("Content cannot be empty".to_string()));
         }
-        if data.len() % 16 != 0 {
+        if !data.len().is_multiple_of(16) {
             return Err(AppError::CryptoError(
                 "Content length is not a multiple of AES block size".to_string(),
             ));
@@ -102,7 +102,7 @@ impl SekaiCryptor {
         if data.is_empty() {
             return Err(AppError::CryptoError("Content cannot be empty".to_string()));
         }
-        if data.len() % 16 != 0 {
+        if !data.len().is_multiple_of(16) {
             return Err(AppError::CryptoError(
                 "Content length is not a multiple of AES block size".to_string(),
             ));
@@ -152,7 +152,7 @@ impl SekaiCryptor {
         if data.is_empty() {
             return Err(AppError::CryptoError("Content cannot be empty".to_string()));
         }
-        if data.len() % 16 != 0 {
+        if !data.len().is_multiple_of(16) {
             return Err(AppError::CryptoError(
                 "Content length is not a multiple of AES block size".to_string(),
             ));
@@ -211,10 +211,9 @@ impl<R: std::io::Read> DecryptReader<R> {
                 "Content length is not a multiple of AES block size",
             ));
         }
-        for block in self.chunk[..n].chunks_exact_mut(16) {
-            let block = <&mut Block<Aes128CbcDec>>::try_from(block)
-                .map_err(|e| Error::new(ErrorKind::InvalidData, e.to_string()))?;
-            self.decryptor.decrypt_block(block);
+        for block in self.chunk[..n].as_chunks_mut::<16>().0 {
+            self.decryptor
+                .decrypt_block(<&mut Block<Aes128CbcDec>>::from(block));
         }
         if let Some(prev) = self.carry.take() {
             self.out.extend_from_slice(&prev);

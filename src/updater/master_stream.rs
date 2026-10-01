@@ -702,8 +702,8 @@ mod tests {
                     break;
                 }
                 let full = n - (n % 16);
-                for block in buf[..full].chunks_exact_mut(16) {
-                    enc.encrypt_block(<&mut cipher::Block<Enc>>::try_from(block).unwrap());
+                for block in buf[..full].as_chunks_mut::<16>().0 {
+                    enc.encrypt_block(<&mut cipher::Block<Enc>>::from(block));
                 }
                 w.write_all(&buf[..full]).unwrap();
                 tail = buf[full..n].to_vec();
@@ -713,8 +713,8 @@ mod tests {
             }
             let pad = 16 - (tail.len() % 16);
             tail.extend(std::iter::repeat_n(pad as u8, pad));
-            for block in tail.chunks_exact_mut(16) {
-                enc.encrypt_block(<&mut cipher::Block<Enc>>::try_from(block).unwrap());
+            for block in tail.as_chunks_mut::<16>().0 {
+                enc.encrypt_block(<&mut cipher::Block<Enc>>::from(block));
             }
             w.write_all(&tail).unwrap();
             w.flush().unwrap();
