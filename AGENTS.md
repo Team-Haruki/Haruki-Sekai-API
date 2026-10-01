@@ -384,7 +384,7 @@ CI and releases reuse the shared workflows in
 
 - `ci.yml` (`CI`) runs on `main` pushes, pull requests targeting `main`, and manual dispatch: Rust lint (fmt + Clippy `-D warnings` for the crate and `tools/ent_generator`), tests run once under cargo-llvm-cov with a Postgres service (plus the PG-gated `--ignored ingest::tests postgres` tests), an MSRV check against `rust-version` in `Cargo.toml` (1.94), Python tool tests, Sonar (scans the uploaded coverage, no second test run), Docker, and workflow lint (actionlint).
 - `CI OK` is the only required status check; it fails when any CI job fails or is cancelled.
-- Docker (inside `ci.yml`): PRs build only, and only when Docker inputs change; every `main` push pushes `ghcr.io/team-haruki/haruki-sekai-api:main`, `:sha-<full sha>` and `:sha-<7 chars>`.
+- Docker (inside `ci.yml`): PRs build only, and only when Docker inputs change. On `main` the image job does not wait for the tests: it runs in parallel and pushes the immutable `ghcr.io/team-haruki/haruki-sekai-api:sha-<full sha>` and `:sha-<7 chars>` as soon as the build finishes; the `Docker tags` job (template `docker-retag.yml`, after `CI OK`) then moves `:main` to that digest without rebuilding. `:main` therefore only follows commits whose `CI OK` passed and lags the `:sha-*` tags until then; deploy `:sha-<7 chars>` when the image is needed earlier.
 - `release.yml` (`Release`) runs on `v*` tags and manual dispatch. A manual dispatch is a dry run: it builds the archives and publishes nothing.
 - Release flow: bump `version` in `Cargo.toml` in a PR → merge → wait for `CI OK` on main → push tag `v<version>` → the gate checks tag == `v` + Cargo version and waits for `CI OK` on the tagged commit → linux-x64 / macos-arm64 / windows-x64 archives are built on the tag (asset names `haruki-sekai-api-<label>.tar.gz|zip`, plus `SHA256SUMS-<tag>.txt`) → the main `:sha-<sha>` image is re-tagged as `:X.Y.Z`, `:X.Y`, `:latest` without a rebuild → the GitHub Release is published. Never rewrite the version from the tag.
 - Caches: Rust caches and the Docker registry cache (`:buildcache`) are written only from `main`; PRs and tags only read them. Release builds are cold builds on the tag.
@@ -396,4 +396,5 @@ Workflow maintenance rules:
 - Fix template bugs and add missing template features upstream in `seiunx-dev/ci-templates` instead of working around them here; callers stay on `@v1`.
 - Keep `permissions` minimal: `contents: read` by default, `packages: write` only on the Docker jobs, `contents: write` only on the GitHub Release job.
 - Pin third-party actions in custom steps to a commit SHA with a version comment.
-- Do not reintroduce `docker.yml`, `sonar.yml`, per-workflow prebuild/reuse logic (`tools/ci_reuse.py` is no longer called), or main-push release builds.
+- Do not reintroduce `docker.yml`, `sonar.yml`, per-workflow prebuild/reuse logic, or main-push release builds.
+- Do not add `needs:` on the test jobs to the Docker job, and do not suppress `githubactions:S7637` (full-SHA pins) in `sonar-project.properties`: the template's `sonar.yml` already ignores it for the `@v1` references.

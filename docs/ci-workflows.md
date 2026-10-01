@@ -24,15 +24,17 @@ while the main branch never prepared native release binaries.
 | CI / Rust | fmt + Clippy (main crate and `tools/ent_generator`); tests once under cargo-llvm-cov with Postgres, incl. the ignored `ingest::tests postgres` tests; MSRV 1.94 `cargo check` | Same; saves the Rust caches | — |
 | CI / Python tools | unittest + coverage | Same | — |
 | CI / Sonar | Scans the uploaded coverage (no second test run) | Same | — |
-| CI / Docker | Build only, when Docker inputs change; reads the registry cache | Push `:main`, `:sha-<sha>`, `:sha-<sha7>`; writes the registry cache | — |
+| CI / Docker | Build only, when Docker inputs change; reads the registry cache | Runs in parallel with the tests; pushes `:sha-<sha>`, `:sha-<sha7>` as soon as the build finishes; writes the registry cache | — |
 | CI / CI OK | Single required check | Same | — |
+| CI / Docker tags | — | After `CI OK`: moves `:main` to the digest the Docker job pushed (`docker-retag.yml`, no rebuild) | — |
 | Release | — | — | Gate (tag == `v` + Cargo version, waits for `CI OK`), build linux/macos/windows archives, re-tag `:sha-<sha>` as `:X.Y.Z`/`:X.Y`/`:latest`, publish the GitHub Release |
 
 A manual `Release` dispatch is a dry run: gate + archives only, nothing is
 published. Asset names are unchanged (`haruki-sekai-api-<label>.tar.gz|zip`,
 flat layout, plus `SHA256SUMS-<tag>.txt`). Main images carry
 `org.opencontainers.image.version=main-<sha7>`; promoted release tags reuse
-that image unchanged. `tools/ci_reuse.py` is no longer called by any workflow.
+that image unchanged. `:main` lags the `:sha-*` tags until `CI OK` passes, so it
+never points at a commit that failed CI.
 
 Docker uses cargo-chef 0.1.78 with the same Rust base for planning and building.
 Its recipe isolates dependency compilation (including masking local package
