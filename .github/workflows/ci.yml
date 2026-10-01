@@ -51,7 +51,7 @@ jobs:
       - name: Unit tests with coverage
         run: |
           python -m pip install --only-binary :all: coverage==7.15.3
-          python -m coverage run --branch --include='*/tools/generate_mysekai_followups.py,*/tools/ci_reuse.py' -m unittest discover -s tools -p 'test_*.py'
+          python -m coverage run --branch --include='*/tools/generate_mysekai_followups.py' -m unittest discover -s tools -p 'test_*.py'
           python -m coverage xml -o coverage/python.xml
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -64,19 +64,20 @@ jobs:
     needs: [rust, tools]
     uses: seiunx-dev/ci-templates/.github/workflows/sonar.yml@v1
     with:
+      project-version: auto
       args: -Dsonar.qualitygate.wait=true
     secrets:
       SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
 
   docker:
     name: Docker
-    needs: [rust]
     permissions:
       contents: read
       packages: write
       pull-requests: read
     uses: seiunx-dev/ci-templates/.github/workflows/docker.yml@v1
     with:
+      defer-moving-tags: true # push :sha-* right away; :main moves after CI OK (docker-tags)
       cache-backend: registry
       cache-mode: max # keeps the cargo-chef cook layer
       pr-paths: |
@@ -101,3 +102,16 @@ jobs:
     steps:
       - if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
         run: exit 1
+
+  docker-tags:
+    name: Docker tags # :main follows only commits whose CI OK passed
+    needs: [docker, ci-ok]
+    if: needs.docker.outputs.deferred-tags != ''
+    permissions:
+      contents: read
+      packages: write
+    uses: seiunx-dev/ci-templates/.github/workflows/docker-retag.yml@v1
+    with:
+      image: ${{ needs.docker.outputs.image }}
+      digest: ${{ needs.docker.outputs.digest }}
+      tags: ${{ needs.docker.outputs.deferred-tags }}
