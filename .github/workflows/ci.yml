@@ -24,7 +24,7 @@ jobs:
     with:
       extra-directories: tools/ent_generator
       coverage: true
-      msrv: "1.85"
+      msrv: "1.94"
       postgres-image: postgres:17-alpine
       env: |
         HARUKI_TEST_REGISTRY_DSN=${CI_POSTGRES_URL}
@@ -35,6 +35,8 @@ jobs:
       # ingest_engine::test_direct_ingestion (hard-coded haruki:sekai DSN).
       extra-test-command: $CARGO_TEST --locked --lib -- --ignored --test-threads=1 ingest::tests postgres
 
+  # Custom job: python-uv-ci.yml expects a uv project; these are stdlib-only unittest scripts
+  # under tools/ with no pyproject, so a plain setup-python job is enough.
   tools:
     name: Python tools
     runs-on: ubuntu-latest
@@ -89,6 +91,7 @@ jobs:
     name: Workflow lint
     uses: seiunx-dev/ci-templates/.github/workflows/actionlint.yml@v1
 
+  # Aggregate gate (the pattern from the ci-templates README): release-gate waits for it.
   ci-ok:
     name: CI OK # the only required status check
     if: always()

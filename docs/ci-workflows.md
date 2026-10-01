@@ -21,7 +21,7 @@ while the main branch never prepared native release binaries.
 
 | Workflow / job | PR | main | Version tag |
 | --- | --- | --- | --- |
-| CI / Rust | fmt + Clippy (main crate and `tools/ent_generator`); tests once under cargo-llvm-cov with Postgres, incl. the ignored `ingest::tests postgres` tests; MSRV 1.85 `cargo check` | Same; saves the Rust caches | — |
+| CI / Rust | fmt + Clippy (main crate and `tools/ent_generator`); tests once under cargo-llvm-cov with Postgres, incl. the ignored `ingest::tests postgres` tests; MSRV 1.94 `cargo check` | Same; saves the Rust caches | — |
 | CI / Python tools | unittest + coverage | Same | — |
 | CI / Sonar | Scans the uploaded coverage (no second test run) | Same | — |
 | CI / Docker | Build only, when Docker inputs change; reads the registry cache | Push `:main`, `:sha-<sha>`, `:sha-<sha7>`; writes the registry cache | — |
