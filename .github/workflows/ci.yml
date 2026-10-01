@@ -50,7 +50,7 @@ jobs:
           python-version: "3.13"
       - name: Unit tests with coverage
         run: |
-          python -m pip install coverage==7.15.3
+          python -m pip install --only-binary :all: coverage==7.15.3
           python -m coverage run --branch --include='*/tools/generate_mysekai_followups.py,*/tools/ci_reuse.py' -m unittest discover -s tools -p 'test_*.py'
           python -m coverage xml -o coverage/python.xml
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
