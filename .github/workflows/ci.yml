@@ -106,7 +106,9 @@ jobs:
   docker-tags:
     name: Docker tags # :main follows only commits whose CI OK passed
     needs: [docker, ci-ok]
-    if: needs.docker.outputs.deferred-tags != ''
+    # Explicit result check: the implicit success() also fails when any job upstream of ci-ok was
+    # skipped (e.g. a PR-only job), which silently skipped this job on main.
+    if: ${{ !cancelled() && needs.ci-ok.result == 'success' && needs.docker.outputs.deferred-tags != '' }}
     permissions:
       contents: read
       packages: write
