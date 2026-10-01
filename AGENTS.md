@@ -378,17 +378,17 @@ Examples from this repo's history:
 
 ## GitHub Actions workflows
 
-Use the standardized workflow layout in `.github/workflows`:
+CI and releases are thin callers of the shared reusable workflows in
+[seiunx-dev/ci-templates](https://github.com/seiunx-dev/ci-templates) (`@v1`). See `docs/ci-workflows.md`.
 
-- `ci.yml` runs on `main` pushes, pull requests targeting `main`, and manual dispatch.
-- Rust CI order: `cargo fmt --all -- --check`, `cargo check --locked --all-targets`, `cargo clippy --locked --all-targets -- -D warnings`, then `cargo test --locked`.
-- `release.yml` is the standard release build entrypoint. It runs on `v*` tags and manual dispatch, builds release artifacts, uploads them with `actions/upload-artifact`, and publishes GitHub Release assets on tag pushes.
-- `docker.yml` is the standard Docker entrypoint. It runs on `main` pushes, `v*` tags, PRs that touch Docker/build inputs, and manual dispatch. PRs build only; non-PR runs push GHCR images with lowercase image names and Docker metadata tags.
+- `ci.yml` (`CI`) runs on `main` pushes, pull requests targeting `main`, and manual dispatch: Rust lint/test (`rust-ci.yml`, tests once under cargo-llvm-cov with a Postgres service, plus the PG-gated `ingest::tests postgres` ignored tests), MSRV 1.85 check, Python tool tests, Sonar (consumes the coverage artifacts, no second test run), Docker, and workflow lint. `CI OK` is the single aggregate status check.
+- Docker: PRs build only (when Docker inputs change); every `main` push pushes `ghcr.io/team-haruki/haruki-sekai-api:main`, `:sha-<full sha>` and `:sha-<7 chars>`.
+- `release.yml` (`Release`) runs on `v*` tags and manual dispatch. The gate requires tag == `v` + `Cargo.toml` version and waits for `CI OK` on the tagged commit; it then builds the linux/macos/windows archives (same asset names as before), re-tags the verified main image as `:X.Y.Z`, `:X.Y`, `:latest` (no rebuild), and publishes the GitHub Release. A manual dispatch is a dry run: it builds the archives and publishes nothing.
+- Release flow: bump `Cargo.toml` in a PR, merge, wait for `CI OK` on main, then push the `v<version>` tag.
 
 Workflow maintenance rules:
 
-- Keep workflow filenames and top-level names aligned: `CI`, `Release`, `Docker`, and optional package-specific names.
-- Use `actions/checkout@v7`, `actions/upload-artifact@v7`, `actions/download-artifact@v8`, `softprops/action-gh-release@v3`, and current Docker actions (`setup-buildx@v4`, `login@v4`, `metadata@v6`, `build-push@v7`).
-- Keep `permissions` minimal: `contents: read` for CI/Docker build-only work, `contents: write` for release publishing, and `packages: write` only when pushing container images.
-- Use workflow `concurrency` keyed by workflow name and ref, with release jobs using `release-${{ github.ref_name }}` and `cancel-in-progress: false`.
-- Do not reintroduce legacy workflow names such as `rust-ci.yml`, `build.yml`, `release-build.yml`, `docker-build.yml`, or `docker-release.yml` unless a package-specific workflow already exists and is intentionally preserved.
+- Change shared behaviour in `seiunx-dev/ci-templates`, not by inlining steps here; keep callers on `@v1`.
+- Keep `permissions` minimal: `contents: read` by default, `packages: write` only on the Docker job, `contents: write` only on the GitHub Release job.
+- Pin third-party actions to a commit SHA with a version comment.
+- Do not reintroduce `docker.yml`, `sonar.yml`, or per-workflow prebuild/reuse logic.

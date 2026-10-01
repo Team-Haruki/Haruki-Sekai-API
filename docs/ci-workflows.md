@@ -13,27 +13,26 @@ source was built for the PR, main push, and tag push. Sonar had no compiled
 coverage cache. Native release caches were written under isolated tag refs,
 while the main branch never prepared native release binaries.
 
-## Responsibilities
+## Responsibilities (since 2026-10-01: shared templates)
 
-| Workflow | PR | main | Version tag |
+`ci.yml` and `release.yml` call the reusable workflows in
+[seiunx-dev/ci-templates](https://github.com/seiunx-dev/ci-templates) at `@v1`.
+`docker.yml` and `sonar.yml` were folded into `ci.yml`.
+
+| Workflow / job | PR | main | Version tag |
 | --- | --- | --- | --- |
-| CI | Format, check, Clippy, Rust and Python tests | Same checks; save shared Rust cache | — |
-| SonarQube | Coverage + PostgreSQL tests + analysis; restore cache | Same analysis; save instrumented dependency cache | — |
-| Docker | Full image validation; read shared registry cache | Build/push commit image and refresh registry cache | Reuse the exact main commit image; build if unavailable |
-| Release | — | Prepare three platform archives for relevant changes; save platform caches | Publish the exact main commit archives; build if absent/expired |
+| CI / Rust | fmt + Clippy (main crate and `tools/ent_generator`); tests once under cargo-llvm-cov with Postgres, incl. the ignored `ingest::tests postgres` tests; MSRV 1.85 `cargo check` | Same; saves the Rust caches | — |
+| CI / Python tools | unittest + coverage | Same | — |
+| CI / Sonar | Scans the uploaded coverage (no second test run) | Same | — |
+| CI / Docker | Build only, when Docker inputs change; reads the registry cache | Push `:main`, `:sha-<sha>`, `:sha-<sha7>`; writes the registry cache | — |
+| CI / CI OK | Single required check | Same | — |
+| Release | — | — | Gate (tag == `v` + Cargo version, waits for `CI OK`), build linux/macos/windows archives, re-tag `:sha-<sha>` as `:X.Y.Z`/`:X.Y`/`:latest`, publish the GitHub Release |
 
-The standard workflow filenames are retained. PR image validation has only
-read permissions; publishing jobs alone receive `packages: write` or
-`contents: write`. Tag and package versions must match. Docker images retain
-the binary's Cargo version in their OCI label even when built on main.
-
-`tools/ci_reuse.py` selects only successful **main push** runs with exactly the
-release commit SHA. A tag waits up to 30 minutes for an in-progress matching
-build. Failed builds stop publication. Missing/cancelled builds and expired
-archive sets fall back to a fresh build. Downloaded archives come from the
-validated run ID; image promotion additionally verifies the revision and
-version labels, then pins its source digest. A label mismatch fails rather
-than silently promoting the wrong image.
+A manual `Release` dispatch is a dry run: gate + archives only, nothing is
+published. Asset names are unchanged (`haruki-sekai-api-<label>.tar.gz|zip`,
+flat layout, plus `SHA256SUMS-<tag>.txt`). Main images carry
+`org.opencontainers.image.version=main-<sha7>`; promoted release tags reuse
+that image unchanged. `tools/ci_reuse.py` is no longer called by any workflow.
 
 Docker uses cargo-chef 0.1.78 with the same Rust base for planning and building.
 Its recipe isolates dependency compilation (including masking local package
@@ -41,12 +40,11 @@ versions) from application source changes. Only Cargo inputs, `src`, the
 schema and committed structures enter the build context. Registry cache
 `ghcr.io/team-haruki/haruki-sekai-api:buildcache` replaces the per-ref GHA
 BuildKit cache; only main writes it. PRs and tags do not save large Rust caches.
-Sonar caches `target/llvm-cov-target` separately and instruments library tests;
-normal CI still runs all-target checks and the full default test suite.
+Coverage is produced by the single CI test run and handed to Sonar as an artifact.
 
 Native archives contain the API, registry, ingester, standalone ingest command
-and `schema_info.json`. Benchmark executables are not release targets. Actions
-archives and Docker build records have a seven-day retention; published GitHub
+and `schema_info.json`. Benchmark executables are not release targets. Release
+archive artifacts are kept for one day and Docker build records for three; published GitHub
 Release assets are independent of that temporary retention.
 
 The first build must populate the new caches. Subsequent build times must be

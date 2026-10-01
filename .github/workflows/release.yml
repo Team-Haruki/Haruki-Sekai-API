@@ -2,140 +2,56 @@ name: Release
 
 on:
   push:
-    branches: [main]
     tags: ['v*']
-    paths:
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - 'src/**'
-      - 'schema_info.json'
-      - '.github/workflows/release.yml'
-      - 'tools/ci_reuse.py'
-  workflow_dispatch:
+  workflow_dispatch: # dry run: builds everything, publishes nothing
 
 permissions:
   contents: read
 
 concurrency:
-  group: release-${{ github.ref_name }}
+  group: release-${{ github.ref }}
   cancel-in-progress: false
 
-env:
-  CARGO_TERM_COLOR: always
-  BINARY_NAME: haruki-sekai-api
-
 jobs:
-  source:
-    name: Select release build
-    runs-on: ubuntu-latest
-    timeout-minutes: 35
+  gate:
+    name: Gate
     permissions:
       contents: read
-      actions: read
-    outputs:
-      reuse: ${{ steps.source.outputs.reuse }}
-      run_id: ${{ steps.source.outputs.run_id }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v7
-      - name: Find main build for this tag
-        id: source
-        if: startsWith(github.ref, 'refs/tags/')
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          python3 -c 'import os,tomllib; assert os.environ["GITHUB_REF_NAME"] == "v" + tomllib.load(open("Cargo.toml", "rb"))["package"]["version"], "Tag must match Cargo version"'
-          python3 tools/ci_reuse.py release >> "$GITHUB_OUTPUT"
+      checks: read
+    uses: seiunx-dev/ci-templates/.github/workflows/release-gate.yml@v1
 
-  build:
-    name: Build ${{ matrix.name }}
-    needs: source
-    if: needs.source.outputs.reuse != 'true'
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 45
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            name: linux-x64
-            archive: tar.gz
-          - os: macos-latest
-            name: macos-arm64
-            archive: tar.gz
-          - os: windows-latest
-            name: windows-x64
-            archive: zip
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v7
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
-      - name: Cache Rust artifacts
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-        with:
-          shared-key: release-${{ matrix.name }}
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-      - name: Build runtime binaries
-        run: cargo build --release --locked --bin haruki-sekai-api --bin master_registry --bin master_ingest --bin run_ingest
-      - name: Package archive (Unix)
-        if: runner.os != 'Windows'
-        run: |
-          mkdir -p dist
-          for binary in haruki-sekai-api master_registry master_ingest run_ingest; do
-            cp "target/release/$binary" "dist/$binary"
-          done
-          cp schema_info.json dist/schema_info.json
-          tar -czf "dist/${{ env.BINARY_NAME }}-${{ matrix.name }}.tar.gz" -C dist haruki-sekai-api master_registry master_ingest run_ingest schema_info.json
-      - name: Package archive (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force -Path dist
-          foreach ($binary in @('haruki-sekai-api', 'master_registry', 'master_ingest', 'run_ingest')) {
-            Copy-Item "target/release/$binary.exe" "dist/$binary.exe"
-          }
-          Copy-Item schema_info.json dist/schema_info.json
-          Compress-Archive -Path dist/*.exe,dist/schema_info.json -DestinationPath "dist/${{ env.BINARY_NAME }}-${{ matrix.name }}.zip" -Force
-      - name: Upload packaged artifact
-        uses: actions/upload-artifact@v7
-        with:
-          name: ${{ env.BINARY_NAME }}-${{ matrix.name }}
-          path: dist/${{ env.BINARY_NAME }}-${{ matrix.name }}.${{ matrix.archive }}
-          if-no-files-found: error
-          retention-days: 7
+  binaries:
+    name: Binaries
+    needs: gate
+    uses: seiunx-dev/ci-templates/.github/workflows/rust-release.yml@v1
+    with:
+      version: ${{ needs.gate.outputs.version }}
+      tag: ${{ needs.gate.outputs.tag }}
+      bins: haruki-sekai-api master_registry master_ingest run_ingest
+      extra-files: schema_info.json
+      asset-name: "{name}-{label}" # current asset names
+      layout: flat
+
+  docker:
+    name: Docker
+    needs: gate
+    if: needs.gate.outputs.is-tag == 'true' # dry runs never push images
+    permissions:
+      contents: read
+      packages: write
+      pull-requests: read
+    uses: seiunx-dev/ci-templates/.github/workflows/docker.yml@v1
+    with:
+      promote-on-tag: true # re-tag the verified main image; the gate already waited for it
+      cache-backend: registry
 
   publish:
-    name: Publish GitHub Release
-    needs: [source, build]
-    if: >-
-      ${{ always() && !cancelled() && startsWith(github.ref, 'refs/tags/') &&
-          needs.source.result == 'success' &&
-          (needs.build.result == 'success' ||
-           (needs.build.result == 'skipped' && needs.source.outputs.reuse == 'true')) }}
-    runs-on: ubuntu-latest
+    name: GitHub Release
+    needs: [gate, binaries, docker]
+    if: needs.gate.outputs.is-tag == 'true'
     permissions:
       contents: write
-      actions: read
-    steps:
-      - name: Download packaged artifacts
-        uses: actions/download-artifact@v8
-        with:
-          github-token: ${{ github.token }}
-          run-id: ${{ needs.source.outputs.run_id || github.run_id }}
-          pattern: haruki-sekai-api-*
-          path: artifacts
-      - name: Generate checksums
-        env:
-          RELEASE_TAG: ${{ github.ref_name }}
-        run: |
-          cd artifacts
-          find . -type f \( -name '*.tar.gz' -o -name '*.zip' \) -exec sha256sum {} \; > "SHA256SUMS-${RELEASE_TAG}.txt"
-      - name: Upload release assets
-        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3
-        with:
-          files: |
-            artifacts/**/*.tar.gz
-            artifacts/**/*.zip
-            artifacts/SHA256SUMS-${{ github.ref_name }}.txt
-          generate_release_notes: true
+    uses: seiunx-dev/ci-templates/.github/workflows/gh-release.yml@v1
+    with:
+      tag: ${{ needs.gate.outputs.tag }}
+      prerelease: ${{ needs.gate.outputs.prerelease }}
