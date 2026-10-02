@@ -66,3 +66,25 @@ Apply `docs/migrations/2026-09-30-mysekai-shop-dependencies.sql` before the
 updated ingester. Verify both per-region row counts, daily/weekly limits and
 level capacity values after startup. The generator now covers these two
 client classes as well; existing user upload and Cloud rendering are separate.
+
+## Birthday parties
+
+Cloud's MySekai resource image (`/msa`) shows the progress of a running
+birthday party. It needs `birthdayParties` (character unit and the
+`startAt`/`closedAt` window) and `birthdayPartyDeliveryTotalRewards` (the
+cumulative reward track; its highest `requirement`, 400 in every party so far,
+is the progress target). Both files exist in all five regions. The models come
+from `MasterBirthdayParty` and `MasterBirthdayPartyDeliveryTotalReward`, which
+the generator now covers; they were generated from the JP 6.8.1 iOS dump
+(`--source "JP 6.8.1 iOS"`), whose fields match the TW and CN dumps apart from
+the JP-only `mysekaiSiteHarvestFixtureId`. The fixtures are actual JP rows.
+Both tables use `(game_id, server_region)` unique keys.
+
+The client compares `requirement` with the user's
+`userBirthdayParties[].obtainedMysekaiMaterialCount`
+(`ScreenLayerMysekaiDeliveryInformationView.UpdateReward`) and shows
+`<count>/<requirement>`, so the count may exceed the last requirement.
+
+Apply `docs/migrations/2026-10-02-birthday-parties.sql` before the updated
+ingester, then confirm per-region row counts and that every party's highest
+`requirement` is present.
