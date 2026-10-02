@@ -1566,6 +1566,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ingests_birthday_parties_and_total_rewards_per_region() {
+        use sea_orm::Statement;
+        let mut opt = ConnectOptions::new("sqlite::memory:".to_string());
+        opt.max_connections(1);
+        let db = Database::connect(opt).await.unwrap();
+        let schema =
+            MasterSchema::parse(&std::fs::read_to_string("schema_info.json").unwrap()).unwrap();
+        let files = [
+            (
+                "birthdayParties",
+                include_str!("testdata/ingest_fixture/birthdayParties.json"),
+            ),
+            (
+                "birthdayPartyDeliveryTotalRewards",
+                include_str!("testdata/ingest_fixture/birthdayPartyDeliveryTotalRewards.json"),
+            ),
+        ];
+        let root = std::env::temp_dir().join(format!("haruki_birthday_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        for (stem, body) in files {
+            let table = schema.resolve_table_name(stem).unwrap();
+            let (cols, _) = schema.table(&table).unwrap();
+            let columns = cols.keys().cloned().collect::<Vec<_>>().join(", ");
+            db.execute_unprepared(&format!("CREATE TABLE {table} ({columns})"))
+                .await
+                .unwrap();
+            std::fs::write(root.join(format!("{stem}.json")), body).unwrap();
+        }
+        assert_eq!(
+            schema.resolve_table_name("birthdayParties").as_deref(),
+            Some("birthdayparties")
+        );
+        let engine = IngestionEngine::new(db.clone()).await.unwrap();
+        for region in ["cn", "jp", "jp"] {
+            engine
+                .ingest_master_data(root.to_str().unwrap(), region)
+                .await
+                .unwrap();
+        }
+        let row = db.query_one_raw(Statement::from_string(db.get_database_backend(),
+            "SELECT COUNT(*) AS n, MIN(game_character_unit_id) AS unit, MIN(start_at) AS start_at, MIN(closed_at) AS closed_at FROM birthdayparties WHERE game_id = 1"
+        )).await.unwrap().unwrap();
+        assert_eq!(row.try_get::<i64>("", "n").unwrap(), 2);
+        assert_eq!(row.try_get::<i64>("", "unit").unwrap(), 6);
+        assert_eq!(
+            row.try_get::<i64>("", "start_at").unwrap(),
+            1_759_330_800_000
+        );
+        assert_eq!(
+            row.try_get::<i64>("", "closed_at").unwrap(),
+            1_759_849_199_000
+        );
+        let row = db.query_one_raw(Statement::from_string(db.get_database_backend(),
+            "SELECT COUNT(*) AS n, MAX(requirement) AS cap FROM birthdaypartydeliverytotalrewards WHERE server_region = 'jp' AND birthday_party_id = 1"
+        )).await.unwrap().unwrap();
+        assert_eq!(row.try_get::<i64>("", "n").unwrap(), 5);
+        assert_eq!(row.try_get::<i64>("", "cap").unwrap(), 400);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
     async fn ingests_mysekai_followups_without_losing_region_or_optional_data() {
         use sea_orm::Statement;
         let mut opt = ConnectOptions::new("sqlite::memory:".to_string());

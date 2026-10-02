@@ -1,6 +1,8 @@
 pub mod areaitemlevels;
 pub mod areaitems;
 pub mod areas;
+pub mod birthdayparties;
+pub mod birthdaypartydeliverytotalrewards;
 pub mod bonds;
 pub mod bondshonors;
 pub mod bondshonorwords;
@@ -135,6 +137,28 @@ pub mod worldbloomsupportdeckuniteventlimitedbonuses;
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn birthday_parties_keep_their_schedule_and_total_rewards() {
+        let parties: super::birthdayparties::Birthdayparty =
+            serde_json::from_str(include_str!("testdata/ingest_fixture/birthdayParties.json"))
+                .unwrap();
+        assert_eq!(parties[0].game_character_unit_id, Some(6));
+        assert_eq!(parties[0].start_at, Some(1_759_330_800_000));
+        assert_eq!(parties[0].closed_at, Some(1_759_849_199_000));
+        assert_eq!(parties[1].assetbundle_name.as_deref(), Some("emu_2026"));
+        // TW/CN clients do not declare mysekaiSiteHarvestFixtureId.
+        let nuverse: super::birthdayparties::BirthdaypartyElement =
+            serde_json::from_str(r#"{"id":1,"gameCharacterUnitId":6,"closedAt":1}"#).unwrap();
+        assert_eq!(nuverse.mysekai_site_harvest_fixture_id, None);
+        let rewards: super::birthdaypartydeliverytotalrewards::Birthdaypartydeliverytotalreward =
+            serde_json::from_str(include_str!(
+                "testdata/ingest_fixture/birthdayPartyDeliveryTotalRewards.json"
+            ))
+            .unwrap();
+        assert_eq!(rewards.last().unwrap().requirement, Some(400));
+        assert_eq!(rewards.last().unwrap().birthday_party_id, Some(1));
+    }
+
     #[test]
     fn mysekai_followups_preserve_names_icons_and_optional_fields() {
         let tools: super::mysekaitools::Mysekaitool =

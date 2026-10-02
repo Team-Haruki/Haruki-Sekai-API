@@ -76,6 +76,44 @@
   {
     "columns": [
       "game_id:int64",
+      "game_character_unit_id:int64",
+      "start_at:int64",
+      "birthday_start_at:int64",
+      "closed_at:int64",
+      "delivery_item_material_id:int64",
+      "delivery_reward_mysekai_material_id:int64",
+      "mysekai_site_harvest_spawn_limited_relation_group_id:int64",
+      "assetbundle_name:string",
+      "mysekai_site_harvest_fixture_id:int64",
+      "server_region:string"
+    ],
+    "name": "birthdayparties",
+    "unique_keys": [
+      [
+        "id",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "game_id:int64",
+      "birthday_party_id:int64",
+      "requirement:int64",
+      "resource_box_id:int64",
+      "server_region:string"
+    ],
+    "name": "birthdaypartydeliverytotalrewards",
+    "unique_keys": [
+      [
+        "id",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "game_id:int64",
       "group_id:int64",
       "character_id1:int64",
       "character_id2:int64",

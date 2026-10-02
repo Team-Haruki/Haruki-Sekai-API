@@ -1,0 +1,32 @@
+[
+  {
+    "id": 1,
+    "birthdayPartyId": 1,
+    "requirement": 2,
+    "resourceBoxId": 250601
+  },
+  {
+    "id": 2,
+    "birthdayPartyId": 1,
+    "requirement": 3,
+    "resourceBoxId": 100
+  },
+  {
+    "id": 3,
+    "birthdayPartyId": 1,
+    "requirement": 4,
+    "resourceBoxId": 106
+  },
+  {
+    "id": 45,
+    "birthdayPartyId": 1,
+    "requirement": 380,
+    "resourceBoxId": 106
+  },
+  {
+    "id": 46,
+    "birthdayPartyId": 1,
+    "requirement": 400,
+    "resourceBoxId": 250610
+  }
+]
