@@ -88,28 +88,6 @@ pub async fn get_mysekai_image(
     }
 }
 
-// Accept previously cached full Nuverse URLs during the relative-path transition.
-// Only the known regional origin is stripped; no caller-provided host is fetched.
-pub async fn get_mysekai_housing_thumbnail_path(
-    state: State<std::sync::Arc<AppState>>,
-    Path((server, image_path)): Path<(String, String)>,
-) -> Response {
-    let Ok(region) = server.parse() else {
-        return (StatusCode::BAD_REQUEST, "Invalid server").into_response();
-    };
-    let prefix = crate::client::housing::thumbnail_origin(region)
-        .map(|origin| format!("{origin}{}", crate::client::housing::THUMBNAIL_PREFIX));
-    let path = prefix
-        .as_ref()
-        .and_then(|prefix| image_path.strip_prefix(prefix))
-        .unwrap_or(&image_path);
-    if !crate::client::housing::valid_thumbnail_path(path) {
-        return (StatusCode::BAD_REQUEST, "Invalid housing thumbnail path").into_response();
-    }
-    let (hash, id) = path.split_once('/').unwrap();
-    get_mysekai_housing_thumbnail(state, Path((server, hash.to_string(), id.to_string()))).await
-}
-
 pub async fn get_mysekai_housing_thumbnail(
     State(state): State<std::sync::Arc<AppState>>,
     Path((server, param1, param2)): Path<(String, String, String)>,
@@ -315,51 +293,6 @@ mod tests {
             coalescer: Arc::new(RequestCoalescer::default()),
         };
         (Arc::new(state), server)
-    }
-
-    #[tokio::test]
-    async fn housing_route_accepts_cached_urls_without_fetching_arbitrary_hosts() {
-        for region in [ServerRegion::Cn, ServerRegion::Tw, ServerRegion::Kr] {
-            let (state, server) = test_state(
-                Reply {
-                    content_type: "image/png",
-                    body: vec![1, 2, 3],
-                },
-                region,
-            )
-            .await;
-            let app = crate::api::create_router(state);
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let address = listener.local_addr().unwrap();
-            let frontend = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-            let path = format!("{}/12345678-1234-1234-1234-123456789abc", "a".repeat(64));
-            let url = format!(
-                "{}{}{path}",
-                crate::client::housing::thumbnail_origin(region).unwrap(),
-                crate::client::housing::THUMBNAIL_PREFIX
-            );
-            for input in [path, url] {
-                let response = reqwest::get(format!(
-                    "http://{address}/image/{}/mysekai-housing/{input}",
-                    region.as_str()
-                ))
-                .await
-                .unwrap();
-                assert_eq!(response.status(), StatusCode::OK);
-                assert_eq!(response.bytes().await.unwrap().to_vec(), vec![1, 2, 3]);
-            }
-            for input in ["https://127.0.0.1/private", "bad/path"] {
-                let response = reqwest::get(format!(
-                    "http://{address}/image/{}/mysekai-housing/{input}",
-                    region.as_str()
-                ))
-                .await
-                .unwrap();
-                assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-            }
-            frontend.abort();
-            server.abort();
-        }
     }
 
     #[tokio::test]

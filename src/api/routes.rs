@@ -42,8 +42,8 @@ pub fn create_router(state: Arc<MainAppState>) -> Router {
     let public_routes = Router::new()
         .route("/health", get(health_check))
         .route(
-            "/image/{server}/mysekai-housing/{*image_path}",
-            get(image::get_mysekai_housing_thumbnail_path),
+            "/image/{server}/mysekai-housing/{param1}/{param2}",
+            get(image::get_mysekai_housing_thumbnail),
         )
         .route(
             "/image/{server}/custom-profile-card/thumbnail/{param1}/{param2}",
