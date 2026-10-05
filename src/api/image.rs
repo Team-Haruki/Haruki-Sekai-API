@@ -102,13 +102,6 @@ pub async fn get_mysekai_housing_thumbnail(
                 .into_response();
         }
     };
-    if !region.is_cp_server() {
-        return (
-            StatusCode::BAD_REQUEST,
-            "MySekai housing thumbnails are only supported for colorful palette servers",
-        )
-            .into_response();
-    }
     let Some(router) = state.routers.get(&region) else {
         return (StatusCode::SERVICE_UNAVAILABLE, "Server not initialized").into_response();
     };
@@ -127,7 +120,15 @@ pub async fn get_mysekai_housing_thumbnail(
             .into_response();
     }
     match router
-        .get_image(ImageKind::CpHousingThumbnail, &param1, &param2)
+        .get_image(
+            if region.is_cp_server() {
+                ImageKind::CpHousingThumbnail
+            } else {
+                ImageKind::NuverseHousingThumbnail
+            },
+            &param1,
+            &param2,
+        )
         .await
     {
         Ok(bytes) => (StatusCode::OK, [("content-type", "image/png")], bytes).into_response(),
@@ -295,6 +296,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn housing_thumbnails_work_for_all_five_regions() {
+        for region in [
+            ServerRegion::Jp,
+            ServerRegion::En,
+            ServerRegion::Cn,
+            ServerRegion::Tw,
+            ServerRegion::Kr,
+        ] {
+            let (state, server) = test_state(
+                Reply {
+                    content_type: "image/png",
+                    body: vec![1, 2, 3],
+                },
+                region,
+            )
+            .await;
+            let response = get_mysekai_housing_thumbnail(
+                State(state.clone()),
+                Path((
+                    region.as_str().to_string(),
+                    "a".repeat(64),
+                    "12345678-1234-1234-1234-123456789abc".to_string(),
+                )),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(
+                axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .unwrap()
+                    .to_vec(),
+                vec![1, 2, 3]
+            );
+            let invalid = get_mysekai_housing_thumbnail(
+                State(state),
+                Path((
+                    region.as_str().to_string(),
+                    "bad".to_string(),
+                    "bad".to_string(),
+                )),
+            )
+            .await;
+            assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+            server.abort();
+        }
+    }
+
+    #[tokio::test]
     async fn validates_regions_paths_and_feature_support() {
         let (state, server) = test_state(
             Reply {
@@ -324,11 +373,6 @@ mod tests {
         assert_eq!(malformed.status(), StatusCode::BAD_REQUEST);
 
         for response in [
-            get_mysekai_housing_thumbnail(
-                State(state.clone()),
-                Path(("tw".to_string(), "a".to_string(), "b".to_string())),
-            )
-            .await,
             get_custom_profile_card_thumbnail(
                 State(state.clone()),
                 Path(("tw".to_string(), "a".to_string(), "b".to_string())),

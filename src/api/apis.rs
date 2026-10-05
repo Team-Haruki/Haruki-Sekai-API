@@ -325,6 +325,19 @@ pub async fn get_information(
     .await
 }
 
+fn normalize_housing_response(
+    server: &str,
+    mut response: ApiResponse,
+) -> Result<ApiResponse, AppError> {
+    let region = server
+        .parse()
+        .map_err(|_| AppError::InvalidServerRegion(server.to_string()))?;
+    if response.status.is_success() {
+        crate::client::housing::normalize_thumbnails(region, &mut response.body);
+    }
+    Ok(response)
+}
+
 pub async fn get_mysekai_housing_competition_list(
     State(state): State<Arc<AppState>>,
     Path((server, housing_id)): Path<(String, String)>,
@@ -347,7 +360,10 @@ pub async fn get_mysekai_housing_competition_list(
         if is_lottery { "True" } else { "False" }.to_string(),
     );
 
-    proxy_game_api_with_params(&state, &server, &path, &params).await
+    normalize_housing_response(
+        &server,
+        proxy_game_api_with_params(&state, &server, &path, &params).await?,
+    )
 }
 
 pub async fn post_mysekai_housing_competition_entry(
@@ -377,19 +393,25 @@ pub async fn post_mysekai_housing_competition_entry(
         housing_id, owner_user_id
     );
 
-    proxy_post_game_api_body(&state, &server, &path, &body).await
+    normalize_housing_response(
+        &server,
+        proxy_post_game_api_body(&state, &server, &path, &body).await?,
+    )
 }
 
 pub async fn get_mysekai_housing_competition_back_number_top_list(
     State(state): State<Arc<AppState>>,
     Path(server): Path<String>,
 ) -> Result<ApiResponse, AppError> {
-    proxy_game_api(
-        &state,
+    normalize_housing_response(
         &server,
-        "/user/{userId}/mysekai/housing-competition/back-number-top-list",
+        proxy_game_api(
+            &state,
+            &server,
+            "/user/{userId}/mysekai/housing-competition/back-number-top-list",
+        )
+        .await?,
     )
-    .await
 }
 
 pub async fn get_mysekai_housing_competition_back_number_list(
@@ -405,7 +427,7 @@ pub async fn get_mysekai_housing_competition_back_number_list(
         "/user/{{userId}}/mysekai/housing-competition/{}/back-number-list",
         competition_id
     );
-    proxy_game_api(&state, &server, &path).await
+    normalize_housing_response(&server, proxy_game_api(&state, &server, &path).await?)
 }
 
 pub async fn get_custom_music_score_published_search(
@@ -486,6 +508,39 @@ fn ranking_border_path(server: &str, event_id: &str) -> String {
 mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
+
+    #[test]
+    fn housing_response_normalization_preserves_status_and_errors() {
+        let path = format!("{}/12345678-1234-1234-1234-123456789abc", "a".repeat(64));
+        let body = json!({"results":[{"thumbnailPath":format!("https://mk-prod-tos.tos-cn-shanghai.volces.com/image/mysekai-housing-competition/thumbnail/{path}")}]});
+        let ok = normalize_housing_response(
+            "cn",
+            ApiResponse {
+                status: StatusCode::OK,
+                body: body.clone(),
+            },
+        )
+        .unwrap();
+        assert_eq!(ok.body["results"][0]["thumbnailPath"], path);
+        let failure = normalize_housing_response(
+            "cn",
+            ApiResponse {
+                status: StatusCode::BAD_REQUEST,
+                body: body.clone(),
+            },
+        )
+        .unwrap();
+        assert_eq!(failure.status, StatusCode::BAD_REQUEST);
+        assert_eq!(failure.body, body);
+        assert!(normalize_housing_response(
+            "bad",
+            ApiResponse {
+                status: StatusCode::OK,
+                body: json!({})
+            }
+        )
+        .is_err());
+    }
 
     #[test]
     fn ranking_border_path_is_user_scoped_on_nuverse() {

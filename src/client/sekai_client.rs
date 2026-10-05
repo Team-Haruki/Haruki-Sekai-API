@@ -1178,6 +1178,40 @@ impl SekaiClient {
         .await
     }
 
+    pub async fn get_nuverse_housing_thumbnail(&self, path: &str) -> Result<Vec<u8>, AppError> {
+        use super::housing::{thumbnail_origin, valid_thumbnail_path, THUMBNAIL_PREFIX};
+        let origin = thumbnail_origin(self.region)
+            .ok_or_else(|| AppError::ParseError("Expected a Nuverse region".to_string()))?;
+        if !valid_thumbnail_path(path) {
+            return Err(AppError::ParseError(
+                "Invalid housing thumbnail path".to_string(),
+            ));
+        }
+        // Public objects need no game session headers or internal API credentials.
+        let url = format!("{origin}{THUMBNAIL_PREFIX}{path}");
+        self.fetch_public_housing_thumbnail(&url).await
+    }
+
+    async fn fetch_public_housing_thumbnail(&self, url: &str) -> Result<Vec<u8>, AppError> {
+        let response = self
+            .http_client
+            .get(url)
+            .send()
+            .await
+            .map_err(|e| AppError::NetworkError(e.to_string()))?;
+        if response.status().as_u16() != 200 {
+            return Err(AppError::Unknown {
+                status: response.status().as_u16(),
+                body: "Failed to fetch housing thumbnail".to_string(),
+            });
+        }
+        response
+            .bytes()
+            .await
+            .map(|b| b.to_vec())
+            .map_err(|e| AppError::NetworkError(e.to_string()))
+    }
+
     pub async fn get_nuverse_mysekai_image(
         &self,
         user_id: &str,
@@ -1478,6 +1512,45 @@ mod tests {
             .unwrap()
             .pack(&value)
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn public_housing_images_need_no_session_and_preserve_failures() {
+        for status in [200, 404, 503] {
+            let (url, server) = spawn_server(StaticResponse {
+                status,
+                content_type: "image/png",
+                body: vec![1, 2, 3],
+                session_token: None,
+            })
+            .await;
+            let (client, root) = make_client(ServerRegion::Cn, &url).await;
+            // No accounts have been added, so authenticated image loading would fail.
+            let result = client.fetch_public_housing_thumbnail(&url).await;
+            if status == 200 {
+                assert_eq!(result.unwrap(), vec![1, 2, 3]);
+            } else {
+                assert!(
+                    matches!(result,Err(AppError::Unknown{status:actual,..}) if actual == status)
+                );
+            }
+            assert!(client
+                .get_nuverse_housing_thumbnail("../../private")
+                .await
+                .is_err());
+            server.abort();
+            std::fs::remove_dir_all(root).unwrap();
+        }
+        let (client, root) = make_client(ServerRegion::Jp, "http://127.0.0.1:1").await;
+        assert!(client
+            .get_nuverse_housing_thumbnail("invalid")
+            .await
+            .is_err());
+        assert!(client
+            .fetch_public_housing_thumbnail("http://127.0.0.1:1")
+            .await
+            .is_err());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]
