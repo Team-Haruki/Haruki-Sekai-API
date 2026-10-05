@@ -21,6 +21,15 @@
 6. Open Terminal, and `cd` to the directory
 7. Run `haruki-sekai-api`
 
+## Housing Competition Thumbnails
+
+Housing list, entry and back-number responses expose `thumbnailPath` as
+`{hash}/{uuid}` for all five regions. Fetch the image through
+`GET /image/{server}/mysekai-housing/{hash}/{uuid}`. JP/EN use their authenticated
+game image service; CN/TW/KR use the corresponding official public object store.
+Previously cached full CN/TW/KR thumbnail URLs are also accepted by this route.
+Only the matching official origin and a valid thumbnail path are accepted.
+
 ## Master Data Registry
 
 `master_registry` (shipped next to `haruki-sekai-api`) is the master data manager: it pulls each region's master from its owner node (`servers.<region>.master_sync.source_url`), owns git push and database ingest, publishes per-region manifests, maintains the `music_metas` feed and serves everything other projects consume.

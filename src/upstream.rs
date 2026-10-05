@@ -134,6 +134,7 @@ pub enum ImageKind {
     CpProfileCardThumbnail,
     CpMusicScore,
     CpHousingThumbnail,
+    NuverseHousingThumbnail,
     NuverseMysekai,
 }
 
@@ -178,6 +179,7 @@ pub(crate) async fn execute_local_image(
                 .get_cp_mysekai_housing_competition_thumbnail(&combined)
                 .await
         }
+        ImageKind::NuverseHousingThumbnail => client.get_nuverse_housing_thumbnail(&combined).await,
         ImageKind::NuverseMysekai => client.get_nuverse_mysekai_image(param1, param2).await,
     }
 }

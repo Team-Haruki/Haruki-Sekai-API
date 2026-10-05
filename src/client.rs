@@ -1,5 +1,6 @@
 mod account;
 pub mod helper;
+pub(crate) mod housing;
 pub mod nuverse_schema;
 pub mod sekai_client;
 mod session;
