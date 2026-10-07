@@ -231,7 +231,8 @@ haruki-sekai-configs.example.yaml – Configuration template
 ### Language & Framework
 - Rust 2021 edition, async with Tokio
 - Every binary sets `mimalloc` as its global allocator (musl's malloc doubles the
-  cost of the allocation-heavy msgpack -> JSON decode); keep it when adding a `bin`
+  cost of the allocation-heavy msgpack -> JSON decode); keep it when adding a `bin`.
+  The image sets `MIMALLOC_ARENA_EAGER_COMMIT=0` (idle RSS +2 MB instead of +12 MB)
 - Axum for HTTP, SeaORM for database, tracing for logging
 - sonic-rs for fast JSON, serde_json when key order matters
 
