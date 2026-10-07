@@ -681,7 +681,8 @@ pub async fn get_master_bundle(
             // filesystem now and its blocks are freed when streaming ends,
             // even if the response is aborted midway.
             let _ = tokio::fs::remove_file(&tmp_path).await;
-            let stream = tokio_util::io::ReaderStream::new(file);
+            let stream =
+                tokio_util::io::ReaderStream::with_capacity(file, crate::utils::FILE_STREAM_CHUNK);
             (
                 StatusCode::OK,
                 [("content-type", "application/x-tar")],

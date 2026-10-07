@@ -8,6 +8,11 @@ use parking_lot::Mutex;
 
 use crate::error::AppError;
 
+/// Read / write buffer for files streamed as HTTP bodies or downloaded to
+/// disk. `tokio::fs` runs each read or write as a blocking-pool task, so the
+/// default 4-8 KB pieces cost tens of thousands of tasks per master bundle.
+pub const FILE_STREAM_CHUNK: usize = 256 * 1024;
+
 pub async fn retry_async<T, F, Fut, R>(
     max_retries: u32,
     delay: Duration,
