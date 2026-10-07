@@ -7,7 +7,8 @@ use axum::{
     Json, Router,
 };
 use serde::Serialize;
-use tower_http::compression::CompressionLayer;
+use tower_http::compression::predicate::{NotForContentType, Predicate};
+use tower_http::compression::{CompressionLayer, DefaultPredicate};
 use tower_http::trace::TraceLayer;
 
 use crate::AppState as MainAppState;
@@ -34,6 +35,14 @@ pub async fn health_check() -> Json<HealthResponse> {
         version: env!("CARGO_PKG_VERSION"),
         uptime_secs: uptime,
     })
+}
+
+/// The default predicate plus a content-type exclusion for octet streams:
+/// those bodies are AES ciphertext (the `/internal/game-stream` relay of a
+/// whole master split, custom music scores), so compressing them only burns
+/// CPU on the account node for no size gain.
+fn compression_predicate() -> impl Predicate {
+    DefaultPredicate::new().and(NotForContentType::const_new("application/octet-stream"))
 }
 
 pub fn create_router(state: Arc<MainAppState>) -> Router {
@@ -138,7 +147,7 @@ pub fn create_router(state: Arc<MainAppState>) -> Router {
         // Compress responses when the client sends Accept-Encoding — both end
         // users and peer nodes forwarding over WAN links benefit; the default
         // predicate already skips small and incompressible (image) bodies.
-        .layer(CompressionLayer::new())
+        .layer(CompressionLayer::new().compress_when(compression_predicate()))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }
@@ -164,6 +173,26 @@ mod tests {
             jwt_secret: None,
             coalescer: Arc::new(RequestCoalescer::default()),
         })
+    }
+
+    #[test]
+    fn compression_skips_octet_streams_but_not_json() {
+        use axum::http::{header, HeaderValue, Response};
+        use tower_http::compression::predicate::Predicate;
+
+        let predicate = compression_predicate();
+        // Bodies above the default 32-byte size threshold, so only the
+        // content type decides.
+        let response = |content_type: &'static str| {
+            let mut response = Response::new(axum::body::Body::from(vec![b'x'; 1024]));
+            response
+                .headers_mut()
+                .insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
+            response
+        };
+        assert!(predicate.should_compress(&response("application/json")));
+        assert!(!predicate.should_compress(&response("application/octet-stream")));
+        assert!(!predicate.should_compress(&response("image/png")));
     }
 
     #[tokio::test]
