@@ -52,6 +52,9 @@ mimalloc = "0.1"
 # Not used directly: selects the SIMD zlib-rs backend for tower-http's gzip
 # response compression (feature unification), ~2x faster than miniz_oxide.
 flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
+# bench_stages drives the router in-process.
+tower = { version = "0.5", features = ["util"] }
+bytes = "1"
 
 [profile.release]
 lto = "thin"
