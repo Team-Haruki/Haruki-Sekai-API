@@ -14,6 +14,9 @@ use haruki_sekai_api::ingest::{self, Ingester};
 #[path = "../logging.rs"]
 mod logging;
 
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let config = Config::load()?;

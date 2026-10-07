@@ -19,6 +19,9 @@ use haruki_sekai_api::updater::sync::build_syncers;
 #[path = "../logging.rs"]
 mod logging;
 
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let config = Config::load()?;
