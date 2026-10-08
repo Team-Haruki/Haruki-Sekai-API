@@ -160,8 +160,9 @@ impl Blob {
     /// The uncompressed bytes as a streaming response body.
     pub fn into_body(self) -> Body {
         match self.body {
-            BlobBody::File(file) => Body::from_stream(tokio_util::io::ReaderStream::new(
+            BlobBody::File(file) => Body::from_stream(tokio_util::io::ReaderStream::with_capacity(
                 tokio::fs::File::from_std(file),
+                crate::utils::FILE_STREAM_CHUNK,
             )),
             BlobBody::Zstd { data, permit } => match zstd_reader(data) {
                 Ok(decoder) => Body::from_stream(decode_stream(decoder, permit)),

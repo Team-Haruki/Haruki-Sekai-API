@@ -3,6 +3,9 @@ use haruki_sekai_api::ingest_engine::IngestionEngine;
 use sea_orm::{ConnectOptions, Database};
 use std::time::Duration;
 
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt().init();

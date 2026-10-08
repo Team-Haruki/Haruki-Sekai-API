@@ -46,6 +46,16 @@ notify = "9.0.0-rc.4"
 figment = { version = "0.10", features = ["yaml", "env"] }
 opendal = { version = "0.59", default-features = false, features = ["reqwest-rustls-tls", "executors-tokio", "services-fs", "services-s3", "services-oss", "services-cos", "services-gcs", "services-azblob", "services-obs"] }
 
+# Global allocator for every binary (see `main`): musl's malloc doubles the
+# cost of the allocation-heavy msgpack -> JSON decode on the Alpine image.
+mimalloc = "0.1"
+# Not used directly: selects the SIMD zlib-rs backend for tower-http's gzip
+# response compression (feature unification), ~2x faster than miniz_oxide.
+flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
+# bench_stages drives the router in-process.
+tower = { version = "0.5", features = ["util"] }
+bytes = "1"
+
 [profile.release]
 lto = "thin"
 codegen-units = 1

@@ -40,7 +40,10 @@ pub async fn stream_response_to_file(
 ) -> Result<u64, AppError> {
     use futures::StreamExt;
     use tokio::io::AsyncWriteExt;
-    let mut file = tokio::fs::File::create(path).await?;
+    let mut file = tokio::io::BufWriter::with_capacity(
+        crate::utils::FILE_STREAM_CHUNK,
+        tokio::fs::File::create(path).await?,
+    );
     let mut stream = resp.bytes_stream();
     let mut total = 0u64;
     while let Some(chunk) = stream.next().await {

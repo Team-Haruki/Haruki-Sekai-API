@@ -18,6 +18,9 @@ use haruki_sekai_api::AppState;
 
 mod logging;
 
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 type ClientInitTask = tokio::task::JoinHandle<Result<(ServerRegion, Arc<SekaiClient>), AppError>>;
 
 #[tokio::main]

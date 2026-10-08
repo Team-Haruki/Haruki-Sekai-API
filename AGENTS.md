@@ -82,6 +82,8 @@ src/
     master_registry.rs     – Master data manager (registry), runs on the same config file
     master_ingest.rs       – Registry-driven ingest role (`ingest` config section)
     bench_profile.rs       – Per-stage latency benchmark for the profile proxy path
+    bench_stages.rs        – Offline per-stage CPU / allocation profile of the proxy
+                             path on a captured response body (no accounts needed)
 tools/
   ent_generator/           – Rust tool that reads src/models/ and generates:
                              - schema_info_generated.json (table→column mapping)
@@ -228,6 +230,9 @@ haruki-sekai-configs.example.yaml – Configuration template
 
 ### Language & Framework
 - Rust 2021 edition, async with Tokio
+- Every binary sets `mimalloc` as its global allocator (musl's malloc doubles the
+  cost of the allocation-heavy msgpack -> JSON decode); keep it when adding a `bin`.
+  The image sets `MIMALLOC_ARENA_EAGER_COMMIT=0` (idle RSS +2 MB instead of +12 MB)
 - Axum for HTTP, SeaORM for database, tracing for logging
 - sonic-rs for fast JSON, serde_json when key order matters
 
@@ -294,6 +299,12 @@ cargo test -- --ignored
 # Lint and format
 cargo clippy
 cargo fmt
+
+# Per-stage CPU / allocation profile of the game-API proxy path on a captured
+# response body (JSON fixture): AES decrypt, msgpack decode, Nuverse restore,
+# serialization, cache entry, gzip/zstd, the auth JWT, and the compression layer
+STAGES_FIXTURE=ranking.json STAGES_PATH='/user/{userId}/event/1/ranking' \
+  STAGES_BUNDLE=Data/structures/nuverse_schema_bundle.json cargo run --release --bin bench_stages
 
 # Run ent_generator (from tools/ent_generator/)
 cd tools/ent_generator && cargo run

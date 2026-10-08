@@ -275,7 +275,10 @@ impl MasterSyncer {
             uuid::Uuid::new_v4()
         ));
         let result = async {
-            let mut file = tokio::fs::File::create(&tmp_tar).await?;
+            let mut file = tokio::io::BufWriter::with_capacity(
+                crate::utils::FILE_STREAM_CHUNK,
+                tokio::fs::File::create(&tmp_tar).await?,
+            );
             let mut stream = resp.bytes_stream();
             while let Some(chunk) = stream.next().await {
                 let chunk = chunk.map_err(|e| AppError::NetworkError(e.to_string()))?;

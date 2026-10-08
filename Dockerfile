@@ -37,6 +37,10 @@ RUN mkdir -p logs && chown haruki:haruki logs
 EXPOSE 9999 9998 9997
 ENV TZ=Asia/Shanghai
 ENV RUST_LOG=info
+# mimalloc (the binaries' global allocator) eagerly commits its first arena,
+# which shows up as ~12 MB of anonymous RSS at idle on this image; committing
+# on demand keeps the idle footprint within ~2 MB of the system allocator.
+ENV MIMALLOC_ARENA_EAGER_COMMIT=0
 ARG VERSION=dev
 LABEL org.opencontainers.image.version="${VERSION}"
 USER haruki

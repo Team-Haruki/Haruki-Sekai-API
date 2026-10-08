@@ -222,9 +222,10 @@ async fn immutable_file(path: &std::path::Path, digest: &str, content_type: &str
     };
     match tokio::fs::File::open(path).await {
         Ok(file) => {
-            let mut response =
-                axum::body::Body::from_stream(tokio_util::io::ReaderStream::new(file))
-                    .into_response();
+            let mut response = axum::body::Body::from_stream(
+                tokio_util::io::ReaderStream::with_capacity(file, crate::utils::FILE_STREAM_CHUNK),
+            )
+            .into_response();
             let headers = response.headers_mut();
             let set = |headers: &mut HeaderMap, name: &'static str, value: String| {
                 if let Ok(value) = axum::http::HeaderValue::from_str(&value) {
@@ -602,7 +603,8 @@ async fn file(
     }
     match tokio::fs::File::open(&path).await {
         Ok(file) => {
-            let stream = tokio_util::io::ReaderStream::new(file);
+            let stream =
+                tokio_util::io::ReaderStream::with_capacity(file, crate::utils::FILE_STREAM_CHUNK);
             let mut response = axum::body::Body::from_stream(stream).into_response();
             for (name, value) in response_headers {
                 if let Ok(value) = axum::http::HeaderValue::from_str(&value) {
@@ -716,7 +718,10 @@ async fn bundle(State(registry): State<Shared>, Path(region): Path<String>) -> R
             (
                 StatusCode::OK,
                 [("content-type", "application/x-tar")],
-                axum::body::Body::from_stream(tokio_util::io::ReaderStream::new(file)),
+                axum::body::Body::from_stream(tokio_util::io::ReaderStream::with_capacity(
+                    file,
+                    crate::utils::FILE_STREAM_CHUNK,
+                )),
             )
                 .into_response()
         }
