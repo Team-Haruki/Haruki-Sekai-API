@@ -2,7 +2,7 @@
 //! API call on this node's local accounts.
 //!
 //! Trust model: the caller is another Haruki node holding this node's
-//! `backend.internal_token`, reached over the internal network (Tailscale).
+//! `backend.internal_token`, reached over a private network (VPN/overlay).
 //! With the token unset the endpoint is disabled and answers 404, so a node
 //! never exposes forwarding by default. Requests execute on the local
 //! [`SekaiClient`] only — never through this node's own upstream router — so

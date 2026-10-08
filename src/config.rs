@@ -169,14 +169,14 @@ pub struct GitConfig {
 }
 
 /// A remote Haruki Sekai API node that can serve this region's game API calls
-/// (reached over the internal network, e.g. a Tailscale IP). Targets are tried
+/// (reached over a private network, e.g. a VPN address). Targets are tried
 /// in ascending `priority` order; the local client participates with the
 /// region's `local_priority` (default 0), so with all defaults local is
 /// preferred and remotes (default 10) are fallbacks. Set an upstream's
 /// priority below `local_priority` to prefer it (geo/QPS routing).
 #[derive(Debug, Clone, Deserialize)]
 pub struct UpstreamConfig {
-    /// Base URL of the remote node, e.g. `http://100.64.0.2:9999`.
+    /// Base URL of the remote node, e.g. `http://<remote-node>:9999`.
     pub url: String,
     /// Bearer token matching the remote node's `backend.internal_token`.
     #[serde(default)]
@@ -196,7 +196,7 @@ fn default_upstream_priority() -> i32 {
 /// data locally.
 #[derive(Debug, Clone, Deserialize)]
 pub struct MasterSyncPeer {
-    /// Base URL of the peer node, e.g. `http://100.64.0.1:9999`.
+    /// Base URL of the peer node, e.g. `http://<peer-node>:9999`.
     pub url: String,
     /// Bearer token matching the peer's `backend.internal_token`.
     #[serde(default)]
@@ -211,7 +211,7 @@ pub struct MasterSyncPeer {
 /// never pays the decode memory cost.
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct MasterRemoteSourceConfig {
-    /// Base URL of the account node, e.g. `http://100.76.159.97:9999`. Empty
+    /// Base URL of the account node, e.g. `http://<account-node>:9999`. Empty
     /// disables remote-source mode.
     #[serde(default)]
     pub url: String,
