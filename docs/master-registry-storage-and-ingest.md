@@ -223,7 +223,7 @@ After every changed publish, and after the import, one pass runs:
   git push, and the registry publishes only after `sync_once` returns. A slow
   ingest therefore delays publishing and git push, and a failed ingest re-pulls
   the whole bundle on the next trigger (`ingest_failed`).
-- **Target.** In production the VM105 syncer ingests into CN08 `haruki_sekai`
+- **Target.** In production the syncer node ingests into the production `haruki_sekai` database
   through `master_database.dsn`. That database has 116 typed tables from
   `schema_info.json`, and every table has a `server_region` column. 102 of
   them have the unique key `(id, server_region)`, where JSON `id` is mapped to
@@ -569,8 +569,8 @@ arena tuning is needed. A `mem_limit` of 256 MiB leaves ample headroom.
    registry must run `blob_store: pg`.
 2. Run the ingester against a scratch copy of `haruki_sekai`, and compare the
    tables with the old ingest at the same `contentHash`.
-3. Point the ingester at CN08 `haruki_sekai` and remove `master_database` from
-   the VM105 syncer config, so the old ingest stops there. The old engine stays
+3. Point the ingester at the production `haruki_sekai` and remove `master_database` from
+   the syncer node's config, so the old ingest stops there. The old engine stays
    for `run_ingest` and for owner nodes until it is retired.
 
 ### Implementation notes
@@ -648,16 +648,16 @@ fields to its webhook body, and the ingester runs only when started with an
    `upToDate`, then compare with the live database at the same `contentHash`
    (per table `count(*)` and `md5(string_agg((to_jsonb(t) - 'id')::text, …))`,
    as the tests do). Drop the scratch copy.
-4. Switch: on the VM105 syncer (and any node still ingesting into CN08)
+4. Switch: on the syncer node (and any node still ingesting into the production database)
    set `master_database.enabled: false` and restart it; then point the
-   ingester target at CN08 `haruki_sekai` and restart the ingester. Its first
+   ingester target at the production `haruki_sekai` and restart the ingester. Its first
    run against the live database writes only what differs (upserts with
    `IS DISTINCT FROM`), staged per table. There is no `master_ingest_state`
    yet, so `min_ratio` compares each file with the table's **live** row count
    for the region: an empty or truncated file fails the run instead of
    emptying a table.
 
-   Before this step, list the column defaults on CN08 `haruki_sekai`:
+   Before this step, list the column defaults on the production `haruki_sekai`:
 
    ```sql
    SELECT table_name, column_name, column_default

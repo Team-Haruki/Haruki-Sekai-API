@@ -77,12 +77,12 @@ registry: # master data manager (`master_registry` binary); ignored by the API s
   blob_gc_grace_secs: 86400 # pg: delete unreferenced blobs not referenced by a publish for this long (min 300)
   subscribers: [] # peers to POST /internal/master-updated after a region is published; the body is
   # {server, dataVersion, contentHash, gitCommit, changedFiles, removedFiles} (receivers re-read current)
-  # - url: "http://100.64.0.2:9999"
+  # - url: "http://<peer-node>:9999"
   #   token: "peer-internal-token"
   account_nodes: [] # SekaiAPI nodes to push app identity to on PUT /v1/app/{region}; like every
-  # other node-to-node URL here, use internal-network (Tailscale) addresses only — the bearer
+  # other node-to-node URL here, use private-network (VPN) addresses only — the bearer
   # token is sent in clear over that already-encrypted overlay, never over the public internet
-  # - url: "http://100.76.159.97:9999"
+  # - url: "http://<account-node>:9999"
   #   token: "that node's backend.internal_token"
   music_metas: # the registry pulls music_metas*.json for consumers (served under /v1/metas)
     enabled: true
@@ -220,17 +220,17 @@ servers:
     enabled: false
     api_url: ""
     # Remote Haruki nodes that can serve this region's game API calls (reached
-    # over the internal network, e.g. Tailscale IPs). Targets are tried in
+    # over a private network, e.g. VPN addresses). Targets are tried in
     # ascending priority order; the local client joins with local_priority
     # (default 0) and remotes default to 10, so by default local is preferred
     # and remotes are fallbacks. Give an upstream a lower priority than
     # local_priority to prefer it (e.g. route to the node nearest the game
     # server). A region with upstreams but enabled: false is served remote-only.
     # upstreams:
-    #   - url: "http://100.64.0.2:9999"
+    #   - url: "http://<remote-node>:9999"
     #     token: "" # must match that node's backend.internal_token
     #     priority: -1
-    #     name: "shanghai"
+    #     name: "near-game-server"
     # local_priority: 0
     #
     # Master-data sync between nodes. Each region has one owner node (running
@@ -240,11 +240,11 @@ servers:
     # On the owner node: list the pulling peers under notify so they are
     # webhooked immediately after each master update.
     # master_sync:
-    #   source_url: "http://100.64.0.2:9999"
+    #   source_url: "http://<owner-node>:9999"
     #   source_token: "" # owner's backend.internal_token
     #   poll_cron: "0 */5 * * * *"
     #   notify:
-    #     - url: "http://100.64.0.1:9999"
+    #     - url: "http://<peer-node>:9999"
     #       token: "" # that peer's backend.internal_token
     #
     # Remote-account master production: run this region's master updater on
@@ -255,7 +255,7 @@ servers:
     # stream. Use together with enable_master_updater/master_updater_cron on a
     # node that has no local accounts for this region. Empty url disables it.
     # master_remote_source:
-    #   url: "http://100.64.0.2:9999"
+    #   url: "http://<account-node>:9999"
     #   token: "" # that node's backend.internal_token
     require_cookies: false
     headers:

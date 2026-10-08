@@ -2,7 +2,7 @@
 //!
 //! A [`RegionRouter`] fronts one region with an ordered list of targets: the
 //! local [`SekaiClient`] and/or remote Haruki Sekai API nodes (reached over the
-//! internal network, e.g. Tailscale). Requests try targets in priority order;
+//! private network, e.g. a VPN). Requests try targets in priority order;
 //! target-level failures (node down, its accounts broken) fail over to the
 //! next target and feed a passive per-target circuit breaker, while game-level
 //! outcomes (maintenance, 404s) are returned as-is since another node would
