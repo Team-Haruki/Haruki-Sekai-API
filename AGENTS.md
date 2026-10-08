@@ -42,29 +42,33 @@ src/
     helper.rs              – CookieHelper, VersionHelper, version comparison
     token_utils.rs         – JWT / Nuverse token user ID extraction
     nuverse_schema.rs      – Schema-bundle-driven array→dict restoration for Nuverse servers
+    housing.rs             – MySekai housing thumbnail URL normalisation shared by the
+                             housing competition API and thumbnail image routes
   crypto/
     sekai_cryptor.rs       – AES-128-CBC encryption with MessagePack serialization
-  db/
-    mod.rs                 – init_db, init_master_db, init_redis
-    entity/                – SeaORM entities: sekai_users, sekai_user_servers,
-                             registry_state, registry_publish_history
+  db.rs                    – init_db, init_master_db, init_registry_state_db,
+                             init_registry_blob_table, init_redis
+  db/entity/               – SeaORM entities: sekai_user, sekai_user_server,
+                             registry_state, registry_publish_history, registry_blob
   updater/
     scheduler.rs           – Cron jobs: cookie refresh, master update (local or
-                             remote-account), app hash, master sync poll
+                             remote-account), master sync poll; warns that the old
+                             app-hash polling settings are ignored
     master.rs              – MasterUpdater: version check, download, git push, DB ingest
     sync.rs                – MasterSyncer: pull master bundles from an owner node
                              (webhook-triggered, cron fallback); records the last git
                              push outcome
-    git.rs                 – GitHelper: stage, commit, push via git2; fetches before
-                             every push and refuses to commit when the remote diverged
+    git.rs                 – GitHelper: stage, commit, push by running the `git` CLI
+                             (wall-clock timeout, kills the process group on expiry);
+                             fetches before every push and refuses to commit when the
+                             remote diverged
     master_stream.rs       – Table-by-table streaming decode of a downloaded master
                              payload (rows streamed one at a time)
     prune.rs               – Stale master file pruning after a complete dump/bundle:
                              protect list, ratio + absolute cap guards, producer-side
                              two-consecutive-dumps rule (pending set outside the worktree)
-    apphash.rs             – AppHashUpdater: poll file/URL sources for new app hashes
   registry/
-    service.rs             – MasterRegistry: per-region pull via MasterSyncer, git push,
+    service.rs             – Registry: per-region pull via MasterSyncer, git push,
                              ingest, per-region manifest publication
     http.rs                – Registry HTTP surface (pointers, digest-addressed blobs and
                              manifests, /health, app identity, subscriber fan-out)
@@ -75,7 +79,7 @@ src/
     blobs.rs               – Master file content store (`registry.blob_store`): the
                              master directories (fs) or content-addressed zstd blobs in
                              `registry_blobs` (pg): import, GC, directory fallback
-  models/                  – ~92 auto-generated game data model files (never hand-edit;
+  models/                  – ~136 auto-generated game data model files (never hand-edit;
                              regenerate them from the source data)
   bin/
     run_ingest.rs          – Standalone CLI for master data ingestion
@@ -97,9 +101,13 @@ docs/
   migrations/              – Hand-written, idempotent DDL for ingest targets that run with
                              `create_tables: false`; apply before shipping a schema_info.json
                              that adds tables
-Data/master/               – Regional master data JSON files (jp, en, tw, kr, cn)
-Data/registry/             – Registry JSON state (per-region manifests); music_metas blobs
-Data/structures/           – Committed Nuverse schema assets (nuverse_schema_bundle.json, *.avsc)
+Data/registry/             – Default `registry.state_dir` (runtime, git-ignored): registry
+                             JSON state (per-region manifests); music_metas blobs
+Data/structures/           – Committed Nuverse schema assets (nuverse_schema_bundle.json,
+                             *.avsc; versioned copies under 6.0.0/ and 6.4.0/)
+tests/ingest_memory.rs     – Peak-heap integration test of a registry ingest (PostgreSQL-gated)
+tools/generate_mysekai_followups.py – Generates MySekai follow-up models from an il2cpp
+                             dump (see docs/mysekai-followups.md); tested by CI (Python tools)
 schema_info.json           – Authoritative DB schema used by ingest engine
 haruki-sekai-configs.example.yaml – Configuration template
 ```
@@ -142,7 +150,7 @@ haruki-sekai-configs.example.yaml – Configuration template
 ### Master Data Pipeline
 1. `MasterUpdater` checks game server for new data version
 2. Downloads and decrypts master data (CP: split API; Nuverse: CDN + structure file)
-3. Saves JSON files to `Data/master/{region}/master/`
+3. Saves JSON files directly into the region's `servers.<region>.master_dir`
 4. Optionally pushes to git repository
 5. Optionally ingests into PostgreSQL via `IngestionEngine`
 6. `IngestionEngine` maps JSON filenames → table names using `schema_info.json`
@@ -264,11 +272,16 @@ haruki-sekai-configs.example.yaml – Configuration template
 
 ## Testing
 
-- Tests live in `#[cfg(test)] mod tests` blocks within source files
+- Most tests live in `#[cfg(test)] mod tests` blocks within source files; the ingest role's
+  tests are in `src/ingest/tests.rs` and `tests/ingest_memory.rs` is an integration test
 - Async tests use `#[tokio::test]`
-- Tests requiring external services (DB, Redis, game servers) are marked `#[ignore]`
+- Tests requiring external services (DB, Redis, game servers) are marked `#[ignore]`.
+  PostgreSQL ones read `HARUKI_TEST_INGEST_DSN` / `HARUKI_TEST_REGISTRY_DSN`
+  (`HARUKI_TEST_INGEST_MASTER_DIR` optional). A bare `--ignored` also runs
+  `updater::master_stream::tests::peak_memory_probe` (~500 MB msgpack) and
+  `ingest_engine::test_direct_ingestion` (hard-coded local DSN), so CI filters to
+  `--ignored --test-threads=1 ingest::tests postgres`
 - Return type: `anyhow::Result<()>` for tests with fallible operations
-- No separate `tests/` directory; all tests are inline
 
 ## Building
 
@@ -276,7 +289,7 @@ haruki-sekai-configs.example.yaml – Configuration template
 # Development build
 cargo build
 
-# Release build (with LTO, stripped)
+# Release build (thin LTO, codegen-units = 1, panic = abort, stripped)
 cargo build --release
 
 # Run server
@@ -291,10 +304,12 @@ cargo run --bin master_registry
 # Run the registry-driven ingest role (needs an `ingest` section)
 cargo run --bin master_ingest
 
-# Tests, a single test, and the ones needing external services
+# Tests, a single test, and the PostgreSQL-gated ones as CI runs them
 cargo test
 cargo test <test_name>
-cargo test -- --ignored
+HARUKI_TEST_INGEST_DSN=... HARUKI_TEST_REGISTRY_DSN=... \
+  cargo test --lib -- --ignored --test-threads=1 ingest::tests postgres
+HARUKI_TEST_INGEST_DSN=... cargo test --test ingest_memory -- --ignored
 
 # Lint and format
 cargo clippy
@@ -312,6 +327,12 @@ cd tools/ent_generator && cargo run
 # Docker build
 docker build --build-arg VERSION=v1.0.0 -t haruki-sekai-api .
 ```
+
+The Dockerfile is a cargo-chef multi-stage build (`rust:1.98-alpine` → `alpine:3.24`). The
+image contains `haruki-sekai-api` (the default command), `master_registry`, `master_ingest`,
+`run_ingest`, `schema_info.json` and `Data/structures`, and exposes 9999 (API,
+`backend.port`), 9998 (`registry.port`) and 9997 (`ingest.listen`, which defaults to
+`127.0.0.1:9997`). `git` is installed because `GitHelper` shells out to it.
 
 ## Common Tasks for Agents
 
@@ -342,9 +363,14 @@ docker build --build-arg VERSION=v1.0.0 -t haruki-sekai-api .
   counted in `master_ingest_version.unknown_keys` and kept in `master_raw` when `raw: true`
 
 ### Modifying Config
-The config file is `haruki-sekai-configs.yaml`, located via the `CONFIG_PATH` env var
-(defaults to the current directory). Per-region server entries hold AES keys (hex),
-account directories, master data paths and cron schedules.
+The config file path comes from the `CONFIG_PATH` env var (default
+`haruki-sekai-configs.yaml` in the working directory; the file is git-ignored, copy
+`haruki-sekai-configs.example.yaml`). Per-region server entries hold AES keys (hex),
+account directories, master data paths and cron schedules. Two separate databases are
+configured: `database` (users; `sekai_users` / `sekai_user_servers` are created with
+`create_table_from_entity().if_not_exists()`) and `master_database` (master data tables
+from `schema_info.json`). `apphash_sources` and `servers.<region>.enable_app_hash_updater` /
+`app_hash_updater_cron` are deprecated and ignored (a startup warning names them).
 
 1. Add field to relevant struct in `src/config.rs` with `#[serde(default = "...")]`
 2. Add default function if needed
