@@ -423,7 +423,7 @@ CI and releases reuse the shared workflows in
 - `CI OK` is the only required status check; it fails when any CI job fails or is cancelled.
 - Docker (inside `ci.yml`): PRs build only, and only when Docker inputs change. On `main` the image job does not wait for the tests: it runs in parallel and pushes the immutable `ghcr.io/team-haruki/haruki-sekai-api:sha-<full sha>` and `:sha-<7 chars>` as soon as the build finishes; the `Docker tags` job (template `docker-retag.yml`, after `CI OK`) then moves `:main` to that digest without rebuilding. `:main` therefore only follows commits whose `CI OK` passed and lags the `:sha-*` tags until then; deploy `:sha-<7 chars>` when the image is needed earlier.
 - `release.yml` (`Release`) runs on `v*` tags and manual dispatch. A manual dispatch is a dry run: it builds the archives and publishes nothing.
-- Release flow: bump `version` in `Cargo.toml` in a PR → merge → wait for `CI OK` on main → push tag `v<version>` → the gate checks tag == `v` + Cargo version and waits for `CI OK` on the tagged commit → linux-x64 / macos-arm64 / windows-x64 archives are built on the tag (asset names `haruki-sekai-api-<label>.tar.gz|zip`, plus `SHA256SUMS-<tag>.txt`) → the main `:sha-<sha>` image is re-tagged as `:X.Y.Z`, `:X.Y`, `:latest` without a rebuild → the GitHub Release is published. Never rewrite the version from the tag.
+- Release flow: bump `version` in `Cargo.toml` in a PR → merge → wait for `CI OK` on main → push tag `v<version>` → the gate checks tag == `v` + Cargo version and waits for `CI OK` on the tagged commit → linux-x64 / macos-arm64 / windows-x64 archives are built on the tag (asset names `haruki-sekai-api-<label>.tar.gz|zip`, plus `SHA256SUMS-<tag>.txt`) → the main `:sha-<sha>` image is re-tagged as `:X.Y.Z`, `:X.Y`, `:latest` without a rebuild → the GitHub Release is published with auto-generated notes, which are then rewritten to the release notes standard (see [Release notes](#release-notes)). Never rewrite the version from the tag.
 - Caches: Rust caches and the Docker registry cache (`:buildcache`) are written only from `main`; PRs and tags only read them. Release builds are cold builds on the tag.
 - Concurrency: PR runs are grouped per PR and cancel older runs; every other event gets its own group per commit, so main runs are never cancelled.
 
@@ -435,3 +435,14 @@ Workflow maintenance rules:
 - Pin third-party actions in custom steps to a commit SHA with a version comment.
 - Do not reintroduce `docker.yml`, `sonar.yml`, per-workflow prebuild/reuse logic, or main-push release builds.
 - Do not add `needs:` on the test jobs to the Docker job, and do not suppress `githubactions:S7637` (full-SHA pins) in `sonar-project.properties`: the template's `sonar.yml` already ignores it for the `@v1` references.
+
+## Release notes
+
+Release notes follow the org standard in
+[seiunx-dev/ci-templates `RELEASE_NOTES.md`](https://github.com/seiunx-dev/ci-templates/blob/main/RELEASE_NOTES.md) and are written in English.
+
+- Title every release with the tag only, for example `v6.28.2`.
+- Publish a tag as a pre-release only when it has an `-alpha`, `-beta` or `-rc` suffix; every other tag is a regular release, and every tag gets a release.
+- Omit empty sections, and end each item with its PR number `(#123)` (short commit SHA when there is no PR).
+- After the `Release` workflow publishes a release with auto-generated notes, rewrite them to the standard (`gh release edit <tag> --notes-file <file>`).
+- Never mention internal infrastructure (node or server names, private or tailnet IPs, internal hostnames, server paths) in release notes.
