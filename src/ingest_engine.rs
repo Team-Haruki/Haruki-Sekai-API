@@ -1644,6 +1644,10 @@ mod tests {
                 include_str!("testdata/ingest_fixture/mysekaiMaterialPossessions.json"),
             ),
             (
+                "mysekaiRankObtainedExps",
+                include_str!("testdata/ingest_fixture/mysekaiRankObtainedExps.json"),
+            ),
+            (
                 "mysekaiTools",
                 include_str!("testdata/ingest_fixture/mysekaiTools.json"),
             ),
@@ -1694,6 +1698,19 @@ mod tests {
         )).await.unwrap().unwrap();
         assert_eq!(row.try_get::<i64>("", "n").unwrap(), 11);
         assert_eq!(row.try_get::<i64>("", "cap").unwrap(), 99999);
+        let exps = db.query_all_raw(Statement::from_string(db.get_database_backend(),
+            "SELECT server_region, game_id, mysekai_rank_obtained_exp_type AS kind, quantity FROM mysekairankobtainedexps ORDER BY server_region"
+        )).await.unwrap();
+        assert_eq!(exps.len(), 2);
+        for (row, region) in [(&exps[0], "en"), (&exps[1], "jp")] {
+            assert_eq!(row.try_get::<String>("", "server_region").unwrap(), region);
+            assert_eq!(row.try_get::<i64>("", "game_id").unwrap(), 1);
+            assert_eq!(
+                row.try_get::<String>("", "kind").unwrap(),
+                "craft_mysekai_fixture_first_bonus"
+            );
+            assert_eq!(row.try_get::<i64>("", "quantity").unwrap(), 1000);
+        }
         let row = db.query_one_raw(Statement::from_string(db.get_database_backend(),
             "SELECT COUNT(*) AS n, MIN(cool_time_micro_seconds) AS cool, MIN(assetbundle_name) AS bundle FROM mysekaitools WHERE game_id = 5"
         )).await.unwrap().unwrap();

@@ -36,6 +36,7 @@ def generate_models(source, source_label=DEFAULT_SOURCE):
         "MysekaiMaterialPossession": ("id", "int"),
         "BirthdayParty": ("id", "int"),
         "BirthdayPartyDeliveryTotalReward": ("id", "int"),
+        "MysekaiRankObtainedExp": ("id", "int"),
     }
     for name, identity in identities.items():
         match = re.search(
