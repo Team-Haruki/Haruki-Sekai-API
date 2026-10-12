@@ -88,3 +88,18 @@ The client compares `requirement` with the user's
 Apply `docs/migrations/2026-10-02-birthday-parties.sql` before the updated
 ingester, then confirm per-region row counts and that every party's highest
 `requirement` is present.
+
+## MySekai rank exp sources
+
+Cloud shows how much MySekai rank exp a user can still collect from
+first-time crafts. The client reads the amount from `mysekaiRankObtainedExps`
+(`SetupFirstCraftBonus` draws its balloon from it), so Cloud reads it from
+master rather than hard-coding it. Every region has exactly one row today:
+`{id: 1, mysekaiRankObtainedExpType: "craft_mysekai_fixture_first_bonus",
+quantity: 1000}`, and `MysekaiRankObtainedExpType` has no other value. The
+model comes from `MasterMysekaiRankObtainedExp` in the JP 7.0.0 dump, which
+the generator now covers. The table uses a `(game_id, server_region)` unique
+key.
+
+Apply `docs/migrations/2026-10-12-mysekai-rank-obtained-exps.sql` before the
+updated ingester, then confirm one row per region.

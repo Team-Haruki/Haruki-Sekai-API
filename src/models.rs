@@ -100,6 +100,7 @@ pub mod mysekaimusicrecordcategories;
 pub mod mysekaimusicrecords;
 pub mod mysekaiphenomenabackgroundcolors;
 pub mod mysekaiphenomenas;
+pub mod mysekairankobtainedexps;
 pub mod mysekairankreleases;
 pub mod mysekaishopcosts;
 pub mod mysekaishops;

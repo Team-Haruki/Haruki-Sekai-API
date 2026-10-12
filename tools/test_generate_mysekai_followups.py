@@ -18,6 +18,7 @@ def dump(fields='[Key("id")]\npublic int id;'):
             ("MysekaiMaterialPossession", fields),
             ("BirthdayParty", fields),
             ("BirthdayPartyDeliveryTotalReward", fields),
+            ("MysekaiRankObtainedExp", fields),
         ]
     )
 
@@ -35,7 +36,7 @@ public bool isBase;
 // 日本語コメント
 ''')
         models = generator.generate_models(source)
-        self.assertEqual(len(models), 7)
+        self.assertEqual(len(models), 8)
         blueprint = models['mysekaiblueprintshops.rs']
         self.assertIn('pub mysekai_blueprint_shop_item_lottery_type: Option<String>', blueprint)
         self.assertNotIn('pub id:', blueprint)
@@ -55,6 +56,13 @@ public bool isBase;
         self.assertIn('birthdaypartydeliverytotalrewards.rs', models)
         self.assertEqual(generator.model_file_stem('MysekaiTool'), 'mysekaitools')
         self.assertEqual(generator.model_file_stem('Survey'), 'surveys')
+
+    def test_names_rank_obtained_exp_file_like_its_table(self):
+        models = generator.generate_models(dump('[Key("id")]\npublic int id;\n[Key("mysekaiRankObtainedExpType")]\npublic string mysekaiRankObtainedExpType;\n[Key("quantity")]\npublic int quantity;'))
+        exp = models['mysekairankobtainedexps.rs']
+        self.assertIn('pub type Mysekairankobtainedexp = Vec<MysekairankobtainedexpElement>;', exp)
+        self.assertIn('pub mysekai_rank_obtained_exp_type: Option<String>', exp)
+        self.assertIn('pub quantity: Option<i64>', exp)
 
     def test_rejects_missing_class(self):
         with self.assertRaisesRegex(ValueError, 'Missing MasterMysekaiTool'):
@@ -80,7 +88,7 @@ public bool isBase;
             with mock.patch.object(generator, 'OUTPUT_DIR', output), mock.patch.object(pathlib.Path, 'cwd', return_value=root):
                 generator.main([])
                 saved = {p.name: p.read_bytes() for p in output.iterdir()}
-                self.assertEqual(len(saved), 7)
+                self.assertEqual(len(saved), 8)
                 generator.main([])
                 self.assertEqual(saved, {p.name: p.read_bytes() for p in output.iterdir()})
                 source.write_text('invalid dump', encoding='utf-8')

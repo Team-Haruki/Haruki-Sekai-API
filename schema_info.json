@@ -1971,6 +1971,21 @@
   {
     "columns": [
       "game_id:int64",
+      "mysekai_rank_obtained_exp_type:string",
+      "quantity:int64",
+      "server_region:string"
+    ],
+    "name": "mysekairankobtainedexps",
+    "unique_keys": [
+      [
+        "id",
+        "server_region"
+      ]
+    ]
+  },
+  {
+    "columns": [
+      "game_id:int64",
       "mysekai_rank:int64",
       "mysekai_rank_relase_type:string",
       "external_id:int64",
