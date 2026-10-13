@@ -291,7 +291,7 @@ ingest:
       tables: all                   # or an allow-list of table names / file stems
       schema: schema_info.json      # typed column map
       raw: false                    # opt-in per target: keep the full row in master_raw
-      required_tables: default      # default = the prune protect list
+      required_tables: default      # default = the prune protect list; see "Choosing an explicit list"
       min_ratio: 0.5
       max_connections: 4            # raised to 2 x parse_concurrency + 1 when lower
       create_tables: false
@@ -490,9 +490,11 @@ rule (`updater/prune.rs`), not immediately:
   consecutive** ingested version still lacks the file. A file that comes back
   in between clears `missing_since`.
 - Tables on the protect list (`BUILTIN_PROTECTED_TABLES`) and tables in the
-  target's `required_tables` are never cleared this way; a manifest that drops
-  one of them fails the `required_tables` check below instead, so the
-  operator sees it.
+  target's `required_tables` are never cleared this way. A manifest that drops
+  one of them fails the region's run instead ("missing from the manifest but
+  is protected/required"): the rows are kept, nothing of that version is
+  ingested, and every later version fails the same way until the file comes
+  back or the operator takes the table off `required_tables`.
 - A file that vanished while another listed file maps to the same table (a
   rename) only loses its state row; the table is written by the new file.
 - A table that no longer exists in the target database is not cleared; the
@@ -507,6 +509,20 @@ rule (`updater/prune.rs`), not immediately:
 - Every table named in `required_tables` has at least one row for the region
   after the write. The list defaults to the prune protect list
   (`BUILTIN_PROTECTED_TABLES`), which is already kept in sync with consumers.
+  Choosing an explicit list:
+  - It **replaces** the default for this check, so copy the built-in tables
+    into it. They stay protected from removal either way.
+  - It applies to **every region the target serves**. Leave out a table that
+    some region does not ship or ships empty, or that region fails on every
+    run that writes. Check with `SELECT server_region, count(*) FROM <table>
+    GROUP BY 1` before adding one.
+  - Names are table names or file stems from the schema. An unknown name
+    stops the ingester at startup.
+  - The config is read once at startup, so restart the ingester after
+    editing it. The check runs only when a region writes something; an
+    `upToDate` reconcile skips it.
+  - List the tables your readers query, so a file the game stops shipping
+    fails loudly instead of being cleared under them.
 - Each changed file's row count is at least `min_ratio` times its previous row
   count (0.5 by default). This guards against a truncated upstream table. A
   failed check aborts that target's transaction. The previous count is the

@@ -107,7 +107,7 @@ ingest: # registry-driven ingest (`master_ingest` binary); absent = role off. Ig
       tables: all # or a list of table names / file stems
       schema: "schema_info.json"
       raw: false # opt-in: keep every original row (unknown keys too) in master_raw
-      required_tables: default # default = prune protect list; or a list
+      required_tables: default # default = prune protect list; a list replaces it for the row check (see docs/master-registry-storage-and-ingest.md)
       min_ratio: 0.5 # a changed file must keep at least this share of its previous rows
       max_connections: 4 # raised to 2 x parse_concurrency + 1 if lower
       create_tables: false # create missing typed tables from the schema
