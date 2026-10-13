@@ -224,7 +224,7 @@ pub struct MasterRemoteSourceConfig {
 /// (the one running the master updater with its own accounts); peer nodes pull
 /// that region's master data from the owner over the internal network instead
 /// of downloading it from the game/CDN themselves.
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct MasterSyncConfig {
     /// Owner node to pull this region's master data from (base URL). Empty
     /// disables pulling on this node.
@@ -241,6 +241,24 @@ pub struct MasterSyncConfig {
     /// itself (i.e. when this node is the owner).
     #[serde(default)]
     pub notify: Vec<MasterSyncPeer>,
+    /// Ask the owner for a compressed bundle (`Accept-Encoding`). Turn it off
+    /// when the owner is on the same host or network, e.g. a master registry
+    /// pulling from its local node: compressing and decompressing the whole
+    /// master directory then costs more CPU than the transfer saves.
+    #[serde(default = "default_true")]
+    pub compress_bundle: bool,
+}
+
+impl Default for MasterSyncConfig {
+    fn default() -> Self {
+        Self {
+            source_url: String::new(),
+            source_token: String::new(),
+            poll_cron: String::new(),
+            notify: Vec::new(),
+            compress_bundle: true,
+        }
+    }
 }
 
 /// Freshness/staleness windows (seconds, fractions allowed) for the cached

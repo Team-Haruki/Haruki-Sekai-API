@@ -243,6 +243,7 @@ servers:
     #   source_url: "http://<owner-node>:9999"
     #   source_token: "" # owner's backend.internal_token
     #   poll_cron: "0 */5 * * * *"
+    #   compress_bundle: true # false when the owner is on the same host/network
     #   notify:
     #     - url: "http://<peer-node>:9999"
     #       token: "" # that peer's backend.internal_token

@@ -411,6 +411,7 @@ mod tests {
             source_token: String::new(),
             poll_cron: cron.clone(),
             notify: Vec::new(),
+            compress_bundle: true,
         };
 
         let mut config: Config = serde_yaml::from_str("backend: {}").unwrap();
