@@ -7,9 +7,11 @@
 //! /internal/master-updated`, immediate) and a fallback cron poll comparing
 //! versions, so a missed webhook self-heals. The bundle is a plain tar of the
 //! owner's master directory plus its version file (transport compression is
-//! negotiated per-request via Accept-Encoding); after unpacking, the same
-//! ingest / version-merge / git-push pipeline as a locally downloaded update
-//! runs, so a pulling node can still be the git publisher.
+//! negotiated per-request via Accept-Encoding, unless `compress_bundle` is
+//! off); after unpacking, the same ingest / version-merge / git-push pipeline
+//! as a locally downloaded update runs, so a pulling node can still be the git
+//! publisher. Unpacking leaves a file whose bytes did not change untouched, so
+//! its mtime (and with it git's index and the digest caches) stays valid.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -51,6 +53,8 @@ pub struct MasterSyncer {
     version_path: String,
     source_url: String,
     source_token: String,
+    /// Let the owner compress the bundle (see `MasterSyncConfig`).
+    compress_bundle: bool,
     http: reqwest::Client,
     master_db: Option<sea_orm::DatabaseConnection>,
     /// Files ingested at once when `master_db` is set.
@@ -255,10 +259,13 @@ impl MasterSyncer {
             self.source_url.trim_end_matches('/'),
             self.region.as_str()
         );
-        let resp = self
-            .http
-            .get(&url)
-            .bearer_auth(&self.source_token)
+        let mut request = self.http.get(&url).bearer_auth(&self.source_token);
+        if !self.compress_bundle {
+            // An explicit `identity` keeps reqwest from advertising gzip/br/zstd,
+            // so the owner's CompressionLayer sends the tar as it is.
+            request = request.header(reqwest::header::ACCEPT_ENCODING, "identity");
+        }
+        let resp = request
             .send()
             .await
             .map_err(|e| AppError::NetworkError(format!("sync source: {}", e)))?;
@@ -433,6 +440,7 @@ fn unpack_master_tar(
     let mut archive = tar::Archive::new(std::io::BufReader::new(file));
     let mut version: Option<VersionInfo> = None;
     let mut written = 0usize;
+    let mut unchanged = 0usize;
     let mut skipped = 0usize;
     let mut produced = HashSet::new();
     for entry in archive.entries().map_err(AppError::from)? {
@@ -462,22 +470,64 @@ fn unpack_master_tar(
             continue;
         }
         let target = master_dir.join(&name);
-        let tmp = master_dir.join(format!(".{}.tmp", uuid::Uuid::new_v4()));
-        std::fs::write(&tmp, &contents)?;
-        std::fs::rename(&tmp, &target)?;
-        written += 1;
+        if same_file_contents(&target, &contents) {
+            // Rewriting identical bytes would only bump the mtime, which makes
+            // git and the digest caches re-hash the file.
+            unchanged += 1;
+        } else {
+            let tmp = master_dir.join(format!(".{}.tmp", uuid::Uuid::new_v4()));
+            std::fs::write(&tmp, &contents)?;
+            std::fs::rename(&tmp, &target)?;
+            written += 1;
+        }
+        // Unchanged files are part of the bundle too: prune keys on this set.
         produced.insert(name);
     }
     info!(
-        "{} Unpacked {} master files from bundle ({} skipped)",
-        region_upper, written, skipped
+        "{} Unpacked {} master files from bundle ({} written, {} unchanged, {} skipped)",
+        region_upper,
+        produced.len(),
+        written,
+        unchanged,
+        skipped
     );
-    if written == 0 {
+    if produced.is_empty() {
         return Err(AppError::UpstreamData(
             "bundle contained no master files".to_string(),
         ));
     }
     Ok((version, produced))
+}
+
+/// Whether `path` is a regular file holding exactly `expected`. The size is
+/// checked first; the bytes are compared in chunks so a large table is never
+/// read into a second full buffer. Any error counts as "different".
+fn same_file_contents(path: &Path, expected: &[u8]) -> bool {
+    use std::io::Read;
+
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.is_file() && meta.len() == expected.len() as u64 => {}
+        _ => return false,
+    }
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut buf = vec![0u8; 64 * 1024];
+    let mut offset = 0usize;
+    loop {
+        match file.read(&mut buf) {
+            Ok(0) => return offset == expected.len(),
+            Ok(n) => {
+                let end = offset + n;
+                if end > expected.len() || buf[..n] != expected[offset..end] {
+                    return false;
+                }
+                offset = end;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => return false,
+        }
+    }
 }
 
 /// Build the per-region syncers for every region that configures a
@@ -534,6 +584,7 @@ pub fn build_syncers(
                 version_path: server_config.version_path.clone(),
                 source_url: sync.source_url.clone(),
                 source_token: sync.source_token.clone(),
+                compress_bundle: sync.compress_bundle,
                 http: http.clone(),
                 master_db: master_db.clone(),
                 ingest_concurrency: config.master_database.ingest_concurrency,
@@ -694,6 +745,155 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn unpack_keeps_unchanged_files_and_rewrites_changed_ones() {
+        use std::os::unix::fs::MetadataExt;
+
+        let dir = std::env::temp_dir().join(format!("haruki_sync_keep_{}", uuid::Uuid::new_v4()));
+        let out = dir.join("out");
+        std::fs::create_dir_all(&out).unwrap();
+        let old = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000_000);
+        let seed = |name: &str, data: &[u8]| {
+            let path = out.join(name);
+            std::fs::write(&path, data).unwrap();
+            std::fs::File::options()
+                .write(true)
+                .open(&path)
+                .unwrap()
+                .set_modified(old)
+                .unwrap();
+        };
+        let stat = |name: &str| {
+            let meta = std::fs::metadata(out.join(name)).unwrap();
+            (meta.modified().unwrap(), meta.ino())
+        };
+        seed("same.json", b"[1,2,3]");
+        seed("resized.json", b"[1]");
+        seed("edited.json", b"[1,2,3]");
+        seed("target.json", b"[7]");
+        std::os::unix::fs::symlink(out.join("target.json"), out.join("linked.json")).unwrap();
+        let same_before = stat("same.json");
+
+        let tar_path = dir.join("bundle.tar");
+        let entries: [(&str, &[u8]); 5] = [
+            ("same.json", b"[1,2,3]"),
+            ("resized.json", b"[1,2]"),
+            // Same size, different bytes.
+            ("edited.json", b"[4,5,6]"),
+            ("fresh.json", b"[]"),
+            // Same bytes as the symlink's target: replaced by a regular file.
+            ("linked.json", b"[7]"),
+        ];
+        std::fs::write(&tar_path, tar_of(&entries)).unwrap();
+        let (_, produced) = unpack_master_tar(&tar_path, &out, "TEST").unwrap();
+        let mut produced: Vec<_> = produced.into_iter().collect();
+        produced.sort();
+        assert_eq!(
+            produced,
+            [
+                "edited.json",
+                "fresh.json",
+                "linked.json",
+                "resized.json",
+                "same.json"
+            ]
+        );
+        assert_eq!(
+            stat("same.json"),
+            same_before,
+            "unchanged file was rewritten"
+        );
+        for (name, data) in entries {
+            assert_eq!(std::fs::read(out.join(name)).unwrap(), data, "{name}");
+        }
+        for name in ["resized.json", "edited.json"] {
+            assert_ne!(stat(name).0, old, "{name} kept its old mtime");
+        }
+        assert!(!std::fs::symlink_metadata(out.join("linked.json"))
+            .unwrap()
+            .file_type()
+            .is_symlink());
+
+        // Unpacking the same bundle again writes nothing, and is not an error.
+        let names: Vec<&str> = entries.iter().map(|(n, _)| *n).collect();
+        let before: Vec<_> = names.iter().map(|n| stat(n)).collect();
+        let (_, produced) = unpack_master_tar(&tar_path, &out, "TEST").unwrap();
+        assert_eq!(produced.len(), entries.len());
+        let after: Vec<_> = names.iter().map(|n| stat(n)).collect();
+        assert_eq!(before, after);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn bundle_compression_follows_the_config() {
+        use tower_http::compression::CompressionLayer;
+
+        let root = std::env::temp_dir().join(format!("haruki_sync_enc_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let seen = Arc::new(parking_lot::Mutex::new(Vec::<String>::new()));
+        let table = "[".to_string() + &"{\"id\":1},".repeat(500) + "{}]";
+        let bundle = tar_of(&[("cards.json", table.as_bytes())]);
+        let app = Router::new()
+            .fallback({
+                let seen = seen.clone();
+                move |headers: axum::http::HeaderMap| {
+                    let seen = seen.clone();
+                    let bundle = bundle.clone();
+                    async move {
+                        seen.lock().push(
+                            headers
+                                .get("accept-encoding")
+                                .and_then(|v| v.to_str().ok())
+                                .unwrap_or("")
+                                .to_string(),
+                        );
+                        Response::builder()
+                            .header("content-type", "application/x-tar")
+                            .body(Body::from(bundle))
+                            .unwrap()
+                    }
+                }
+            })
+            // What the owner's router does with the bundle response.
+            .layer(CompressionLayer::new());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        for compress in [true, false] {
+            let mut config: Config = serde_yaml::from_str("backend: {}").unwrap();
+            let mut server_config: crate::config::ServerConfig =
+                serde_yaml::from_str("{}").unwrap();
+            let master = root.join(format!("master-{compress}"));
+            server_config.master_dir = master.to_string_lossy().into_owned();
+            server_config.version_path = root.join("version.json").to_string_lossy().into_owned();
+            server_config.master_sync.source_url = url.clone();
+            server_config.master_sync.compress_bundle = compress;
+            config.servers.insert(ServerRegion::Kr, server_config);
+            let syncers = build_syncers(&config, &HashMap::new(), None, &HashMap::new());
+            let (_, produced) = syncers[&ServerRegion::Kr].pull_and_unpack().await.unwrap();
+            assert_eq!(produced.len(), 1);
+            assert_eq!(
+                std::fs::read_to_string(master.join("cards.json")).unwrap(),
+                table
+            );
+            let accept = seen.lock().last().cloned().unwrap();
+            if compress {
+                assert!(accept.contains("zstd"), "{accept}");
+            } else {
+                assert_eq!(accept, "identity");
+            }
+        }
+        // Absent from the YAML, the option keeps compression on.
+        let parsed: crate::config::ServerConfig =
+            serde_yaml::from_str("master_sync: {source_url: x}").unwrap();
+        assert!(parsed.master_sync.compress_bundle);
+        assert!(crate::config::MasterSyncConfig::default().compress_bundle);
+        server.abort();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[tokio::test]
     async fn sync_once_downloads_bundle_persists_version_and_skips_when_current() {
         let root = std::env::temp_dir().join(format!("haruki_sync_e2e_{}", uuid::Uuid::new_v4()));
@@ -848,7 +1048,39 @@ mod tests {
         assert!(master.join("dropped.json").exists());
         server.abort();
 
+        // A bundle whose files are all unchanged still prunes what it lacks,
+        // and leaves the unchanged files (and their mtimes) alone.
+        let kept = std::fs::metadata(master.join("a.json"))
+            .unwrap()
+            .modified()
+            .unwrap();
+        let (url, server) = spawn_sync_source(SyncReply {
+            version: sonic_rs::to_string(&version("4.5.0.1", 0))
+                .unwrap()
+                .into_bytes(),
+            bundle: tar_of(&tables),
+        })
+        .await;
+        server_config.master_sync.source_url = url;
+        server_config.prune_max_files = 10;
+        config
+            .servers
+            .insert(ServerRegion::Jp, server_config.clone());
+        let syncers = build_syncers(&config, &HashMap::new(), None, &HashMap::new());
+        assert!(syncers[&ServerRegion::Jp].sync_once().await.unwrap());
+        assert!(!master.join("dropped.json").exists());
+        assert!(master.join("events.json").exists());
+        assert_eq!(
+            std::fs::metadata(master.join("a.json"))
+                .unwrap()
+                .modified()
+                .unwrap(),
+            kept
+        );
+        server.abort();
+
         // `prune_stale: false` keeps files a complete bundle no longer carries.
+        std::fs::write(master.join("dropped.json"), "[]").unwrap();
         let (url, server) = spawn_sync_source(SyncReply {
             version: sonic_rs::to_string(&version("5.0.0.1", 0))
                 .unwrap()
@@ -885,6 +1117,7 @@ mod tests {
             version_path: root.join("missing.json").to_string_lossy().into_owned(),
             source_url: "http://127.0.0.1:1".to_string(),
             source_token: String::new(),
+            compress_bundle: true,
             http: reqwest::Client::new(),
             master_db: None,
             ingest_concurrency: crate::ingest_engine::DEFAULT_INGEST_CONCURRENCY,

@@ -139,7 +139,11 @@ haruki-sekai-configs.example.yaml – Configuration template
 - Master sync: each region has one owner node running the master updater; peer
   nodes configured with `master_sync.source_url` pull the owner's master bundle
   (`MasterSyncer`), triggered by the owner's `/internal/master-updated` webhook
-  with `poll_cron` as fallback
+  with `poll_cron` as fallback. Unpacking skips files whose bytes are unchanged
+  (their mtime stays, so git and digest caches stay valid); the `produced` set
+  still lists every bundle file, so pruning is unaffected.
+  `master_sync.compress_bundle: false` asks the owner for an uncompressed bundle
+  (same host or network)
 - Remote-account master production: a node with `master_remote_source.url` runs
   the region's master pipeline locally but borrows a peer's accounts for the
   login probe and (CP) the encrypted master-split fetch, relayed as untouched
