@@ -340,6 +340,12 @@ image contains `haruki-sekai-api` (the default command), `master_registry`, `mas
 `backend.port`), 9998 (`registry.port`) and 9997 (`ingest.listen`, which defaults to
 `127.0.0.1:9997`). `git` is installed because `GitHelper` shells out to it.
 
+The runtime stage pins exact Alpine package versions (`ca-certificates`, `tzdata`, `git`, `gnupg`,
+`openssh-keygen`). Alpine drops superseded package versions from its index, which happens to `tzdata` several
+times a year. When that happens, an uncached build fails at `apk add`, even though CI can stay green while the
+layer comes from the registry cache. When the base image or a package moves, refresh the pins to the versions in
+the current `v3.24` index.
+
 ## Common Tasks for Agents
 
 ### Adding a New Game Data Model
