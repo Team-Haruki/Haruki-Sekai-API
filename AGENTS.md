@@ -217,8 +217,14 @@ haruki-sekai-configs.example.yaml – Configuration template
 - Per target (`ingest.targets[]`, state keyed by target `name`): `master_ingest_state` (per-file
   sha256 + mapping hash, rows, missing_since), `master_ingest_version`, `master_raw` (only with
   `raw: true`, opt-in), `master_ingest_allow_shrink`. A file is rewritten when its sha256 or mapping
-  hash (schema entry, DB columns/types, key, `raw`, `target::ENGINE_VERSION`) changed — bump
-  `ENGINE_VERSION` when value conversion or write SQL changes
+  hash (schema entry, DB columns/types, key, `raw`, `target::ENGINE_VERSION`, the table's
+  `ingest_engine::table_transform_tag`) changed — bump `ENGINE_VERSION` when the generic value
+  conversion or write SQL changes (rewrites every table); change a table's transform tag when
+  only that table's transform changes (rewrites that table only)
+- Per-table transforms (`json_to_sea_value_for_column`, both ingest paths): `cards.assetbundle_name`
+  prefers a `res<n>_no<n>` `archiveDisplayType`; `cards.card_parameters` CP rows (JP/EN) are stored
+  in the Nuverse shape `{"param1": [power by level], ...}` when every type's levels are exactly
+  1..n, otherwise unchanged; `master_raw` stays the file's rows
 - Each file is staged into a temp table, then upserted `ON CONFLICT (key) … WHERE … IS DISTINCT FROM`
   and stale keys deleted (keyless tables / no matching unique index: delete + insert). Steady runs
   commit a region in one transaction per target; runs above `stage_tables`/`stage_bytes` commit

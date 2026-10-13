@@ -16,12 +16,14 @@ use sha2::Digest as _;
 
 use crate::config::{IngestTargetConfig, ServerRegion, TableSelection};
 use crate::ingest_engine::{
-    build_batch, collect_json_keys, insert_batch, map_target_columns, Batch, MasterSchema,
+    build_batch, collect_json_keys, insert_batch, map_target_columns, table_transform_tag, Batch,
+    MasterSchema,
 };
 use crate::updater::prune::BUILTIN_PROTECTED_TABLES;
 
 /// Bumped whenever value conversion, key normalization or the write SQL
-/// changes, so every target re-ingests every table once (mapping hash).
+/// changes, so every target re-ingests every table once (mapping hash). A
+/// transform of one table's values changes `table_transform_tag` instead.
 pub const ENGINE_VERSION: &str = "1";
 
 /// Staging table for the file being written (per connection, dropped at
@@ -430,16 +432,26 @@ impl Target {
             .collect::<Vec<_>>()
             .join(",");
         let key_desc = key.as_ref().map(|k| k.join(",")).unwrap_or_default();
-        let mapping_hash = sha_hex(&[
+        let region_desc = format!("region={has_region}");
+        let key_desc = format!("key={key_desc}");
+        let raw_desc = format!("raw={}", self.cfg.raw);
+        let mut parts = vec![
             ENGINE_VERSION,
             table,
             self.schema.entry_fingerprint(table).unwrap_or(""),
             &columns_desc,
-            &format!("region={has_region}"),
-            &format!("key={key_desc}"),
-            &format!("raw={}", self.cfg.raw),
+            &region_desc,
+            &key_desc,
+            &raw_desc,
             "selected",
-        ]);
+        ];
+        // Only tables with a transform get the extra part: every other
+        // table's hash stays what it was, so changing one transform rewrites
+        // one table instead of all of them (unlike ENGINE_VERSION).
+        if let Some(tag) = table_transform_tag(table) {
+            parts.push(tag);
+        }
+        let mapping_hash = sha_hex(&parts);
         Ok(TablePlan {
             table: table.to_string(),
             cols,
