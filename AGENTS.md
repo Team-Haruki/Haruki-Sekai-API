@@ -334,7 +334,7 @@ cd tools/ent_generator && cargo run
 docker build --build-arg VERSION=v1.0.0 -t haruki-sekai-api .
 ```
 
-The Dockerfile is a cargo-chef multi-stage build (`rust:1.98-alpine` → `alpine:3.24`). The
+The Dockerfile is a cargo-chef multi-stage build (`rust:1.99-alpine` → `alpine:3.24`). The
 image contains `haruki-sekai-api` (the default command), `master_registry`, `master_ingest`,
 `run_ingest`, `schema_info.json` and `Data/structures`, and exposes 9999 (API,
 `backend.port`), 9998 (`registry.port`) and 9997 (`ingest.listen`, which defaults to
