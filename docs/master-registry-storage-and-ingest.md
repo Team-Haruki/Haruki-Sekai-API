@@ -494,7 +494,10 @@ rule (`updater/prune.rs`), not immediately:
   one of them fails the region's run instead ("missing from the manifest but
   is protected/required"): the rows are kept, nothing of that version is
   ingested, and every later version fails the same way until the file comes
-  back or the operator takes the table off `required_tables`.
+  back or the operator takes the table off `required_tables`. That way out
+  exists only for tables the operator added: a built-in table stays protected
+  whatever `required_tables` says, so its loss needs a code change to the
+  protect list.
 - A file that vanished while another listed file maps to the same table (a
   rename) only loses its state row; the table is written by the new file.
 - A table that no longer exists in the target database is not cleared; the
@@ -518,6 +521,8 @@ rule (`updater/prune.rs`), not immediately:
     GROUP BY 1` before adding one.
   - Names are table names or file stems from the schema. An unknown name
     stops the ingester at startup.
+  - With a `tables` allow-list, a required table that the allow-list leaves
+    out is not checked; put it in both lists.
   - The config is read once at startup, so restart the ingester after
     editing it. The check runs only when a region writes something; an
     `upToDate` reconcile skips it.
