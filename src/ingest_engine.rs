@@ -601,8 +601,70 @@ fn json_to_sea_value_for_column(
             return assetbundle_name.into();
         }
     }
+    if table_name == "cards" && db_col == "card_parameters" {
+        if let Some(compact) = compact_card_parameters(val) {
+            return json_to_sea_value(&compact, col_type);
+        }
+    }
 
     json_to_sea_value(val, col_type)
+}
+
+/// Tag of the per-table value transforms `build_rows` applies beyond the
+/// generic conversion, folded into the registry ingest's mapping hash so a
+/// change rewrites only that table. Change a tag whenever its transform's
+/// output changes; `None` keeps a table's mapping hash as it was.
+pub(crate) fn table_transform_tag(table_name: &str) -> Option<&'static str> {
+    match table_name {
+        "cards" => Some("cards.card_parameters=compact-v1"),
+        _ => None,
+    }
+}
+
+const CARD_PARAMETER_ROW_KEYS: [&str; 5] =
+    ["id", "cardId", "cardLevel", "cardParameterType", "power"];
+
+/// The CP servers' (JP/EN) `cardParameters` rows
+/// `[{cardLevel, cardParameterType, power, id, cardId}, ...]` in the shape the
+/// Nuverse servers (CN/TW/KR) ship: `{"param1": [power at level 1, 2, ...], ...}`.
+/// `None` (store the value as it is) unless every row has exactly those keys,
+/// an integer level and power and a string type, and every type's levels are
+/// exactly 1..n without duplicates.
+fn compact_card_parameters(val: &Value) -> Option<Value> {
+    let rows = val.as_array().filter(|rows| !rows.is_empty())?;
+    let mut by_type: std::collections::BTreeMap<&str, Vec<(u64, i64)>> =
+        std::collections::BTreeMap::new();
+    for row in rows {
+        let row = row.as_object()?;
+        if row.len() != CARD_PARAMETER_ROW_KEYS.len()
+            || !CARD_PARAMETER_ROW_KEYS.iter().all(|k| row.contains_key(*k))
+        {
+            return None;
+        }
+        let level = row.get("cardLevel")?.as_u64()?;
+        let parameter_type = row.get("cardParameterType")?.as_str()?;
+        let power = row.get("power")?.as_i64()?;
+        by_type
+            .entry(parameter_type)
+            .or_default()
+            .push((level, power));
+    }
+    let mut out = serde_json::Map::with_capacity(by_type.len());
+    for (parameter_type, mut levels) in by_type {
+        levels.sort_unstable_by_key(|(level, _)| *level);
+        if !levels
+            .iter()
+            .enumerate()
+            .all(|(i, (level, _))| *level == i as u64 + 1)
+        {
+            return None;
+        }
+        out.insert(
+            parameter_type.to_string(),
+            Value::Array(levels.into_iter().map(|(_, p)| Value::from(p)).collect()),
+        );
+    }
+    Some(Value::Object(out))
 }
 
 fn preferred_card_assetbundle_name(
@@ -768,6 +830,218 @@ mod tests {
             sea_orm::sea_query::Value::String(Some(s)) => assert_eq!(&*s, "res017_no037"),
             other => panic!("unexpected value: {other:?}"),
         }
+    }
+
+    fn fixture_cards() -> Vec<Value> {
+        serde_json::from_str(include_str!("testdata/ingest_fixture/cards.json")).unwrap()
+    }
+
+    fn card_parameters_column(table: &str, card: &Value) -> Value {
+        let obj = card.as_object().unwrap();
+        let val = obj.get("cardParameters").unwrap_or(&Value::Null);
+        match json_to_sea_value_for_column(table, obj, "card_parameters", val, "json.RawMessage") {
+            sea_orm::sea_query::Value::Json(Some(v)) => *v,
+            other => panic!("unexpected value: {other:?}"),
+        }
+    }
+
+    fn jp_rows(params: &[(&str, &[i64])]) -> Value {
+        let mut rows = Vec::new();
+        let mut id = 0;
+        for (parameter_type, powers) in params {
+            for (i, power) in powers.iter().enumerate() {
+                id += 1;
+                rows.push(json!({"id": id, "cardId": 1, "cardLevel": i + 1,
+                    "cardParameterType": parameter_type, "power": power}));
+            }
+        }
+        Value::Array(rows)
+    }
+
+    #[test]
+    fn jp_card_parameters_become_the_cn_shape() {
+        // Card 1's `card_parameters` as the CN master ships it (ingested
+        // unchanged): the JP rows of the same card must compact to it.
+        let cn = json!({
+            "param1": [1065, 1149, 1233, 1317, 1401, 1485, 1569, 1653, 1737, 1821,
+                       1906, 1990, 2074, 2158, 2242, 2326, 2410, 2494, 2578, 2663],
+            "param2": [930, 1003, 1076, 1150, 1223, 1297, 1370, 1443, 1517, 1590,
+                       1664, 1737, 1811, 1884, 1957, 2031, 2104, 2178, 2251, 2325],
+            "param3": [1035, 1116, 1198, 1280, 1361, 1443, 1525, 1606, 1688, 1770,
+                       1851, 1933, 2015, 2096, 2178, 2260, 2341, 2423, 2505, 2587]
+        });
+        let cards = fixture_cards();
+        let card1 = cards.iter().find(|c| c["id"] == 1).unwrap();
+        assert!(card1["cardParameters"].is_array());
+        let compact = card_parameters_column("cards", card1);
+        assert_eq!(compact, cn);
+        assert_eq!(
+            serde_json::to_string(&compact).unwrap(),
+            serde_json::to_string(&cn).unwrap()
+        );
+        // The CN value itself passes through untouched.
+        let cn_card = json!({"id": 1, "cardParameters": cn.clone()});
+        assert_eq!(card_parameters_column("cards", &cn_card), cn);
+
+        for card in &cards {
+            let compact = card_parameters_column("cards", card);
+            let rows = card["cardParameters"].as_array().unwrap();
+            let obj = compact.as_object().unwrap();
+            assert_eq!(
+                obj.keys().collect::<Vec<_>>(),
+                ["param1", "param2", "param3"]
+            );
+            let mut expected: std::collections::BTreeMap<&str, Vec<(u64, i64)>> =
+                Default::default();
+            for row in rows {
+                expected
+                    .entry(row["cardParameterType"].as_str().unwrap())
+                    .or_default()
+                    .push((
+                        row["cardLevel"].as_u64().unwrap(),
+                        row["power"].as_i64().unwrap(),
+                    ));
+            }
+            for (parameter_type, mut levels) in expected {
+                levels.sort();
+                let powers: Vec<Value> = levels.into_iter().map(|(_, p)| p.into()).collect();
+                assert_eq!(obj[parameter_type], Value::Array(powers));
+            }
+            // Max power per attribute (what readers take) is unchanged.
+            for parameter_type in ["param1", "param2", "param3"] {
+                let row_max = rows
+                    .iter()
+                    .filter(|r| r["cardParameterType"] == parameter_type)
+                    .map(|r| r["power"].as_i64().unwrap())
+                    .max();
+                let compact_max = obj[parameter_type]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|p| p.as_i64().unwrap())
+                    .max();
+                assert_eq!(row_max, compact_max);
+            }
+        }
+    }
+
+    #[test]
+    fn card_parameters_are_ordered_by_level_and_type() {
+        let mut rows = jp_rows(&[("param2", &[20, 21, 22]), ("param1", &[10, 11, 12])]);
+        rows.as_array_mut().unwrap().reverse();
+        assert_eq!(
+            compact_card_parameters(&rows),
+            Some(json!({"param1": [10, 11, 12], "param2": [20, 21, 22]}))
+        );
+        let compact = compact_card_parameters(&rows).unwrap();
+        assert_eq!(
+            compact.as_object().unwrap().keys().collect::<Vec<_>>(),
+            ["param1", "param2"]
+        );
+        // Types need not have the same number of levels.
+        assert_eq!(
+            compact_card_parameters(&jp_rows(&[("param1", &[1, 2]), ("param2", &[3])])),
+            Some(json!({"param1": [1, 2], "param2": [3]}))
+        );
+    }
+
+    #[test]
+    fn malformed_card_parameters_are_stored_unchanged() {
+        let card = |params: Value| json!({"id": 1, "cardParameters": params});
+        let mut cases = vec![
+            json!([]),
+            json!(null),
+            json!("param1"),
+            json!([1, 2, 3]),
+            json!({"param1": [1, 2, 3]}),
+            json!({}),
+        ];
+        let edit = |f: &dyn Fn(&mut Vec<Value>)| {
+            let mut rows = jp_rows(&[("param1", &[10, 11, 12]), ("param2", &[20, 21, 22])]);
+            f(rows.as_array_mut().unwrap());
+            rows
+        };
+        // A gap in the levels.
+        cases.push(edit(&|r| {
+            r.remove(1);
+        }));
+        // Levels not starting at 1.
+        cases.push(edit(&|r| {
+            for row in r.iter_mut() {
+                row["cardLevel"] = (row["cardLevel"].as_u64().unwrap() + 1).into();
+            }
+        }));
+        // A duplicate level (the type then has 1, 2, 2, 3).
+        cases.push(edit(&|r| {
+            let dup = r[1].clone();
+            r.push(dup);
+        }));
+        // A level 0.
+        cases.push(edit(&|r| r[0]["cardLevel"] = json!(0)));
+        // Missing fields.
+        for key in CARD_PARAMETER_ROW_KEYS {
+            cases.push(edit(&|r| {
+                r[2].as_object_mut().unwrap().remove(key);
+            }));
+        }
+        // An unknown field.
+        cases.push(edit(&|r| r[0]["bonus"] = json!(1)));
+        // Wrong value types.
+        cases.push(edit(&|r| r[0]["power"] = json!(10.5)));
+        cases.push(edit(&|r| r[0]["power"] = json!("10")));
+        cases.push(edit(&|r| r[0]["power"] = json!(null)));
+        cases.push(edit(&|r| r[0]["cardLevel"] = json!("1")));
+        cases.push(edit(&|r| r[0]["cardLevel"] = json!(-1)));
+        cases.push(edit(&|r| r[0]["cardParameterType"] = json!(1)));
+        // A row that is not an object.
+        cases.push(edit(&|r| r.push(json!(null))));
+
+        for params in cases {
+            assert_eq!(compact_card_parameters(&params), None, "{params}");
+            let value = json_to_sea_value_for_column(
+                "cards",
+                card(params.clone()).as_object().unwrap(),
+                "card_parameters",
+                &params,
+                "json.RawMessage",
+            );
+            let stored = match value {
+                sea_orm::sea_query::Value::Json(v) => v.map(|v| *v).unwrap_or(Value::Null),
+                other => panic!("unexpected value: {other:?}"),
+            };
+            assert_eq!(stored, params);
+        }
+    }
+
+    #[test]
+    fn card_parameters_compact_only_in_cards() {
+        let rows = jp_rows(&[("param1", &[10, 11])]);
+        let card = json!({"id": 1, "cardParameters": rows.clone()});
+        assert_eq!(card_parameters_column("othercards", &card), rows);
+        assert_eq!(
+            card_parameters_column("cards", &card),
+            json!({"param1": [10, 11]})
+        );
+
+        let db_cols = HashMap::from([
+            ("game_id".to_string(), "int64".to_string()),
+            ("card_parameters".to_string(), "json.RawMessage".to_string()),
+        ]);
+        let batch = build_batch(std::slice::from_ref(&card), "cards", &db_cols, "jp", true);
+        let at = batch
+            .column_names
+            .iter()
+            .position(|c| c == "card_parameters")
+            .unwrap();
+        let expected: sea_orm::sea_query::SimpleExpr =
+            sea_orm::sea_query::Value::Json(Some(Box::new(json!({"param1": [10, 11]})))).into();
+        assert_eq!(batch.rows[0][at], expected);
+
+        assert_eq!(
+            table_transform_tag("cards"),
+            Some("cards.card_parameters=compact-v1")
+        );
+        assert_eq!(table_transform_tag("musics"), None);
     }
 
     #[test]

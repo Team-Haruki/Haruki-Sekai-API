@@ -576,6 +576,128 @@ async fn mapping_change_reingests_only_affected_tables() {
     dbs.drop_all().await;
 }
 
+/// Rows (game_id, card_parameters, xmin) of the jp cards.
+async fn card_parameter_rows(db: &DatabaseConnection) -> Vec<(i64, serde_json::Value, String)> {
+    db.query_all_raw(Statement::from_string(
+        DbBackend::Postgres,
+        "SELECT game_id, card_parameters, xmin::text AS x FROM cards \
+         WHERE server_region = 'jp' ORDER BY game_id",
+    ))
+    .await
+    .unwrap()
+    .into_iter()
+    .map(|r| {
+        (
+            r.try_get("", "game_id").unwrap(),
+            r.try_get("", "card_parameters").unwrap(),
+            r.try_get("", "x").unwrap(),
+        )
+    })
+    .collect()
+}
+
+/// The `cards.card_parameters` compaction, deployed over a database the
+/// previous release filled: only cards.json is rewritten, CP rows become
+/// the Nuverse shape (equal to an object-shaped file of the same cards),
+/// object-shaped rows are not touched, `master_raw` keeps the file's rows
+/// and the recorded contentHash stays.
+#[tokio::test]
+#[ignore] // Requires PostgreSQL (HARUKI_TEST_INGEST_DSN)
+async fn card_parameters_compaction_rewrites_only_cards() {
+    let mut dbs = Dbs::new().await;
+    let (dsn_cp, db_cp) = dbs.create("ing_cards_cp").await;
+    let (dsn_nv, db_nv) = dbs.create("ing_cards_nv").await;
+    let (url_cp, mock_cp) = mock_registry("pg").await;
+    let (url_nv, mock_nv) = mock_registry("pg").await;
+    let files = fixture();
+    let mapped = mapped_tables(&files);
+    // The same cards with object-shaped parameters, as CN/TW/KR ship them.
+    let nuverse_files = with_rows(&files, "cards.json", |rows| {
+        for row in rows.iter_mut() {
+            let mut shaped = serde_json::Map::new();
+            for p in row["cardParameters"].as_array().unwrap() {
+                shaped
+                    .entry(p["cardParameterType"].as_str().unwrap())
+                    .or_insert_with(|| serde_json::json!([]))
+                    .as_array_mut()
+                    .unwrap()
+                    .push(p["power"].clone());
+            }
+            row["cardParameters"] = serde_json::Value::Object(shaped);
+        }
+    });
+    let v_cp = publish(&mock_cp, &files, "1.0.0.1");
+    publish(&mock_nv, &nuverse_files, "1.0.0.1");
+    let mut cfg_cp = target_cfg("main", &dsn_cp);
+    cfg_cp.raw = true;
+    let ing_cp = ingester(&url_cp, 100, vec![cfg_cp]).await;
+    let ing_nv = ingester(&url_nv, 100, vec![target_cfg("main", &dsn_nv)]).await;
+    for ing in [&ing_cp, &ing_nv] {
+        let outcomes = ing.reconcile_region(JP).await;
+        assert_eq!(written(outcome(&outcomes, "main")).0, mapped.len());
+    }
+    let compacted = card_parameter_rows(&db_cp).await;
+    assert_eq!(compacted.len(), 10);
+    assert!(compacted.iter().all(|(_, v, _)| v.is_object()));
+    let strip = |rows: &[(i64, serde_json::Value, String)]| {
+        rows.iter()
+            .map(|(id, v, _)| (*id, v.clone()))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(strip(&compacted), strip(&card_parameter_rows(&db_nv).await));
+    let raw_arrays = "SELECT count(*) FROM master_raw WHERE table_name = 'cards' \
+                      AND jsonb_typeof(raw->'cardParameters') = 'array'";
+    assert_eq!(scalar_i64(&db_cp, raw_arrays).await, 10);
+
+    // What the previous release left: expanded rows, its mapping hash.
+    db_cp
+        .execute_unprepared(
+            "UPDATE cards c SET card_parameters = r.raw->'cardParameters' FROM master_raw r \
+             WHERE r.table_name = 'cards' AND (r.raw->>'id')::bigint = c.game_id",
+        )
+        .await
+        .unwrap();
+    for db in [&db_cp, &db_nv] {
+        db.execute_unprepared(
+            "UPDATE master_ingest_state SET mapping_hash = 'previous' WHERE file = 'cards.json'",
+        )
+        .await
+        .unwrap();
+    }
+    let expanded = card_parameter_rows(&db_cp).await;
+    assert!(expanded.iter().all(|(_, v, _)| v.is_array()));
+    let untouched = card_parameter_rows(&db_nv).await;
+
+    for ing in [&ing_cp, &ing_nv] {
+        let outcomes = ing.reconcile_region(JP).await;
+        assert_eq!(written(outcome(&outcomes, "main")), (1, 0, false));
+    }
+    assert_eq!(hits(&mock_cp, &files["cards.json"]), 2);
+    assert_eq!(hits(&mock_cp, &files["musics.json"]), 1);
+    let after = card_parameter_rows(&db_cp).await;
+    assert_eq!(strip(&after), strip(&compacted));
+    assert!(after
+        .iter()
+        .zip(&expanded)
+        .all(|((_, _, x1), (_, _, x0))| x1 != x0));
+    // Object-shaped rows compare equal: no row is updated.
+    assert_eq!(card_parameter_rows(&db_nv).await, untouched);
+    assert_eq!(scalar_i64(&db_cp, raw_arrays).await, 10);
+    let row = db_cp
+        .query_one_raw(Statement::from_string(
+            DbBackend::Postgres,
+            "SELECT content_hash FROM master_ingest_version",
+        ))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        row.try_get::<String>("", "content_hash").unwrap(),
+        v_cp.content_hash
+    );
+    dbs.drop_all().await;
+}
+
 /// A file missing from one version keeps its rows; missing from the next
 /// ingested version too, the rows are deleted. A file back in between
 /// resets the count; a protected table is never cleared (the run fails).
@@ -1214,6 +1336,47 @@ fn plan_uses_the_matching_unique_index_and_hashes_the_mapping() {
         Target::skip_hash(Some("cards"), "not-selected"),
         Target::skip_hash(None, "unmapped")
     );
+}
+
+#[test]
+fn only_cards_mapping_hash_carries_a_value_transform() {
+    let target = lazy_target("main");
+    let plan_hash = |table: &str| {
+        let (cols, _) = target.schema.table(table).unwrap();
+        let mut shape = TableShape::default();
+        for col in cols.keys() {
+            shape.columns.insert(col.clone(), "text".into());
+        }
+        if table == "cards" {
+            shape
+                .columns
+                .insert("card_parameters".into(), "jsonb".into());
+        }
+        shape
+            .unique_sets
+            .push(["game_id", "server_region"].map(String::from).into());
+        target.plan(table, &shape).unwrap().mapping_hash
+    };
+    // Hashes of the same shapes before the cards transform (ENGINE_VERSION
+    // 1): other tables keep theirs, so a deploy rewrites cards.json only.
+    assert_eq!(
+        plan_hash("musics"),
+        "b40101739745530a9e2f0a9b751d97a6884b6aaadfa728a7ac4e0d4b17928d5c"
+    );
+    assert_eq!(
+        plan_hash("cardrarities"),
+        "05bf5e7c8324f0e4b34eef869db35cbe203ba818399d159fa96f80bc3fee99f5"
+    );
+    assert_ne!(
+        plan_hash("cards"),
+        "9dba568ffd7405291154893d04b8061b8fecfc174aaca0ed541330a29dc933ed"
+    );
+    let with_transform: Vec<&str> = target
+        .schema
+        .table_names()
+        .filter(|t| crate::ingest_engine::table_transform_tag(t).is_some())
+        .collect();
+    assert_eq!(with_transform, ["cards"]);
 }
 
 #[test]

@@ -393,6 +393,11 @@ different rows when the mapping changes. Each `(target, table)` has a
 - the target's `raw` setting,
 - the target's resolved table set.
 
+- for a table with a value transform, its tag
+  (`ingest_engine::table_transform_tag`, e.g. `cards.card_parameters=compact-v1`).
+  Other tables hash without this part, so changing one table's transform
+  rewrites only that table, where bumping the engine version rewrites all.
+
 It is stored per file in `master_ingest_state.mapping_hash`. A file is
 re-ingested when its `sha256` **or** its mapping hash differs, so regenerating
 the models, upgrading the engine or turning `raw` on rewrites exactly the
@@ -465,6 +470,18 @@ The goal is to avoid rewriting unchanged rows:
 
 - Typed columns keep the current mapping: normalized key, `id` → `game_id`,
   and the typed value conversions.
+- Per-table value transforms (both ingest paths, in
+  `ingest_engine::json_to_sea_value_for_column`):
+  - `cards.assetbundle_name` takes `archiveDisplayType` when that is a card
+    resource name (`res<digits>_no<digits>`).
+  - `cards.card_parameters`: the CP servers' (JP/EN) rows
+    `[{id, cardId, cardLevel, cardParameterType, power}, ...]` are stored in
+    the shape the Nuverse servers (CN/TW/KR) ship, `{"param1": [power at
+    level 1, 2, ...], "param2": [...], "param3": [...]}` (about 15x smaller
+    for JP/EN). Only when every row has exactly those five keys, an integer
+    level and power and a string type, and every type's levels are exactly
+    1..n without duplicates; anything else (objects included) is stored as
+    it is. `master_raw` keeps the file's rows.
 - With `raw: true`, the full original row goes into the **side table
   `master_raw(region, table_name, key, raw)`**, not into a column of the typed
   tables. The typed tables stay narrow and unchanged for existing readers; no
