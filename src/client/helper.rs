@@ -5,7 +5,6 @@ use parking_lot::Mutex;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
-use crate::config::ServerRegion;
 use crate::error::AppError;
 
 /// The app identity a region's accounts log in with: what the registry
@@ -164,22 +163,38 @@ mod tests {
     }
 
     #[test]
-    fn forces_nuverse_app_version_patch_to_zero() {
-        for region in [ServerRegion::Tw, ServerRegion::Kr, ServerRegion::Cn] {
-            assert_eq!(effective_app_version(region, "6.0.2"), "6.0.0");
-            assert_eq!(effective_app_version(region, "3.4.99"), "3.4.0");
-        }
+    fn pins_app_version_patch_to_zero_when_enabled() {
+        assert_eq!(effective_app_version(true, "6.0.2"), "6.0.0");
+        assert_eq!(effective_app_version(true, "3.4.99"), "3.4.0");
+        assert_eq!(effective_app_version(true, "6.0.0"), "6.0.0");
     }
 
     #[test]
-    fn preserves_cp_and_malformed_app_versions() {
-        assert_eq!(effective_app_version(ServerRegion::Jp, "6.0.2"), "6.0.2");
-        assert_eq!(effective_app_version(ServerRegion::En, "3.4.99"), "3.4.99");
-        assert_eq!(effective_app_version(ServerRegion::Cn, "6.0"), "6.0");
-        assert_eq!(
-            effective_app_version(ServerRegion::Cn, "invalid"),
-            "invalid"
-        );
+    fn preserves_unpinned_and_malformed_app_versions() {
+        assert_eq!(effective_app_version(false, "6.0.2"), "6.0.2");
+        assert_eq!(effective_app_version(false, "3.4.99"), "3.4.99");
+        assert_eq!(effective_app_version(true, "6.0"), "6.0");
+        assert_eq!(effective_app_version(true, "invalid"), "invalid");
+        assert_eq!(effective_app_version(true, "6.0.x"), "6.0.x");
+    }
+
+    #[test]
+    fn pin_defaults_to_nuverse_regions_only() {
+        use crate::config::{default_pin_app_version_patch_to_zero, ServerConfig};
+        for region in [ServerRegion::Tw, ServerRegion::Kr, ServerRegion::Cn] {
+            assert!(default_pin_app_version_patch_to_zero(region));
+        }
+        for region in [ServerRegion::Jp, ServerRegion::En] {
+            assert!(!default_pin_app_version_patch_to_zero(region));
+        }
+        let unset: ServerConfig = serde_yaml::from_str("{}").unwrap();
+        assert!(unset.pins_app_version_patch_to_zero(ServerRegion::Cn));
+        assert!(!unset.pins_app_version_patch_to_zero(ServerRegion::Jp));
+        let off: ServerConfig =
+            serde_yaml::from_str("pin_app_version_patch_to_zero: false").unwrap();
+        assert!(!off.pins_app_version_patch_to_zero(ServerRegion::Cn));
+        let on: ServerConfig = serde_yaml::from_str("pin_app_version_patch_to_zero: true").unwrap();
+        assert!(on.pins_app_version_patch_to_zero(ServerRegion::Jp));
     }
 
     #[tokio::test]
@@ -268,11 +283,14 @@ mod tests {
     }
 }
 
-/// Nuverse may advertise a patch release before its login endpoint accepts that
-/// exact version. Patch releases do not affect the Nuverse protocol, so requests
-/// and persisted version state use the corresponding `.0` patch as a fallback.
-pub fn effective_app_version(region: ServerRegion, app_version: &str) -> String {
-    if region.is_cp_server() {
+/// The appVersion a region stores and sends. With `pin_patch_to_zero` (a
+/// region's `pin_app_version_patch_to_zero`, on by default for TW/KR/CN) a
+/// three-part numeric version becomes `major.minor.0`: the Nuverse package's
+/// internal Unity version can be ahead of the version its login endpoint
+/// accepts. Without it, and for anything that is not `x.y.z`, the version is
+/// kept as given.
+pub fn effective_app_version(pin_patch_to_zero: bool, app_version: &str) -> String {
+    if !pin_patch_to_zero {
         return app_version.to_string();
     }
 

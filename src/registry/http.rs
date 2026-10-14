@@ -2179,6 +2179,73 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn app_identity_applies_the_region_patch_pin() {
+        let root = temp_dir();
+        let info = |version: &str| AppInfo {
+            app_version: version.to_string(),
+            app_hash: "cn-hash".to_string(),
+        };
+        // No `servers.cn` section: the Nuverse default zeroes the patch.
+        let registry = Registry::new(Arc::new(base_config(&root, "secret")), HashMap::new());
+        let (effective, pushed) = registry
+            .set_app_identity(ServerRegion::Cn, &info("6.4.1"))
+            .await
+            .unwrap();
+        assert!(pushed.is_empty());
+        assert_eq!(effective.app_version, "6.4.0");
+        assert_eq!(
+            registry
+                .app_identity(ServerRegion::Cn)
+                .await
+                .unwrap()
+                .app_version,
+            "6.4.0"
+        );
+        // An override stored raw (before the pin applied here) reads pinned.
+        registry
+            .state
+            .set_app_identity(ServerRegion::Cn, &info("6.4.1"))
+            .await
+            .unwrap();
+        assert_eq!(
+            registry
+                .app_identity(ServerRegion::Cn)
+                .await
+                .unwrap()
+                .app_version,
+            "6.4.0"
+        );
+        // JP keeps its patch.
+        let (effective, _) = registry
+            .set_app_identity(ServerRegion::Jp, &info("6.0.2"))
+            .await
+            .unwrap();
+        assert_eq!(effective.app_version, "6.0.2");
+
+        // Turned off for CN: patch releases are kept.
+        let mut config = base_config(&root, "secret");
+        let mut cn: ServerConfig =
+            serde_yaml::from_str("pin_app_version_patch_to_zero: false").unwrap();
+        cn.version_path = root.join("cn-version.json").to_string_lossy().into_owned();
+        config.servers.insert(ServerRegion::Cn, cn);
+        let registry = Registry::new(Arc::new(config), HashMap::new());
+        assert_eq!(
+            registry
+                .app_identity(ServerRegion::Cn)
+                .await
+                .unwrap()
+                .app_version,
+            "6.4.1"
+        );
+        let (effective, _) = registry
+            .set_app_identity(ServerRegion::Cn, &info("6.4.2"))
+            .await
+            .unwrap();
+        assert_eq!(effective.app_version, "6.4.2");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
     async fn serves_music_metas_pointer_file_and_blobs() {
         let root = temp_dir();
         let upstream_body = serde_json::to_vec(&serde_json::json!([

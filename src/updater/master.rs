@@ -53,12 +53,13 @@ impl AppIdentity {
 }
 
 /// Overwrite the appVersion/appHash fields of the version file at `path`
-/// with `app` (non-empty fields only, appVersion normalized for the region).
+/// with `app` (non-empty fields only; appVersion through
+/// [`effective_app_version`] with the region's `pin_patch_to_zero`).
 /// Returns whether the file changed. Callers must hold the region's version
 /// lock. Used when another node's identity is authoritative: the account
 /// node for a remote-account producer, the owner node for a syncer.
 pub(crate) async fn persist_app_identity(
-    region: ServerRegion,
+    pin_patch_to_zero: bool,
     path: &str,
     app: &AppIdentity,
 ) -> Result<bool, AppError> {
@@ -71,7 +72,7 @@ pub(crate) async fn persist_app_identity(
         .map_err(|e| AppError::ParseError(format!("version file {path}: {e}")))?;
     let mut changed = false;
     if !app.app_version.trim().is_empty() {
-        let version = effective_app_version(region, &app.app_version);
+        let version = effective_app_version(pin_patch_to_zero, &app.app_version);
         if existing.get("appVersion").and_then(|v| v.as_str()) != Some(version.as_str()) {
             existing.insert("appVersion".to_string(), serde_json::Value::String(version));
             changed = true;
@@ -568,7 +569,15 @@ impl MasterUpdater {
     /// webhook), so this is an explicit override, taken under the same lock.
     async fn adopt_app_identity(&self, app: &AppIdentity) -> Result<(), AppError> {
         let _guard = self.version_lock.lock().await;
-        if persist_app_identity(self.region, &self.client.config.version_path, app).await? {
+        if persist_app_identity(
+            self.client
+                .config
+                .pins_app_version_patch_to_zero(self.region),
+            &self.client.config.version_path,
+            app,
+        )
+        .await?
+        {
             info!(
                 "{} Adopting account node app identity: appVersion={} appHash={}",
                 self.region.as_str().to_uppercase(),
@@ -1086,7 +1095,15 @@ treating difference as an update",
     ) -> Result<VersionInfo, crate::error::AppError> {
         // Serialize with the app-identity webhook so neither clobbers the other's fields.
         let _guard = self.version_lock.lock().await;
-        persist_version_file(self.region, &self.client.config.version_path, version).await
+        persist_version_file(
+            self.region,
+            self.client
+                .config
+                .pins_app_version_patch_to_zero(self.region),
+            &self.client.config.version_path,
+            version,
+        )
+        .await
     }
 
     /// Webhook peer nodes that pull this region's master data from us, so they
@@ -1136,6 +1153,7 @@ treating difference as an update",
 /// and the master syncer (pulled from a peer node).
 pub(crate) async fn persist_version_file(
     region: ServerRegion,
+    pin_patch_to_zero: bool,
     path: &str,
     version: &VersionInfo,
 ) -> Result<VersionInfo, crate::error::AppError> {
@@ -1148,7 +1166,7 @@ pub(crate) async fn persist_version_file(
     } else {
         serde_json::Map::new()
     };
-    let merged_version = merge_version_state(region, &mut existing, version);
+    let merged_version = merge_version_state(region, pin_patch_to_zero, &mut existing, version);
     let json = sonic_rs::to_string_pretty(&existing)
         .map_err(|e| crate::error::AppError::ParseError(e.to_string()))?;
     crate::client::helper::write_file_atomic(Path::new(path), json.as_bytes()).await?;
@@ -1214,13 +1232,14 @@ fn existing_or_non_empty(
 
 fn merge_version_state(
     region: ServerRegion,
+    pin_patch_to_zero: bool,
     existing: &mut serde_json::Map<String, serde_json::Value>,
     incoming: &VersionInfo,
 ) -> VersionInfo {
     // The app-identity webhook owns these two fields, so the on-disk values win unless
-    // they are empty. appVersion is still normalized for Nuverse regions.
+    // they are empty. appVersion still goes through the region's patch pin.
     let app_version = effective_app_version(
-        region,
+        pin_patch_to_zero,
         &existing_or_non_empty(existing, "appVersion", &incoming.app_version),
     );
     let app_hash = existing_or_non_empty(existing, "appHash", &incoming.app_hash);
@@ -1468,6 +1487,7 @@ mod tests {
         let incoming = login_response();
         let merged = merge_version_state(
             ServerRegion::Cn,
+            true,
             &mut existing,
             &VersionInfo {
                 app_version: String::new(),
@@ -1497,7 +1517,7 @@ mod tests {
         let mut incoming = version_info();
         incoming.asset_hash.clear();
 
-        let merged = merge_version_state(ServerRegion::Jp, &mut existing, &incoming);
+        let merged = merge_version_state(ServerRegion::Jp, false, &mut existing, &incoming);
 
         assert_eq!(merged.asset_hash, "cp-asset-hash");
     }
@@ -1512,7 +1532,7 @@ mod tests {
         let mut existing = serde_json::Map::new();
         existing.insert("appVersion".to_string(), JsonValue::String(String::new()));
         existing.insert("cdnVersion".to_string(), JsonValue::from(-1));
-        let merged = merge_version_state(ServerRegion::Jp, &mut existing, &version_info());
+        let merged = merge_version_state(ServerRegion::Jp, false, &mut existing, &version_info());
         assert_eq!(merged.app_version, "6.0.2");
         assert_eq!(merged.cdn_version, 159);
         assert_eq!(
@@ -1523,6 +1543,35 @@ mod tests {
             existing_or_non_empty(&existing, "missing", "fallback"),
             "fallback"
         );
+    }
+
+    #[tokio::test]
+    async fn persisted_app_identity_follows_the_patch_pin() {
+        let root = temp_dir();
+        let path = root.join("version.json");
+        let path = path.to_str().unwrap();
+        std::fs::write(
+            path,
+            r#"{"appVersion":"6.4.0","appHash":"h","dataVersion":"1"}"#,
+        )
+        .unwrap();
+        let app = AppIdentity {
+            app_version: "6.4.1".to_string(),
+            app_hash: "h".to_string(),
+        };
+        // Pinned (the TW/KR/CN default): 6.4.1 is stored as the 6.4.0 already there.
+        assert!(!persist_app_identity(true, path, &app).await.unwrap());
+        // Unpinned: the patch release is kept, also through the version merge.
+        assert!(persist_app_identity(false, path, &app).await.unwrap());
+        let merged = persist_version_file(ServerRegion::Cn, false, path, &version_info())
+            .await
+            .unwrap();
+        assert_eq!(merged.app_version, "6.4.1");
+        let merged = persist_version_file(ServerRegion::Cn, true, path, &version_info())
+            .await
+            .unwrap();
+        assert_eq!(merged.app_version, "6.4.0");
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]

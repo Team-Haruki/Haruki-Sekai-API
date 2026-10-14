@@ -150,7 +150,9 @@ impl Registry {
     /// resulting complete identity to every account node, serialized per
     /// region. Omitted fields are filled from the current effective identity
     /// (previous override, else the owner's synced version file); a field
-    /// that cannot be filled from anywhere is rejected.
+    /// that cannot be filled from anywhere is rejected. appVersion goes
+    /// through the region's `pin_app_version_patch_to_zero`, so the stored
+    /// override is what the account nodes store.
     pub async fn set_app_identity(
         &self,
         region: ServerRegion,
@@ -177,11 +179,14 @@ impl Registry {
                     })
             };
         let effective = AppInfo {
-            app_version: pick(
-                &requested.app_version,
-                "appVersion",
-                current.as_ref().map(|c| &c.app_version),
-            )?,
+            app_version: self.effective_app_version(
+                region,
+                &pick(
+                    &requested.app_version,
+                    "appVersion",
+                    current.as_ref().map(|c| &c.app_version),
+                )?,
+            ),
             app_hash: pick(
                 &requested.app_hash,
                 "appHash",
@@ -197,6 +202,14 @@ impl Registry {
         );
         let pushed = self.push_app_identity(region, &effective).await;
         Ok((effective, pushed))
+    }
+
+    /// `app_version` through the region's `pin_app_version_patch_to_zero`.
+    fn effective_app_version(&self, region: ServerRegion, app_version: &str) -> String {
+        crate::client::helper::effective_app_version(
+            crate::config::pins_app_version_patch_to_zero(&self.config.servers, region),
+            app_version,
+        )
     }
 
     /// Regions this registry manages: those with a master directory.
@@ -231,7 +244,10 @@ impl Registry {
     /// is stored, otherwise what the region's version file (synced from the
     /// owner, i.e. the identity the owner logged in with) says.
     pub async fn app_identity(&self, region: ServerRegion) -> Result<AppInfo, AppError> {
-        if let Some(info) = self.state.app_identity(region).await? {
+        if let Some(mut info) = self.state.app_identity(region).await? {
+            // An override stored before the pin applied here may carry the
+            // raw version; report what the nodes store.
+            info.app_version = self.effective_app_version(region, &info.app_version);
             return Ok(info);
         }
         let (_, version_path) = self.region_paths(region)?;
