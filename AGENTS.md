@@ -171,7 +171,10 @@ haruki-sekai-configs.example.yaml – Configuration template
 - On an asset version change the updater first calls every `asset_updater_servers` entry
   whose `regions` list is empty or contains the region (awaited before the master download).
   A 409 containing "is disabled" (node does not own the region) is not retried; other 409s
-  mean a job is running and retry `ASSET_UPDATER_MAX_CONFLICT_RETRIES`x at 60 s
+  mean a job is running and retry `ASSET_UPDATER_MAX_CONFLICT_RETRIES`x at 60 s.
+  The payload carries `app_version`, the appVersion the check logged in with (the account
+  node's for a remote login), so an updater 7.3.0+ adopts a new Nuverse app version for the
+  job it starts (after its own CDN probe); older updaters ignore the field
 - Downloaded payloads are decoded table by table with rows streamed (`master_stream.rs`),
   so the producer's peak memory is bounded by one row rather than the whole payload.
   Keep new master consumers on that path — never `unpack_ordered` a whole master
