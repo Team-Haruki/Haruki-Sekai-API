@@ -2243,6 +2243,25 @@ mod tests {
             .unwrap();
         assert_eq!(effective.app_version, "6.4.2");
         std::fs::remove_dir_all(root).unwrap();
+
+        // Without an override the version file is read through the pin too.
+        let root = temp_dir();
+        let mut config = base_config(&root, "secret");
+        config
+            .servers
+            .get_mut(&ServerRegion::Jp)
+            .unwrap()
+            .pin_app_version_patch_to_zero = Some(true);
+        std::fs::write(
+            root.join("version.json"),
+            r#"{"appVersion":"6.0.2","appHash":"owner-hash","dataVersion":"1","assetVersion":"1"}"#,
+        )
+        .unwrap();
+        let registry = Registry::new(Arc::new(config), HashMap::new());
+        let info = registry.app_identity(ServerRegion::Jp).await.unwrap();
+        assert_eq!(info.app_version, "6.0.0");
+        assert_eq!(info.app_hash, "owner-hash");
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]

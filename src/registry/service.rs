@@ -244,9 +244,10 @@ impl Registry {
     /// is stored, otherwise what the region's version file (synced from the
     /// owner, i.e. the identity the owner logged in with) says.
     pub async fn app_identity(&self, region: ServerRegion) -> Result<AppInfo, AppError> {
+        // Both sources go through the region's pin: an override stored
+        // before it applied here, or a version file written with another
+        // setting, may carry the raw version; report what the nodes store.
         if let Some(mut info) = self.state.app_identity(region).await? {
-            // An override stored before the pin applied here may carry the
-            // raw version; report what the nodes store.
             info.app_version = self.effective_app_version(region, &info.app_version);
             return Ok(info);
         }
@@ -261,7 +262,7 @@ impl Registry {
         let version: crate::client::helper::VersionInfo = sonic_rs::from_slice(&data)
             .map_err(|e| AppError::ParseError(format!("version file: {e}")))?;
         Ok(AppInfo {
-            app_version: version.app_version,
+            app_version: self.effective_app_version(region, &version.app_version),
             app_hash: version.app_hash,
         })
     }
