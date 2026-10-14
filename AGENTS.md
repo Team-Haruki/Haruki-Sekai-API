@@ -152,7 +152,15 @@ haruki-sekai-configs.example.yaml – Configuration template
   login probe and (CP) the encrypted master-split fetch, relayed as untouched
   bytes via `/internal/game-stream`
 - App identity is not polled on a node: it arrives via `POST /internal/app-identity`
-  (`src/api/internal.rs`)
+  (`src/api/internal.rs`; sekai-apphash, or the registry's `PUT /v1/app`), which writes
+  unconditionally, reloads the login headers and, on a change, notifies the region's
+  `master_sync.notify` peers. A game server's appVersion is never adopted: `LoginResponse`
+  has no app fields and login metadata only moves the data/asset version headers
+- Node-to-node adoption is forward-only (`master::adopt_decision`): a remote-account
+  producer taking its account node's identity, or a syncer taking its owner's (from the
+  bundle, and from the owner's version file even without new master data), adopts only a
+  newer appVersion (`x.y.z[.w]`), the same appVersion with another appHash, or a value
+  where the local one is empty; never an older one. An adoption reloads the login headers
 - appVersion is stored and sent exactly as pushed (the package manifest's
   `versionName`, which the server accepts, patch releases included).
   `servers.<region>.pin_app_version_patch_to_zero` is an opt-in escape hatch,
@@ -217,10 +225,18 @@ haruki-sekai-configs.example.yaml – Configuration template
   `blob_gc_grace_secs` (min 300; GC aborts if any snapshot is unreadable). The state pool is
   8 connections with `pg`, 4 otherwise. See `docs/master-registry-storage-and-ingest.md`
 - It also maintains the music_metas feed (`metas.rs`, omakase rows injected), serves the
-  app identity (`GET /v1/app/{region}`; `PUT` stores an override and pushes it to
-  `registry.account_nodes`), and fans `master-updated` notices out to
+  app identity (`GET /v1/app/{region}`: the override, else the synced version file; `PUT`
+  stores an override, writes it to the registry's own version file and pushes it to
+  `registry.account_nodes`; an override older than the owner's keeps winning, with a
+  warning, until `DELETE`), and fans `master-updated` notices out to
   `registry.subscribers` (body `{server, dataVersion, contentHash, gitCommit, changedFiles,
   removedFiles}`; the last four were added compatibly, receivers must still re-read `current`)
+- `current` carries that effective app identity, and its ETag covers the app identity,
+  versions and file set. An app-identity change republishes `current` with the same files
+  and `gitCommit` (history line, subscriber notice) without waiting for new master data:
+  PUT/DELETE at once, the owner's identity on the next refresh (its webhook, else the poll).
+  Read the appVersion from `current` or `app`: a `manifests/{hash}` snapshot identifies a
+  file set, and a CDN keeps the copy it first cached
 - `/health` reports `status: degraded` when the last git push failed
 - CDN contract: pointers (`current`, `files/{name}`, `music_metas.json`, `app`) are
   `no-cache` + ETag; digest-addressed `blob/{sha256}` and `manifests/{hash}` are

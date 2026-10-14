@@ -468,8 +468,15 @@ impl VersionHelper {
 }
 
 pub fn compare_version(new_version: &str, current_version: &str) -> Result<bool, AppError> {
+    Ok(cmp_version(new_version, current_version)? == std::cmp::Ordering::Greater)
+}
+
+/// Order two dotted numeric versions segment by segment (`x.y.z[.w]`,
+/// missing trailing segments count as 0, so `6.5` == `6.5.0`).
+pub fn cmp_version(a: &str, b: &str) -> Result<std::cmp::Ordering, AppError> {
     let parse_segments = |v: &str| -> Result<Vec<u32>, AppError> {
-        v.split('.')
+        v.trim()
+            .split('.')
             .map(|s| {
                 s.parse::<u32>().map_err(|e| {
                     AppError::ParseError(format!("Invalid version segment '{}': {}", s, e))
@@ -477,18 +484,17 @@ pub fn compare_version(new_version: &str, current_version: &str) -> Result<bool,
             })
             .collect()
     };
-    let new_segments = parse_segments(new_version)?;
-    let current_segments = parse_segments(current_version)?;
-    let max_len = new_segments.len().max(current_segments.len());
-    for i in 0..max_len {
-        let new_seg = new_segments.get(i).copied().unwrap_or(0);
-        let cur_seg = current_segments.get(i).copied().unwrap_or(0);
-
-        if new_seg > cur_seg {
-            return Ok(true);
-        } else if new_seg < cur_seg {
-            return Ok(false);
+    let a = parse_segments(a)?;
+    let b = parse_segments(b)?;
+    for i in 0..a.len().max(b.len()) {
+        let ordering = a
+            .get(i)
+            .copied()
+            .unwrap_or(0)
+            .cmp(&b.get(i).copied().unwrap_or(0));
+        if ordering != std::cmp::Ordering::Equal {
+            return Ok(ordering);
         }
     }
-    Ok(false)
+    Ok(std::cmp::Ordering::Equal)
 }

@@ -194,6 +194,10 @@ impl SekaiClient {
         headers.insert("X-App-Hash".to_string(), version.app_hash.clone());
     }
 
+    /// Login metadata only ever moves the data/asset version headers. The app
+    /// identity (`X-App-Version`, `X-App-Hash`) comes solely from the version
+    /// file, which only the app-identity push and the registry write: an
+    /// appVersion reported by a game server is never adopted.
     fn update_version_headers_from_login(&self, login: &LoginResponse) {
         let mut headers = self.headers.lock();
         if !login.data_version.is_empty() {
@@ -211,11 +215,17 @@ impl SekaiClient {
     }
 
     pub async fn refresh_version(&self) -> Result<(), AppError> {
-        let mut version = self.version_helper.load().await?;
+        let version = self.version_helper.load().await?;
+        self.apply_version(version);
+        Ok(())
+    }
+
+    /// Make `version` (as just written to the version file) the in-memory
+    /// state and the login headers, so the next request uses it.
+    pub fn apply_version(&self, mut version: VersionInfo) {
         self.normalize_app_version(&mut version);
         self.version_helper.update(version.clone());
         self.update_version_headers(&version);
-        Ok(())
     }
 
     pub async fn refresh_cookies(&self) -> Result<(), AppError> {
@@ -1379,6 +1389,8 @@ fn parse_nuverse_account(value: JsonValue, log_prefix: &str) -> Option<AccountTy
     Some(AccountType::Nuverse(account))
 }
 
+/// What a login (or the Nuverse metadata probe) reports. It deliberately has
+/// no appVersion/appHash: a server-reported app version is never trusted.
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct LoginResponse {
     #[serde(rename = "sessionToken", default)]
@@ -1876,6 +1888,55 @@ mod tests {
             assert_eq!(result.data_version, "old-data");
             std::fs::remove_dir_all(root).unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn server_reported_app_versions_are_never_adopted() {
+        // A login (and the Nuverse metadata probe) answering with an
+        // appVersion/appHash must leave the version file, the in-memory state
+        // and the X-App-Version / X-App-Hash headers alone.
+        let reply = json!({
+            "sessionToken": "login-token",
+            "appVersion": "9.9.9",
+            "appHash": "server-hash",
+            "dataVersion": "d9",
+            "assetVersion": "a9",
+            "cdnVersion": 300,
+        });
+        let (url, server) = spawn_server(StaticResponse {
+            status: 200,
+            content_type: "application/octet-stream",
+            body: encrypted(reply.clone()),
+            session_token: None,
+        })
+        .await;
+        for region in [ServerRegion::Jp, ServerRegion::Tw, ServerRegion::Cn] {
+            let (client, root) = make_client(region, &url).await;
+            client.refresh_version().await.unwrap();
+            let file_before = std::fs::read(&client.config.version_path).unwrap();
+            let account = session(region, "12");
+            let login = client.login(&account).await.unwrap();
+            assert_eq!(login.data_version, "d9");
+            if !region.is_cp_server() {
+                client
+                    .fetch_nuverse_version_metadata(&account)
+                    .await
+                    .unwrap();
+            }
+            let parsed: LoginResponse = serde_json::from_value(reply.clone()).unwrap();
+            client.update_version_headers_from_login(&parsed);
+            let headers = client.headers.lock().clone();
+            assert_eq!(headers["X-App-Version"], "6.0.2", "{region:?}");
+            assert_eq!(headers["X-App-Hash"], "hash", "{region:?}");
+            assert_eq!(headers["X-Data-Version"], "d9", "{region:?}");
+            assert_eq!(client.version_helper.get().app_version, "6.0.2");
+            assert_eq!(
+                std::fs::read(&client.config.version_path).unwrap(),
+                file_before
+            );
+            std::fs::remove_dir_all(root).unwrap();
+        }
+        server.abort();
     }
 
     #[tokio::test]

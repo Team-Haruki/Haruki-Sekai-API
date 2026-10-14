@@ -2,7 +2,8 @@
 //!
 //! Reads (open on the internal network):
 //! - `GET /health`
-//! - `GET /v1/master/{region}/current`            latest manifest (ETag = file set + version)
+//! - `GET /v1/master/{region}/current`            latest manifest (ETag = file set, versions
+//!   and app identity; `appVersion`/`appHash` are the effective identity, as `/v1/app`)
 //! - `GET /v1/master/{region}/history?limit=N`    publish history, newest first
 //! - `GET /v1/master/{region}/files/{name}`       one master file (ETag = its SHA-256,
 //!   `If-None-Match` -> 304, `Last-Modified`, `Content-Length`)
@@ -14,7 +15,8 @@
 //! - `GET /v1/metas/{region}/music_metas.json`    current music_metas bytes (mutable)
 //! - `GET /v1/metas/{region}/blob/{sha256}`       immutable music_metas bytes
 //! - `GET /v1/app/{region}`                       `{appVersion, appHash}` (override,
-//!   else the identity the owner's synced version file carries)
+//!   else the identity the owner's synced version file carries; `current` follows
+//!   it without waiting for a master update)
 //!
 //! CDN contract: pointers (`current`, `files/{name}`, `music_metas.json`,
 //! `app`) answer `Cache-Control: no-cache` with a strong ETag and must be
@@ -32,7 +34,8 @@
 //!
 //! Mutations (require `registry.token`; disabled when it is empty):
 //! - `PUT /v1/app/{region}` / `DELETE /v1/app/{region}`  app-identity override; PUT
-//!   also pushes it to every `registry.account_nodes` entry (`POST /internal/app-identity`)
+//!   also writes it to the registry's version file and pushes it to every
+//!   `registry.account_nodes` entry (`POST /internal/app-identity`); both republish `current`
 //! - `POST /v1/master/{region}/refresh`            pull from owner now, then publish
 //! - `POST /v1/master/{region}/publish`            re-scan the directory and publish
 //! - `POST /v1/metas/{region}/refresh`             pull music_metas from upstream now
@@ -272,13 +275,7 @@ async fn current(
     };
     match registry.state.current(region).await {
         Ok(Some(manifest)) => {
-            // The manifest's identity is its file set plus version, not the
-            // timestamp of the publish that last refreshed it.
-            let tag = etag(&format!(
-                "{}-{}",
-                super::state::content_hash(&manifest),
-                manifest.data_version
-            ));
+            let tag = current_etag(&manifest);
             if if_none_match(&headers, &tag) {
                 return not_modified(&tag);
             }
@@ -303,6 +300,30 @@ async fn current(
         }
         Err(e) => e.into_response(),
     }
+}
+
+/// `current`'s ETag: its file set, versions and app identity, not the
+/// timestamp of the publish that last refreshed it. An app-identity change
+/// alone (consumers poll `current` for the appVersion) must not answer 304.
+fn current_etag(manifest: &crate::api::internal::MasterManifest) -> String {
+    use sha2::Digest as _;
+    let mut hasher = sha2::Sha256::new();
+    for field in [
+        manifest.data_version.as_str(),
+        &manifest.cdn_version.to_string(),
+        manifest.app_version.as_str(),
+        manifest.app_hash.as_str(),
+    ] {
+        hasher.update(field.as_bytes());
+        hasher.update(b"\n");
+    }
+    let versions = hex::encode(hasher.finalize());
+    etag(&format!(
+        "{}-{}-{}",
+        super::state::content_hash(manifest),
+        manifest.data_version,
+        &versions[..16]
+    ))
 }
 
 /// Immutable manifest snapshot by content hash (the `contentHash` of a
@@ -975,7 +996,7 @@ async fn clear_app_identity(
         Ok(r) => r,
         Err(e) => return e.into_response(),
     };
-    match registry.state.clear_app_identity(region).await {
+    match registry.clear_app_identity(region).await {
         Ok(removed) => json(&serde_json::json!({ "removed": removed })),
         Err(e) => e.into_response(),
     }
@@ -1935,6 +1956,17 @@ mod tests {
         let (_, app) = get_json(&client, &format!("{base}/v1/app/jp")).await;
         assert_eq!(app["appVersion"], "5.6.0");
 
+        // Each app-identity change (the two PUTs, the DELETE) republished
+        // `current`: one history entry each.
+        let (_, history) = get_json(&client, &format!("{base}/v1/master/jp/history")).await;
+        let app_versions: Vec<&str> = history
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["appVersion"].as_str().unwrap())
+            .collect();
+        assert_eq!(app_versions, ["5.6.0", "5.7.1", "5.7.0", "5.6.0"]);
+
         // Publish re-scans: a changed file becomes a new history entry.
         std::fs::write(root.join("master/cards.json"), "[{\"id\":2}]").unwrap();
         let resp = client
@@ -1946,7 +1978,7 @@ mod tests {
         let body: serde_json::Value = resp.json().await.unwrap();
         assert_eq!(body["changed"], true);
         let (_, history) = get_json(&client, &format!("{base}/v1/master/jp/history")).await;
-        assert_eq!(history.as_array().unwrap().len(), 2);
+        assert_eq!(history.as_array().unwrap().len(), 5);
         // The old blob digest no longer resolves once the file changed; the
         // new manifest's digest does.
         let resp = client
@@ -2221,6 +2253,135 @@ mod tests {
         assert_eq!(seen[0]["appHash"], "new-hash");
         server.abort();
         node_server.abort();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn current_follows_the_app_identity_without_a_master_update() {
+        let root = temp_dir();
+        let owner_version = Arc::new(parking_lot::Mutex::new(String::new()));
+        let set_owner = |app_version: &str, app_hash: &str| {
+            *owner_version.lock() = format!(
+                r#"{{"appVersion":"{app_version}","appHash":"{app_hash}","dataVersion":"9.0.0.1","assetVersion":"5.6.1.10","cdnVersion":0}}"#
+            );
+        };
+        set_owner("5.6.0", "owner-hash");
+        let bundle = owner_bundle(&root, "9.0.0.1");
+        let owner_app = Router::new().fallback(any({
+            let owner_version = owner_version.clone();
+            move |uri: axum::http::Uri| {
+                let owner_version = owner_version.clone();
+                let bundle = bundle.clone();
+                async move {
+                    if uri.path().ends_with("/version") {
+                        owner_version.lock().clone().into_response()
+                    } else {
+                        bundle.into_response()
+                    }
+                }
+            }
+        }));
+        let (owner_url, owner_server) = serve(owner_app).await;
+        let mut config = base_config(&root, "secret");
+        config
+            .servers
+            .get_mut(&ServerRegion::Jp)
+            .unwrap()
+            .master_sync
+            .source_url = owner_url;
+        let syncers = build_syncers(&config, &HashMap::new(), None, &HashMap::new());
+        let registry = Arc::new(Registry::new(Arc::new(config), syncers));
+        let (base, server) = serve(router(registry.clone())).await;
+        let client = reqwest::Client::new();
+        let current = || async {
+            let resp = client
+                .get(format!("{base}/v1/master/jp/current"))
+                .send()
+                .await
+                .unwrap();
+            let tag = resp.headers()["etag"].to_str().unwrap().to_string();
+            let body: serde_json::Value = resp.json().await.unwrap();
+            (body["appVersion"].as_str().unwrap().to_string(), body, tag)
+        };
+        let local_app_version = || {
+            let data = std::fs::read(root.join("version.json")).unwrap();
+            let version: crate::client::helper::VersionInfo = sonic_rs::from_slice(&data).unwrap();
+            version.app_version
+        };
+
+        assert!(registry.refresh(ServerRegion::Jp).await.unwrap());
+        let (app_version, first, first_tag) = current().await;
+        assert_eq!(app_version, "5.6.0");
+
+        // An app-identity push on the owner, master data unchanged: the next
+        // refresh republishes `current` with the same files and a new ETag.
+        set_owner("5.7.0", "pushed-hash");
+        assert!(registry.refresh(ServerRegion::Jp).await.unwrap());
+        let (app_version, body, tag) = current().await;
+        assert_eq!(app_version, "5.7.0");
+        assert_eq!(body["appHash"], "pushed-hash");
+        assert_eq!(body["contentHash"], first["contentHash"]);
+        assert_eq!(body["dataVersion"], first["dataVersion"]);
+        assert_ne!(tag, first_tag);
+        let resp = client
+            .get(format!("{base}/v1/master/jp/current"))
+            .header("if-none-match", &first_tag)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let resp = client
+            .get(format!("{base}/v1/master/jp/current"))
+            .header("if-none-match", &tag)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 304);
+        let (_, history) = get_json(&client, &format!("{base}/v1/master/jp/history")).await;
+        assert_eq!(history.as_array().unwrap().len(), 2);
+        assert_eq!(history[0]["appVersion"], "5.7.0");
+
+        // An owner serving an older identity rolls nothing back.
+        set_owner("5.6.0", "owner-hash");
+        assert!(!registry.refresh(ServerRegion::Jp).await.unwrap());
+        assert_eq!(current().await.0, "5.7.0");
+        assert_eq!(local_app_version(), "5.7.0");
+
+        // An operator override wins at once, a downgrade included, and is
+        // written to the registry's own version file.
+        let resp = client
+            .put(format!("{base}/v1/app/jp"))
+            .bearer_auth("secret")
+            .json(&serde_json::json!({"appVersion": "5.6.5", "appHash": "fixed"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let (app_version, body, _) = current().await;
+        assert_eq!(app_version, "5.6.5");
+        assert_eq!(body["appHash"], "fixed");
+        assert_eq!(local_app_version(), "5.6.5");
+
+        // The owner moves on; the override keeps winning until it is cleared.
+        set_owner("5.8.0", "next-hash");
+        assert!(!registry.refresh(ServerRegion::Jp).await.unwrap());
+        assert_eq!(current().await.0, "5.6.5");
+        assert_eq!(local_app_version(), "5.8.0");
+        let resp = client
+            .delete(format!("{base}/v1/app/jp"))
+            .bearer_auth("secret")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let (app_version, body, _) = current().await;
+        assert_eq!(app_version, "5.8.0");
+        assert_eq!(body["appHash"], "next-hash");
+        let (_, app) = get_json(&client, &format!("{base}/v1/app/jp")).await;
+        assert_eq!(app["appVersion"], "5.8.0");
+
+        server.abort();
+        owner_server.abort();
         std::fs::remove_dir_all(root).unwrap();
     }
 

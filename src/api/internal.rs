@@ -215,10 +215,13 @@ pub async fn post_login_probe(
 
 /// POST /internal/app-identity — record the appVersion/appHash this node's
 /// accounts must log in with. Replaces the removed polling AppHash updater:
-/// whoever learns of a new app build (the registry's `PUT /v1/app/{region}`
-/// or an operator's refresh script) pushes it here; the node writes it into
-/// the region's version file under the version lock and reloads its login
-/// headers at once, so the next login already uses the new identity.
+/// whoever learns of a new app build (sekai-apphash, or the registry's
+/// `PUT /v1/app/{region}`) pushes it here; the node writes it into the
+/// region's version file under the version lock and reloads its login
+/// headers at once, so the next login already uses the new identity. This
+/// push is authoritative and unconditional (a downgrade included); only
+/// node-to-node adoption is forward-only. A change notifies the region's
+/// `master_sync.notify` peers so they follow it without a master update.
 pub async fn post_app_identity(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -290,6 +293,20 @@ pub async fn post_app_identity(
             current.app_version,
             current.app_hash.chars().take(16).collect::<String>()
         );
+        // Peers that pull this region (and the registry) follow the owner's
+        // app identity on their next check; trigger it now.
+        let peers = config.master_sync.notify.clone();
+        if !peers.is_empty() {
+            let data_version = current.data_version.clone();
+            tokio::spawn(async move {
+                let http = reqwest::Client::builder()
+                    .timeout(std::time::Duration::from_secs(30))
+                    .build()
+                    .unwrap_or_default();
+                crate::updater::master::notify_sync_peers(&http, region, &peers, &data_version)
+                    .await;
+            });
+        }
     }
     envelope_response(&InternalApiResponse {
         ok: true,

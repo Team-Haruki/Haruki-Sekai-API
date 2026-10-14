@@ -8,7 +8,7 @@ use tracing::{error, info, warn};
 use super::git::GitHelper;
 use super::master_stream::{walk_master_payload, MasterTableWriter};
 use crate::client::helper::{
-    compare_version, effective_app_version, stream_response_to_file, VersionInfo,
+    cmp_version, compare_version, effective_app_version, stream_response_to_file, VersionInfo,
 };
 use crate::client::{AccountSession, LoginResponse, SekaiClient};
 use crate::config::{AssetUpdaterInfo, GitConfig, MasterRemoteSourceConfig, ServerRegion};
@@ -103,6 +103,126 @@ pub(crate) async fn persist_app_identity(
         sonic_rs::to_string_pretty(&existing).map_err(|e| AppError::ParseError(e.to_string()))?;
     crate::client::helper::write_file_atomic(Path::new(path), json.as_bytes()).await?;
     Ok(true)
+}
+
+/// Whether another node's app identity may replace this node's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AdoptDecision {
+    /// Newer appVersion, nothing recorded locally yet, or the same appVersion
+    /// with a different appHash.
+    Adopt,
+    /// Already the same identity (or nothing to take).
+    Unchanged,
+    /// Older appVersion: never roll back.
+    Older,
+    /// No appVersion to compare, or one side does not parse.
+    Incomparable,
+}
+
+/// Decide whether `incoming` (a peer's identity, appVersion already through
+/// the region's patch pin) may replace `local`. Only the app-identity push
+/// and the registry's `PUT /v1/app` set an identity unconditionally; a peer's
+/// copy can be stale (a push reaches the owner first), so adoption only moves
+/// forward. The same appVersion with another appHash is adopted: both copies
+/// come from the same authority for that version, and the peer's is the one a
+/// login (or the owner's) actually used.
+pub(crate) fn adopt_decision(local: &AppIdentity, incoming: &AppIdentity) -> AdoptDecision {
+    let (local_version, local_hash) = (local.app_version.trim(), local.app_hash.trim());
+    let (version, hash) = (incoming.app_version.trim(), incoming.app_hash.trim());
+    if version.is_empty() {
+        // A bare appHash cannot be placed against a version: only fill a gap.
+        return if !hash.is_empty() && local_hash.is_empty() {
+            AdoptDecision::Adopt
+        } else if hash.is_empty() || hash == local_hash {
+            AdoptDecision::Unchanged
+        } else {
+            AdoptDecision::Incomparable
+        };
+    }
+    if local_version.is_empty() {
+        return AdoptDecision::Adopt;
+    }
+    match cmp_version(version, local_version) {
+        Ok(std::cmp::Ordering::Greater) => AdoptDecision::Adopt,
+        Ok(std::cmp::Ordering::Less) => AdoptDecision::Older,
+        Ok(std::cmp::Ordering::Equal) if !hash.is_empty() && hash != local_hash => {
+            AdoptDecision::Adopt
+        }
+        Ok(std::cmp::Ordering::Equal) => AdoptDecision::Unchanged,
+        Err(_) => AdoptDecision::Incomparable,
+    }
+}
+
+/// Adopt a peer's app identity (`source` names it in the log: the account
+/// node, the owner) into the version file at `path` when [`adopt_decision`]
+/// allows it. Returns whether the file changed. Callers must hold the
+/// region's version lock and refresh the running client's headers on `true`.
+pub(crate) async fn adopt_peer_app_identity(
+    region: ServerRegion,
+    pin_patch_to_zero: bool,
+    path: &str,
+    incoming: &AppIdentity,
+    source: &str,
+) -> Result<bool, AppError> {
+    let data = tokio::fs::read(path)
+        .await
+        .map_err(|e| AppError::IoError(format!("version file {path}: {e}")))?;
+    let local: serde_json::Map<String, serde_json::Value> = sonic_rs::from_slice(&data)
+        .map_err(|e| AppError::ParseError(format!("version file {path}: {e}")))?;
+    let field = |key: &str| {
+        local
+            .get(key)
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string()
+    };
+    let local = AppIdentity {
+        app_version: effective_app_version(pin_patch_to_zero, &field("appVersion")),
+        app_hash: field("appHash"),
+    };
+    let incoming = AppIdentity {
+        app_version: effective_app_version(pin_patch_to_zero, incoming.app_version.trim()),
+        app_hash: incoming.app_hash.trim().to_string(),
+    };
+    let short = |hash: &str| hash.chars().take(16).collect::<String>();
+    let region_name = region.as_str().to_uppercase();
+    match adopt_decision(&local, &incoming) {
+        AdoptDecision::Adopt => {
+            let changed = persist_app_identity(pin_patch_to_zero, path, &incoming).await?;
+            if changed {
+                info!(
+                    "{} Adopting {} app identity: appVersion {} -> {}, appHash {} -> {}",
+                    region_name,
+                    source,
+                    local.app_version,
+                    incoming.app_version,
+                    short(&local.app_hash),
+                    short(&incoming.app_hash)
+                );
+            }
+            Ok(changed)
+        }
+        AdoptDecision::Unchanged => Ok(false),
+        AdoptDecision::Older => {
+            warn!(
+                "{} Keeping appVersion {}: {} reports the older {} (never downgraded by a peer)",
+                region_name, local.app_version, source, incoming.app_version
+            );
+            Ok(false)
+        }
+        AdoptDecision::Incomparable => {
+            warn!(
+                "{} Keeping app identity {} ({}): {} reports {:?} ({}), not comparable",
+                region_name,
+                local.app_version,
+                short(&local.app_hash),
+                source,
+                incoming.app_version,
+                short(&incoming.app_hash)
+            );
+            Ok(false)
+        }
+    }
 }
 
 /// What a remote login probe yields: the version metadata as a LoginResponse
@@ -552,9 +672,10 @@ impl MasterUpdater {
         remote_app: Option<&AppIdentity>,
         notify_peers: bool,
     ) -> Result<(), AppError> {
-        if let Some(app) = remote_app.filter(|app| app.is_known()) {
-            self.adopt_app_identity(app).await?;
-        }
+        let adopted = match remote_app.filter(|app| app.is_known()) {
+            Some(app) => self.adopt_app_identity(app).await?,
+            None => false,
+        };
         let new_version = VersionInfo {
             app_version: current.app_version,
             app_hash: current.app_hash,
@@ -565,7 +686,13 @@ impl MasterUpdater {
         };
         let merged = self.save_version(&new_version).await?;
         let data_version = merged.data_version.clone();
-        self.client.version_helper.update(merged);
+        if adopted {
+            // A new app identity must reach the login headers, not only the
+            // file (the same reload `/internal/app-identity` does).
+            self.client.apply_version(merged);
+        } else {
+            self.client.version_helper.update(merged);
+        }
         self.push_master_changes(&data_version).await;
         if notify_peers {
             self.notify_sync_peers(&data_version).await;
@@ -576,25 +703,21 @@ impl MasterUpdater {
     /// Record the account node's app identity in this node's version file
     /// before the version merge, so the committed snapshot carries the
     /// appVersion/appHash the master was actually produced with. The on-disk
-    /// values normally win the merge (they are owned by the app-identity
-    /// webhook), so this is an explicit override, taken under the same lock.
-    async fn adopt_app_identity(&self, app: &AppIdentity) -> Result<(), AppError> {
+    /// values otherwise win the merge (they are owned by the app-identity
+    /// push), so this is an explicit override, taken under the same lock, and
+    /// only forward: an account node that has not received a push yet must
+    /// not roll this node back (see [`adopt_decision`]). Returns whether the
+    /// identity changed.
+    async fn adopt_app_identity(&self, app: &AppIdentity) -> Result<bool, AppError> {
         let _guard = self.version_lock.lock().await;
-        if persist_app_identity(
+        adopt_peer_app_identity(
+            self.region,
             self.client.config.pin_app_version_patch_to_zero,
             &self.client.config.version_path,
             app,
+            "account node",
         )
-        .await?
-        {
-            info!(
-                "{} Adopting account node app identity: appVersion={} appHash={}",
-                self.region.as_str().to_uppercase(),
-                app.app_version,
-                app.app_hash.chars().take(16).collect::<String>()
-            );
-        }
-        Ok(())
+        .await
     }
 
     async fn push_master_changes(&self, data_version: &str) {
@@ -1137,39 +1260,56 @@ treating difference as an update",
     /// sync immediately instead of waiting for their fallback poll. Best-effort:
     /// failures are logged and covered by the peers' polling.
     async fn notify_sync_peers(&self, data_version: &str) {
-        let peers = &self.client.config.master_sync.notify;
-        if peers.is_empty() {
-            return;
+        notify_sync_peers(
+            &self.http_client,
+            self.region,
+            &self.client.config.master_sync.notify,
+            data_version,
+        )
+        .await;
+    }
+}
+
+/// Send `POST /internal/master-updated` to every `peers` entry (the region's
+/// `master_sync.notify`), so pulling nodes and the registry re-check now
+/// instead of at their next poll. Best-effort: failures are only logged.
+pub(crate) async fn notify_sync_peers(
+    http: &reqwest::Client,
+    region: ServerRegion,
+    peers: &[crate::config::MasterSyncPeer],
+    data_version: &str,
+) {
+    if peers.is_empty() {
+        return;
+    }
+    let payload = serde_json::json!({
+        "server": region.as_str(),
+        "dataVersion": data_version,
+    });
+    for peer in peers {
+        let endpoint = format!("{}/internal/master-updated", peer.url.trim_end_matches('/'));
+        let mut req = http.post(&endpoint).json(&payload);
+        if !peer.token.is_empty() {
+            req = req.bearer_auth(&peer.token);
         }
-        let payload = serde_json::json!({
-            "server": self.region.as_str(),
-            "dataVersion": data_version,
-        });
-        for peer in peers {
-            let endpoint = format!("{}/internal/master-updated", peer.url.trim_end_matches('/'));
-            let mut req = self.http_client.post(&endpoint).json(&payload);
-            if !peer.token.is_empty() {
-                req = req.bearer_auth(&peer.token);
-            }
-            match req.send().await {
-                Ok(resp) if resp.status().is_success() => info!(
-                    "{} Notified sync peer {}",
-                    self.region.as_str().to_uppercase(),
-                    peer.url
-                ),
-                Ok(resp) => warn!(
-                    "{} Sync peer {} returned {}",
-                    self.region.as_str().to_uppercase(),
-                    peer.url,
-                    resp.status()
-                ),
-                Err(e) => warn!(
-                    "{} Failed to notify sync peer {}: {}",
-                    self.region.as_str().to_uppercase(),
-                    peer.url,
-                    e
-                ),
-            }
+        match req.send().await {
+            Ok(resp) if resp.status().is_success() => info!(
+                "{} Notified sync peer {}",
+                region.as_str().to_uppercase(),
+                peer.url
+            ),
+            Ok(resp) => warn!(
+                "{} Sync peer {} returned {}",
+                region.as_str().to_uppercase(),
+                peer.url,
+                resp.status()
+            ),
+            Err(e) => warn!(
+                "{} Failed to notify sync peer {}: {}",
+                region.as_str().to_uppercase(),
+                peer.url,
+                e
+            ),
         }
     }
 }
@@ -2338,47 +2478,172 @@ mod tests {
 
     #[tokio::test]
     async fn check_update_runs_complete_remote_nuverse_pipeline() {
-        let cryptor = crate::crypto::SekaiCryptor::from_hex(KEY, IV).unwrap();
-        let probe = LoginProbeResponse {
-            ok: true,
-            kind: None,
-            message: None,
-            data_version: "6.0.0.49".to_string(),
-            asset_version: "6.0.0.2".to_string(),
-            asset_hash: "new-asset".to_string(),
-            cdn_version: 160,
-            suite_master_split_path: Vec::new(),
-            app_version: "6.1.0".to_string(),
-            app_hash: "remote-app-hash".to_string(),
+        // The local version file says 6.0.2 / app-hash (`version_info`).
+        for (remote_version, expected_version, expected_hash) in [
+            // A newer account node identity is adopted.
+            ("6.1.0", "6.1.0", "remote-app-hash"),
+            // A stale account node (not pushed to yet) never rolls back.
+            ("6.0.1", "6.0.2", "app-hash"),
+            // The same version with another hash is the account node's.
+            ("6.0.2", "6.0.2", "remote-app-hash"),
+        ] {
+            let cryptor = crate::crypto::SekaiCryptor::from_hex(KEY, IV).unwrap();
+            let probe = LoginProbeResponse {
+                ok: true,
+                kind: None,
+                message: None,
+                data_version: "6.0.0.49".to_string(),
+                asset_version: "6.0.0.2".to_string(),
+                asset_hash: "new-asset".to_string(),
+                cdn_version: 160,
+                suite_master_split_path: Vec::new(),
+                app_version: remote_version.to_string(),
+                app_hash: "remote-app-hash".to_string(),
+            };
+            let (url, server) = spawn_update_server(UpdateReply {
+                probe: serde_json::to_vec(&probe).unwrap(),
+                master: cryptor
+                    .pack(&serde_json::json!({"cards": [{"id": 1}]}))
+                    .unwrap(),
+            })
+            .await;
+            let root = temp_dir();
+            let mut updater = make_updater(ServerRegion::Cn, &url, &root, Vec::new()).await;
+            updater.client.refresh_version().await.unwrap();
+            updater.remote_source = Some(RemoteMasterSource::new(
+                ServerRegion::Cn,
+                &MasterRemoteSourceConfig {
+                    url,
+                    token: "token".to_string(),
+                },
+                crate::upstream::build_internal_http_client().unwrap(),
+            ));
+            updater.check_update().await;
+            assert!(root.join("master/cards.json").exists());
+            let persisted: VersionInfo =
+                sonic_rs::from_slice(&std::fs::read(root.join("version.json")).unwrap()).unwrap();
+            assert_eq!(persisted.data_version, "6.0.0.49");
+            assert_eq!(persisted.cdn_version, 160);
+            assert_eq!(persisted.app_version, expected_version, "{remote_version}");
+            assert_eq!(persisted.app_hash, expected_hash, "{remote_version}");
+            // The running client logs in with what the file now says.
+            let headers = updater.client.headers.lock().clone();
+            assert_eq!(headers["X-App-Version"], expected_version);
+            assert_eq!(headers["X-App-Hash"], expected_hash);
+            assert_eq!(
+                updater.client.version_helper.get().app_version,
+                expected_version
+            );
+            server.abort();
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn peer_app_identity_is_adopted_forward_only() {
+        let id = |version: &str, hash: &str| AppIdentity {
+            app_version: version.to_string(),
+            app_hash: hash.to_string(),
         };
-        let (url, server) = spawn_update_server(UpdateReply {
-            probe: serde_json::to_vec(&probe).unwrap(),
-            master: cryptor
-                .pack(&serde_json::json!({"cards": [{"id": 1}]}))
-                .unwrap(),
-        })
-        .await;
+        let local = id("6.5.0", "h");
+        let cases = [
+            (id("6.6.0", "h2"), AdoptDecision::Adopt),
+            (id("6.5.0.1", "h2"), AdoptDecision::Adopt),
+            (id("6.10.0", "h"), AdoptDecision::Adopt),
+            (id("6.5.0", "h2"), AdoptDecision::Adopt),
+            (id(" 6.5.0 ", "h"), AdoptDecision::Unchanged),
+            (id("6.5", "h"), AdoptDecision::Unchanged),
+            (id("6.5.0", ""), AdoptDecision::Unchanged),
+            (id("", ""), AdoptDecision::Unchanged),
+            (id("6.4.9", "h2"), AdoptDecision::Older),
+            (id("6.4.99.9", "h"), AdoptDecision::Older),
+            (id("6.6.x", "h2"), AdoptDecision::Incomparable),
+            (id("", "h2"), AdoptDecision::Incomparable),
+        ];
+        for (incoming, expected) in cases {
+            assert_eq!(adopt_decision(&local, &incoming), expected, "{incoming:?}");
+        }
+        // Nothing recorded locally: anything fills the gap.
+        assert_eq!(
+            adopt_decision(&id("", ""), &id("6.0.0", "h")),
+            AdoptDecision::Adopt
+        );
+        assert_eq!(
+            adopt_decision(&id("6.0.0", ""), &id("", "h")),
+            AdoptDecision::Adopt
+        );
+        assert_eq!(
+            adopt_decision(&id("bad", "h"), &id("6.0.0", "h")),
+            AdoptDecision::Incomparable
+        );
+    }
+
+    #[tokio::test]
+    async fn adopting_a_peer_identity_never_downgrades_the_file() {
         let root = temp_dir();
-        let mut updater = make_updater(ServerRegion::Cn, &url, &root, Vec::new()).await;
-        updater.remote_source = Some(RemoteMasterSource::new(
-            ServerRegion::Cn,
-            &MasterRemoteSourceConfig {
-                url,
-                token: "token".to_string(),
-            },
-            crate::upstream::build_internal_http_client().unwrap(),
-        ));
-        updater.check_update().await;
-        assert!(root.join("master/cards.json").exists());
-        let persisted: VersionInfo =
-            sonic_rs::from_slice(&std::fs::read(root.join("version.json")).unwrap()).unwrap();
-        assert_eq!(persisted.data_version, "6.0.0.49");
-        assert_eq!(persisted.cdn_version, 160);
-        // The account node's app identity replaced the stale local one.
-        assert_eq!(persisted.app_version, "6.1.0");
-        assert_eq!(persisted.app_hash, "remote-app-hash");
-        server.abort();
+        let path = root.join("version.json");
+        let path = path.to_str().unwrap();
+        std::fs::write(
+            path,
+            r#"{"appVersion":"6.5.0","appHash":"h","dataVersion":"1","assetVersion":"1"}"#,
+        )
+        .unwrap();
+        let read =
+            || -> VersionInfo { sonic_rs::from_slice(&std::fs::read(path).unwrap()).unwrap() };
+        let app = |version: &str, hash: &str| AppIdentity {
+            app_version: version.to_string(),
+            app_hash: hash.to_string(),
+        };
+        let adopt = |incoming: AppIdentity| async move {
+            adopt_peer_app_identity(ServerRegion::Tw, false, path, &incoming, "owner")
+                .await
+                .unwrap()
+        };
+        assert!(!adopt(app("6.4.0", "old")).await);
+        assert_eq!(read().app_version, "6.5.0");
+        assert_eq!(read().app_hash, "h");
+        assert!(adopt(app("6.6.0", "new")).await);
+        assert_eq!(read().app_version, "6.6.0");
+        assert_eq!(read().app_hash, "new");
+        assert!(!adopt(app("6.6.0", "new")).await);
+        assert_eq!(read().data_version, "1");
+        // The patch pin applies before the comparison: 6.6.3 pins to 6.6.0.
+        assert!(!adopt_peer_app_identity(
+            ServerRegion::Tw,
+            true,
+            path,
+            &app("6.6.3", "new"),
+            "owner"
+        )
+        .await
+        .unwrap());
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn version_merge_keeps_the_on_disk_app_identity() {
+        // A master update or sync never moves appVersion/appHash: they belong
+        // to the app-identity push (unless the file has none yet).
+        let mut existing = serde_json::json!({
+            "appVersion": "6.5.0",
+            "appHash": "pushed-hash",
+            "dataVersion": "6.5.0.1",
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let incoming = VersionInfo {
+            app_version: "6.5.2".to_string(),
+            app_hash: "other-hash".to_string(),
+            data_version: "6.5.0.2".to_string(),
+            ..version_info()
+        };
+        let merged = merge_version_state(ServerRegion::Tw, false, &mut existing, &incoming);
+        assert_eq!(merged.app_version, "6.5.0");
+        assert_eq!(merged.app_hash, "pushed-hash");
+        assert_eq!(merged.data_version, "6.5.0.2");
+        assert_eq!(existing["appVersion"], "6.5.0");
+        assert_eq!(existing["appHash"], "pushed-hash");
     }
 
     #[tokio::test]
