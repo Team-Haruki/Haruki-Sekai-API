@@ -36,6 +36,12 @@ struct AssetUpdaterPayload {
     asset_version: String,
     asset_hash: String,
     dry_run: bool,
+    /// The appVersion this check logged in with. An updater 7.3.0+ adopts it
+    /// for a Nuverse region when it is newer and its CDN answers it, so the
+    /// first job after an app update already uses the new version; older
+    /// updaters ignore the field.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    app_version: String,
 }
 
 /// The appVersion/appHash a login actually used, as reported by the account
@@ -358,8 +364,13 @@ impl MasterUpdater {
         let (need_master_update, need_asset_update, need_version_save) =
             self.required_updates(&login_response, &current_version);
         if need_asset_update {
-            self.call_all_asset_updaters(&login_response.asset_version, &login_response.asset_hash)
-                .await;
+            let app_version = self.login_app_version(remote_app.as_ref());
+            self.call_all_asset_updaters(
+                &login_response.asset_version,
+                &login_response.asset_hash,
+                &app_version,
+            )
+            .await;
         }
         let retry_ingest = !need_master_update
             && self
@@ -643,7 +654,26 @@ treating difference as an update",
         (need_master, need_asset)
     }
 
-    async fn call_all_asset_updaters(&self, asset_version: &str, asset_hash: &str) {
+    /// The appVersion the current check logged in with: the account node's
+    /// (as this node will store it) for a remote login, else the one the
+    /// local client sent. Empty when unknown.
+    fn login_app_version(&self, remote_app: Option<&AppIdentity>) -> String {
+        match remote_app {
+            Some(app) if !app.app_version.trim().is_empty() => effective_app_version(
+                self.client.config.pin_app_version_patch_to_zero,
+                app.app_version.trim(),
+            ),
+            Some(_) => String::new(),
+            None => self.client.version_helper.get().app_version.clone(),
+        }
+    }
+
+    async fn call_all_asset_updaters(
+        &self,
+        asset_version: &str,
+        asset_hash: &str,
+        app_version: &str,
+    ) {
         let targets: Vec<&AssetUpdaterInfo> = self
             .asset_updater_servers
             .iter()
@@ -663,6 +693,7 @@ treating difference as an update",
             asset_version: asset_version.to_string(),
             asset_hash: asset_hash.to_string(),
             dry_run: false,
+            app_version: app_version.to_string(),
         };
         let futures: Vec<_> = targets
             .into_iter()
@@ -1643,7 +1674,7 @@ mod tests {
         assert_eq!(updater.client.version_helper.get().data_version, "6.0.0.49");
         updater.push_master_changes("6.0.0.49").await;
         updater.notify_sync_peers("6.0.0.49").await;
-        updater.call_all_asset_updaters("asset", "hash").await;
+        updater.call_all_asset_updaters("asset", "hash", "").await;
 
         let nuverse = make_updater(ServerRegion::Cn, "http://127.0.0.1:1", &root, Vec::new()).await;
         assert_eq!(
@@ -1674,7 +1705,7 @@ mod tests {
                 }],
             )
             .await;
-            updater.call_all_asset_updaters("asset", "hash").await;
+            updater.call_all_asset_updaters("asset", "hash", "").await;
             server.abort();
             std::fs::remove_dir_all(root).unwrap();
         }
@@ -1691,7 +1722,62 @@ mod tests {
             }],
         )
         .await;
-        updater.call_all_asset_updaters("asset", "hash").await;
+        updater.call_all_asset_updaters("asset", "hash", "").await;
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn asset_updater_payload_carries_the_login_app_version() {
+        let bodies = Arc::new(std::sync::Mutex::new(Vec::<serde_json::Value>::new()));
+        let seen = bodies.clone();
+        let app = Router::new().fallback(move |body: axum::body::Bytes| {
+            let seen = seen.clone();
+            async move {
+                seen.lock()
+                    .unwrap()
+                    .push(serde_json::from_slice(&body).unwrap());
+                axum::http::StatusCode::ACCEPTED
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let root = temp_dir();
+        let updater = make_updater(
+            ServerRegion::Cn,
+            "http://127.0.0.1:1",
+            &root,
+            vec![AssetUpdaterInfo {
+                url: format!("http://{address}/v2/assets/update"),
+                authorization: String::new(),
+                regions: Vec::new(),
+            }],
+        )
+        .await;
+
+        updater
+            .call_all_asset_updaters("asset", "hash", "6.5.0")
+            .await;
+        updater.call_all_asset_updaters("asset", "hash", "").await;
+        {
+            let bodies = bodies.lock().unwrap();
+            assert_eq!(bodies[0]["region"], "cn");
+            assert_eq!(bodies[0]["app_version"], "6.5.0");
+            assert!(
+                bodies[1].get("app_version").is_none(),
+                "an unknown version is left out, not sent empty"
+            );
+        }
+
+        let remote = |app_version: &str| AppIdentity {
+            app_version: app_version.to_string(),
+            app_hash: "hash".to_string(),
+        };
+        assert_eq!(updater.login_app_version(Some(&remote(" 6.5.1 "))), "6.5.1");
+        assert_eq!(updater.login_app_version(Some(&remote(""))), "");
+        updater.client.version_helper.update(version_info());
+        assert_eq!(updater.login_app_version(None), "6.0.2");
+        server.abort();
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -1783,7 +1869,7 @@ mod tests {
         // A retried 409 would sleep 60 s; the timeout proves it was not retried.
         tokio::time::timeout(
             Duration::from_secs(10),
-            updater.call_all_asset_updaters("asset", "hash"),
+            updater.call_all_asset_updaters("asset", "hash", ""),
         )
         .await
         .expect("disabled-region 409 must not be retried");
@@ -1815,7 +1901,7 @@ mod tests {
         // A busy 409 goes into the 60 s retry sleep, so the call must still be pending.
         assert!(tokio::time::timeout(
             Duration::from_secs(2),
-            updater.call_all_asset_updaters("asset", "hash"),
+            updater.call_all_asset_updaters("asset", "hash", ""),
         )
         .await
         .is_err());
