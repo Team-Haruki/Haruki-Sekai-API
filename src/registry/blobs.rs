@@ -191,10 +191,13 @@ fn zstd_reader(data: Bytes) -> std::io::Result<ZstdReader> {
     Ok(decoder)
 }
 
+/// Fused: a response body wrapper (the compression layer's encoder) may poll
+/// again after the end, which an `unfold` answers with a panic.
 fn decode_stream(
     decoder: ZstdReader,
     permit: Option<OwnedSemaphorePermit>,
 ) -> impl futures::Stream<Item = std::io::Result<Bytes>> + Send {
+    use futures::StreamExt as _;
     futures::stream::unfold(Some((decoder, permit)), |state| async move {
         let (mut decoder, permit) = state?;
         let mut buf = vec![0u8; CHUNK];
@@ -207,6 +210,7 @@ fn decode_stream(
             Err(e) => Some((Err(e), None)),
         }
     })
+    .fuse()
 }
 
 /// Read until `buf` is full or the reader is exhausted.

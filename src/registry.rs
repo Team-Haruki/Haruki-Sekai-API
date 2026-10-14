@@ -7,6 +7,7 @@
 //! update notices to subscribers. Runs as the `master_registry` binary.
 
 pub mod blobs;
+pub mod encoding;
 pub mod http;
 pub mod metas;
 pub mod service;

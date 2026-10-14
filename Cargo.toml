@@ -49,8 +49,9 @@ opendal = { version = "0.59", default-features = false, features = ["reqwest-rus
 # Global allocator for every binary (see `main`): musl's malloc doubles the
 # cost of the allocation-heavy msgpack -> JSON decode on the Alpine image.
 mimalloc = "0.1"
-# Not used directly: selects the SIMD zlib-rs backend for tower-http's gzip
-# response compression (feature unification), ~2x faster than miniz_oxide.
+# Selects the SIMD zlib-rs backend for tower-http's gzip response compression
+# (feature unification), ~2x faster than miniz_oxide; also writes the
+# registry's precompressed music_metas copies.
 flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
 # bench_stages drives the router in-process.
 tower = { version = "0.5", features = ["util"] }

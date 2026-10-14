@@ -24,6 +24,12 @@
 //! Their 404s (a digest not stored yet, e.g. while the pg import runs) and
 //! 503s (pg store unreachable) are `no-store`, so a CDN never pins a miss.
 //!
+//! Responses are compressed per `Accept-Encoding` (gzip, zstd; never the
+//! bundle), music_metas from copies compressed once per blob. A coded body's
+//! ETag carries the coding (`"<digest>-gzip"`), `If-None-Match` matches any
+//! coding of the same content, `Vary: Accept-Encoding` is set; see
+//! `registry::encoding`.
+//!
 //! Mutations (require `registry.token`; disabled when it is empty):
 //! - `PUT /v1/app/{region}` / `DELETE /v1/app/{region}`  app-identity override; PUT
 //!   also pushes it to every `registry.account_nodes` entry (`POST /internal/app-identity`)
@@ -79,6 +85,8 @@ pub fn router(registry: Shared) -> Router {
                 .delete(clear_app_identity),
         )
         .route("/internal/master-updated", post(master_updated))
+        .layer(super::encoding::compression_layer())
+        .layer(axum::middleware::from_fn(super::encoding::encoded_etags))
         .with_state(registry)
 }
 
@@ -460,20 +468,58 @@ async fn metas_file(
     if if_none_match(&headers, &tag) {
         return not_modified(&tag);
     }
-    let Some(path) = manager.blob_path(region, &record.sha256) else {
+    if !super::state::is_hex_digest(&record.sha256) {
         return AppError::Internal("corrupt music_metas pointer".to_string()).into_response();
-    };
-    let mut response = immutable_file(&path, &record.sha256, "application/json").await;
+    }
+    let mut response = metas_bytes(manager, region, &record.sha256, &headers).await;
     if let Ok(value) = axum::http::HeaderValue::from_str("no-cache") {
         response.headers_mut().insert("cache-control", value);
     }
     response
 }
 
+/// A music_metas blob, from its precompressed copy when the client's
+/// negotiated coding has one (the compression layer leaves a body that
+/// already has a `Content-Encoding` alone), else the plain blob, which the
+/// layer compresses per request.
+async fn metas_bytes(
+    manager: &super::metas::MusicMetasManager,
+    region: ServerRegion,
+    sha256: &str,
+    headers: &HeaderMap,
+) -> Response {
+    use super::encoding::{negotiate, vary_accept_encoding, Coding};
+    if let Some(coding @ (Coding::Gzip | Coding::Zstd)) = negotiate(headers) {
+        if let Some(path) = manager.encoded_path(region, sha256, coding) {
+            let mut response = immutable_file(&path, sha256, "application/json").await;
+            // Missing copy (not written yet, or pruned in between): plain blob.
+            if response.status().is_success() {
+                let headers = response.headers_mut();
+                headers.insert(
+                    "content-encoding",
+                    axum::http::HeaderValue::from_static(coding.token()),
+                );
+                if !vary_accept_encoding(headers) {
+                    headers.append(
+                        "vary",
+                        axum::http::HeaderValue::from_static("accept-encoding"),
+                    );
+                }
+                return response;
+            }
+        }
+    }
+    match manager.encoded_path(region, sha256, Coding::Identity) {
+        Some(path) => immutable_file(&path, sha256, "application/json").await,
+        None => digest_not_found(format!("no blob {sha256}")),
+    }
+}
+
 /// music_metas bytes by digest: immutable.
 async fn metas_blob(
     State(registry): State<Shared>,
     Path((region, sha256)): Path<(String, String)>,
+    headers: HeaderMap,
 ) -> Response {
     let region = match parse_region(&region) {
         Ok(r) => r,
@@ -483,10 +529,10 @@ async fn metas_blob(
         Ok(m) => m,
         Err(e) => return e.into_response(),
     };
-    let Some(path) = manager.blob_path(region, &sha256) else {
+    if !super::state::is_hex_digest(&sha256) {
         return digest_not_found(format!("no blob {sha256}"));
-    };
-    immutable_file(&path, &sha256, "application/json").await
+    }
+    metas_bytes(manager, region, &sha256, &headers).await
 }
 
 /// Pull the region's music_metas from upstream now (synchronous; a few
@@ -770,9 +816,9 @@ async fn bundle_from_store(
             let _ = tx.blocking_send(Err(std::io::Error::other(e.to_string())));
         }
     });
-    let stream = futures::stream::unfold(rx, |mut rx| async move {
+    let stream = futures::StreamExt::fuse(futures::stream::unfold(rx, |mut rx| async move {
         rx.recv().await.map(|item| (item, rx))
-    });
+    }));
     Ok(Some(
         (
             StatusCode::OK,
@@ -2299,7 +2345,8 @@ mod tests {
             vec![ServerRegion::Jp]
         );
         let (base, server) = serve(router(registry.clone())).await;
-        let client = reqwest::Client::new();
+        // No Accept-Encoding: identity bodies (codings are checked below).
+        let client = plain_client();
 
         let (status, _) = get_json(&client, &format!("{base}/v1/metas/jp/current")).await;
         assert_eq!(status, 404);
@@ -2379,8 +2426,206 @@ mod tests {
         assert_eq!(resp.status(), 404);
         let (status, _) = get_json(&client, &format!("{base}/v1/metas/en/current")).await;
         assert_eq!(status, 404);
+
+        // Codings: precompressed copies, served as they are.
+        let identity = client
+            .get(format!("{base}/v1/metas/jp/music_metas.json"))
+            .send()
+            .await
+            .unwrap();
+        assert!(super::super::encoding::vary_accept_encoding(
+            identity.headers()
+        ));
+        assert!(identity.headers().get("content-encoding").is_none());
+        let identity = identity.bytes().await.unwrap();
+        let manager = registry.metas.as_ref().unwrap();
+        for (coding, token) in [
+            (super::super::encoding::Coding::Gzip, "gzip"),
+            (super::super::encoding::Coding::Zstd, "zstd"),
+        ] {
+            let copy = manager
+                .encoded_path(ServerRegion::Jp, &sha, coding)
+                .unwrap();
+            let copy_len = std::fs::metadata(&copy).unwrap().len();
+            for path in ["music_metas.json".to_string(), format!("blob/{sha}")] {
+                let resp = client
+                    .get(format!("{base}/v1/metas/jp/{path}"))
+                    .header("accept-encoding", token)
+                    .send()
+                    .await
+                    .unwrap();
+                assert_eq!(resp.status(), 200, "{path} {token}");
+                assert_eq!(resp.headers()["content-encoding"], token);
+                assert_eq!(
+                    resp.headers()["etag"],
+                    format!("\"{sha}-{token}\"").as_str()
+                );
+                assert_eq!(
+                    resp.headers()["content-length"],
+                    copy_len.to_string().as_str()
+                );
+                assert!(super::super::encoding::vary_accept_encoding(resp.headers()));
+                let body = resp.bytes().await.unwrap();
+                assert_eq!(decode(token, &body), identity, "{path} {token}");
+            }
+            let resp = client
+                .head(format!("{base}/v1/metas/jp/music_metas.json"))
+                .header("accept-encoding", token)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(resp.headers()["content-encoding"], token);
+            assert_eq!(
+                resp.headers()["content-length"],
+                copy_len.to_string().as_str()
+            );
+        }
+        // Revalidation across codings; the 304 names the negotiated coding.
+        for (accept, presented, expected) in [
+            ("gzip", format!("\"{sha}-gzip\""), format!("\"{sha}-gzip\"")),
+            ("gzip", format!("\"{sha}\""), format!("\"{sha}-gzip\"")),
+            ("identity", format!("\"{sha}-zstd\""), format!("\"{sha}\"")),
+        ] {
+            let resp = client
+                .get(format!("{base}/v1/metas/jp/music_metas.json"))
+                .header("accept-encoding", accept)
+                .header("if-none-match", &presented)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), 304, "{accept} {presented}");
+            assert_eq!(resp.headers()["etag"], expected.as_str());
+        }
+        // A missing copy falls back to compressing per request.
+        let gz = manager
+            .encoded_path(ServerRegion::Jp, &sha, super::super::encoding::Coding::Gzip)
+            .unwrap();
+        std::fs::remove_file(&gz).unwrap();
+        let resp = client
+            .get(format!("{base}/v1/metas/jp/music_metas.json"))
+            .header("accept-encoding", "gzip")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.headers()["content-encoding"], "gzip");
+        assert_eq!(resp.headers()["etag"], format!("\"{sha}-gzip\"").as_str());
+        assert_eq!(decode("gzip", &resp.bytes().await.unwrap()), identity);
+        // The next refresh (a 304 from upstream would do too) restores it.
+        manager
+            .ensure_encoded(ServerRegion::Jp, &sha)
+            .await
+            .unwrap();
+        assert!(gz.exists());
+
         server.abort();
         upstream_server.abort();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A client that sends no `Accept-Encoding` (reqwest would otherwise ask
+    /// for gzip/br/zstd and decode transparently).
+    fn plain_client() -> reqwest::Client {
+        reqwest::Client::builder()
+            .no_gzip()
+            .no_brotli()
+            .no_zstd()
+            .build()
+            .unwrap()
+    }
+
+    fn decode(token: &str, body: &[u8]) -> axum::body::Bytes {
+        use std::io::Read as _;
+        let mut out = Vec::new();
+        match token {
+            "gzip" => {
+                flate2::read::GzDecoder::new(body)
+                    .read_to_end(&mut out)
+                    .unwrap();
+            }
+            "zstd" => out = zstd::decode_all(body).unwrap(),
+            _ => out.extend_from_slice(body),
+        }
+        out.into()
+    }
+
+    #[tokio::test]
+    async fn compresses_json_but_not_bundles() {
+        let root = temp_dir();
+        let mut config = base_config(&root, "");
+        config.registry.music_metas.enabled = false;
+        let rows: Vec<serde_json::Value> = (0..200)
+            .map(|i| serde_json::json!({"id": i, "name": format!("card {i}")}))
+            .collect();
+        let cards = serde_json::to_vec(&rows).unwrap();
+        std::fs::write(root.join("master/cards.json"), &cards).unwrap();
+        write_version(&root, "5.6.1.11");
+        let registry = Arc::new(Registry::new(Arc::new(config), HashMap::new()));
+        registry.publish_missing().await;
+        let (base, server) = serve(router(registry.clone())).await;
+        let client = plain_client();
+
+        let digest = registry
+            .state
+            .current(ServerRegion::Jp)
+            .await
+            .unwrap()
+            .unwrap()
+            .files[0]
+            .sha256
+            .clone();
+        for path in ["files/cards.json".to_string(), format!("blob/{digest}")] {
+            let resp = client
+                .get(format!("{base}/v1/master/jp/{path}"))
+                .header("accept-encoding", "gzip")
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), 200);
+            assert_eq!(resp.headers()["content-encoding"], "gzip");
+            assert_eq!(
+                resp.headers()["etag"],
+                format!("\"{digest}-gzip\"").as_str()
+            );
+            assert!(resp.headers().get("content-length").is_none());
+            let body = resp.bytes().await.unwrap();
+            assert!(body.len() < cards.len());
+            assert_eq!(decode("gzip", &body), cards);
+        }
+        let resp = client
+            .get(format!("{base}/v1/master/jp/files/cards.json"))
+            .header("accept-encoding", "zstd")
+            .header("if-none-match", format!("\"{digest}-gzip\""))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 304);
+        assert_eq!(
+            resp.headers()["etag"],
+            format!("\"{digest}-zstd\"").as_str()
+        );
+        let resp = client
+            .get(format!("{base}/v1/master/jp/files/cards.json"))
+            .send()
+            .await
+            .unwrap();
+        assert!(resp.headers().get("content-encoding").is_none());
+        assert_eq!(resp.headers()["etag"], format!("\"{digest}\"").as_str());
+        assert_eq!(
+            resp.headers()["content-length"],
+            cards.len().to_string().as_str()
+        );
+
+        let resp = client
+            .get(format!("{base}/v1/master/jp/bundle"))
+            .header("accept-encoding", "gzip, zstd")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        assert!(resp.headers().get("content-encoding").is_none());
+        assert!(!untar(&resp.bytes().await.unwrap()).is_empty());
+
+        server.abort();
         std::fs::remove_dir_all(root).unwrap();
     }
 }

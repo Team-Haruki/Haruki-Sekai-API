@@ -72,7 +72,10 @@ src/
                              ingest, per-region manifest publication
     http.rs                – Registry HTTP surface (pointers, digest-addressed blobs and
                              manifests, /health, app identity, subscriber fan-out)
-    metas.rs               – music_metas feed (omakase rows injected)
+    metas.rs               – music_metas feed (omakase rows injected), with gzip/zstd
+                             copies precompressed once per blob
+    encoding.rs            – Response compression (gzip/zstd per Accept-Encoding, not
+                             bundles) and per-coding ETags (`"<tag>-gzip"`)
     state.rs               – Per-region registry state (manifests, snapshots, history,
                              app identity, metas pointers): JSON files, or a database
                              when `registry.state_dsn` is set (one-time file import)
@@ -222,6 +225,14 @@ haruki-sekai-configs.example.yaml – Configuration template
 - CDN contract: pointers (`current`, `files/{name}`, `music_metas.json`, `app`) are
   `no-cache` + ETag; digest-addressed `blob/{sha256}` and `manifests/{hash}` are
   immutable — never serve changing bytes under a digest URL; their 404s/503s are `no-store`
+- Compression: every registry response except the bundle (`application/x-tar`) is
+  compressed per `Accept-Encoding` (gzip, zstd; `registry::encoding`), music_metas from
+  `<sha256>.json.gz` / `.json.zst` written next to each blob (gzip 9, zstd 19; pruned with
+  it) so the 2 MB feed costs no CPU per request. A coded body's strong ETag carries the
+  coding (`"<tag>-gzip"`, the form Caddy's `encode` uses), `If-None-Match` matches any
+  coding of the same content, and a 304 names the coding a 200 would have used. Handlers
+  only see and emit base tags. `encoding::negotiate` mirrors tower-http's choice (a test
+  compares them); bodies streamed through the layer must be fused streams
 
 ### Registry-Driven Ingest (`master_ingest`)
 - Opt-in role: runs only as its own process with an `ingest` config section; the in-sync path
