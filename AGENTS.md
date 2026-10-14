@@ -150,9 +150,11 @@ haruki-sekai-configs.example.yaml – Configuration template
   bytes via `/internal/game-stream`
 - App identity is not polled on a node: it arrives via `POST /internal/app-identity`
   (`src/api/internal.rs`)
-- `servers.<region>.pin_app_version_patch_to_zero` (unset = on for TW/KR/CN, off
-  for JP/EN; `ServerConfig::pins_app_version_patch_to_zero`) makes the region's
-  appVersion `major.minor.0` everywhere it is stored or sent: the version file
+- appVersion is stored and sent exactly as pushed (the package manifest's
+  `versionName`, which the server accepts, patch releases included).
+  `servers.<region>.pin_app_version_patch_to_zero` is an opt-in escape hatch,
+  off by default for every region, that makes the region's appVersion
+  `major.minor.0` everywhere it is stored or sent: the version file
   (`persist_app_identity`, `persist_version_file`), the login headers
   (`SekaiClient::normalize_app_version`), synced owner identities and the
   registry's `GET`/`PUT /v1/app/{region}`. All go through

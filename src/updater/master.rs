@@ -570,9 +570,7 @@ impl MasterUpdater {
     async fn adopt_app_identity(&self, app: &AppIdentity) -> Result<(), AppError> {
         let _guard = self.version_lock.lock().await;
         if persist_app_identity(
-            self.client
-                .config
-                .pins_app_version_patch_to_zero(self.region),
+            self.client.config.pin_app_version_patch_to_zero,
             &self.client.config.version_path,
             app,
         )
@@ -1097,9 +1095,7 @@ treating difference as an update",
         let _guard = self.version_lock.lock().await;
         persist_version_file(
             self.region,
-            self.client
-                .config
-                .pins_app_version_patch_to_zero(self.region),
+            self.client.config.pin_app_version_patch_to_zero,
             &self.client.config.version_path,
             version,
         )
@@ -1559,9 +1555,10 @@ mod tests {
             app_version: "6.4.1".to_string(),
             app_hash: "h".to_string(),
         };
-        // Pinned (the TW/KR/CN default): 6.4.1 is stored as the 6.4.0 already there.
+        // Pinned (opt-in): 6.4.1 is stored as the 6.4.0 already there.
         assert!(!persist_app_identity(true, path, &app).await.unwrap());
-        // Unpinned: the patch release is kept, also through the version merge.
+        // Unpinned (the default): the patch release is kept, also through the
+        // version merge.
         assert!(persist_app_identity(false, path, &app).await.unwrap());
         let merged = persist_version_file(ServerRegion::Cn, false, path, &version_info())
             .await

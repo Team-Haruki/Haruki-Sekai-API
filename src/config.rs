@@ -371,15 +371,15 @@ pub struct ServerConfig {
     /// Cache windows for this region's cached read endpoints.
     #[serde(default)]
     pub cache_ttls: CacheTtlConfig,
-    /// Store and send this region's appVersion as `major.minor.0` (the
-    /// version file, the login headers, synced and pushed app identities, and
-    /// the registry's app identity). Unset uses the region default
-    /// ([`default_pin_app_version_patch_to_zero`]): on for TW/KR/CN, off for
-    /// JP/EN. Turn it off for a Nuverse region once its app identity comes
-    /// from the package manifest (`versionName`), which already is the version
-    /// the server accepts, so real patch releases (e.g. 5.2.1) are kept.
+    /// Opt-in escape hatch, off by default for every region: store and send
+    /// this region's appVersion as `major.minor.0` (the version file, the
+    /// login headers, synced and pushed app identities, and the registry's
+    /// app identity). The pushed app identity is the package manifest's
+    /// `versionName`, which is the version the server accepts, so real patch
+    /// releases (e.g. 5.2.1) must be kept; turn this on only if a region's
+    /// pushed appVersion is ever ahead of what its login endpoint accepts.
     #[serde(default)]
-    pub pin_app_version_patch_to_zero: Option<bool>,
+    pub pin_app_version_patch_to_zero: bool,
     /// After a complete master dump (producer) or bundle pull (syncer),
     /// delete `master_dir/*.json` files that dump did not produce, so tables
     /// dropped upstream leave the git mirror and the registry manifest.
@@ -405,31 +405,15 @@ pub struct ServerConfig {
     pub prune_pending_path: String,
 }
 
-/// Whether a region zeroes the patch of its appVersion when
-/// `pin_app_version_patch_to_zero` is unset: Nuverse (TW/KR/CN) yes, CP
-/// (JP/EN) no.
-pub fn default_pin_app_version_patch_to_zero(region: ServerRegion) -> bool {
-    !region.is_cp_server()
-}
-
-impl ServerConfig {
-    /// This region's effective `pin_app_version_patch_to_zero`.
-    pub fn pins_app_version_patch_to_zero(&self, region: ServerRegion) -> bool {
-        self.pin_app_version_patch_to_zero
-            .unwrap_or_else(|| default_pin_app_version_patch_to_zero(region))
-    }
-}
-
-/// [`ServerConfig::pins_app_version_patch_to_zero`] of `region` in `servers`,
-/// or the region default when the region has no section.
+/// `pin_app_version_patch_to_zero` of `region` in `servers`; off when the
+/// region has no section.
 pub fn pins_app_version_patch_to_zero(
     servers: &HashMap<ServerRegion, ServerConfig>,
     region: ServerRegion,
 ) -> bool {
-    servers.get(&region).map_or_else(
-        || default_pin_app_version_patch_to_zero(region),
-        |server| server.pins_app_version_patch_to_zero(region),
-    )
+    servers
+        .get(&region)
+        .is_some_and(|server| server.pin_app_version_patch_to_zero)
 }
 
 pub const DEFAULT_PRUNE_MIN_RATIO: f64 = 0.75;

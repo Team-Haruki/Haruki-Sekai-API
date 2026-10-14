@@ -599,8 +599,7 @@ pub fn build_syncers(
                 source_url: sync.source_url.clone(),
                 source_token: sync.source_token.clone(),
                 compress_bundle: sync.compress_bundle,
-                pin_app_version_patch_to_zero: server_config
-                    .pins_app_version_patch_to_zero(*region),
+                pin_app_version_patch_to_zero: server_config.pin_app_version_patch_to_zero,
                 http: http.clone(),
                 master_db: master_db.clone(),
                 ingest_concurrency: config.master_database.ingest_concurrency,
@@ -949,8 +948,8 @@ mod tests {
         let local = syncer.load_local_version().await;
         assert_eq!(local.data_version, "2.0.0.1");
         assert_eq!(local.cdn_version, 2);
-        // Nuverse app versions are normalized to a zero patch level.
-        assert_eq!(local.app_version, "6.0.0");
+        // The owner's app version is kept as is (the patch pin is opt-in).
+        assert_eq!(local.app_version, "6.0.1");
         assert_eq!(local.app_hash, "hash");
         assert!(!syncer.sync_once().await.unwrap());
 

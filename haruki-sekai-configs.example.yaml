@@ -120,14 +120,14 @@ ingest: # registry-driven ingest (`master_ingest` binary); absent = role off. Ig
 # {"server":"jp","appVersion":"...","appHash":"..."}) — the registry's
 # `PUT /v1/app/{region}` does that for every `registry.account_nodes` entry.
 #
-# servers.<region>.pin_app_version_patch_to_zero: store and send appVersion as
-# major.minor.0 (version file, login headers, adopted/synced identities, and the
-# registry's GET/PUT /v1/app/{region}). Unset = region default: true for tw/kr/cn,
-# false for jp/en. The Nuverse servers accept the package manifest's versionName,
-# which can differ from the Unity build version inside the package (6.4.0 vs
-# 6.4.1); set it to false for a region once its pushed appVersion is the manifest
-# version, so real patch releases (e.g. 5.2.1) are kept instead of being cut to
-# x.y.0. Set it the same way on every node and on the registry.
+# appVersion is stored and sent exactly as pushed: the package manifest's
+# versionName, which is the version the server accepts, patch releases (e.g.
+# 5.2.1) included. servers.<region>.pin_app_version_patch_to_zero (default false
+# for every region) is an opt-in escape hatch that stores and sends it as
+# major.minor.0 instead (version file, login headers, adopted/synced identities,
+# and the registry's GET/PUT /v1/app/{region}). Leave it unset unless a region's
+# pushed appVersion is ahead of what its login endpoint accepts; if you set it,
+# set it the same way on every node and on the registry.
 
 # Haruki Sekai Asset Updater server instances, called on every asset version change.
 # `regions` (lowercase jp/en/tw/kr/cn) limits which regions' updates go to a server;
@@ -189,7 +189,6 @@ servers:
   tw:
     enabled: false
     api_url: ""
-    # pin_app_version_patch_to_zero: true # default for tw/kr/cn; see the app identity note above
     require_cookies: false
     headers:
       Host: ""
@@ -210,7 +209,6 @@ servers:
   kr:
     enabled: false
     api_url: ""
-    # pin_app_version_patch_to_zero: true # default for tw/kr/cn; see the app identity note above
     require_cookies: false
     headers:
       Host: ""
@@ -230,7 +228,6 @@ servers:
   cn:
     enabled: false
     api_url: ""
-    # pin_app_version_patch_to_zero: true # default for tw/kr/cn; see the app identity note above
     # Remote Haruki nodes that can serve this region's game API calls (reached
     # over a private network, e.g. VPN addresses). Targets are tried in
     # ascending priority order; the local client joins with local_priority

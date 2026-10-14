@@ -2185,50 +2185,14 @@ mod tests {
             app_version: version.to_string(),
             app_hash: "cn-hash".to_string(),
         };
-        // No `servers.cn` section: the Nuverse default zeroes the patch.
+        // No `servers.cn` section: the pin is off, patch releases are kept.
         let registry = Registry::new(Arc::new(base_config(&root, "secret")), HashMap::new());
         let (effective, pushed) = registry
             .set_app_identity(ServerRegion::Cn, &info("6.4.1"))
             .await
             .unwrap();
         assert!(pushed.is_empty());
-        assert_eq!(effective.app_version, "6.4.0");
-        assert_eq!(
-            registry
-                .app_identity(ServerRegion::Cn)
-                .await
-                .unwrap()
-                .app_version,
-            "6.4.0"
-        );
-        // An override stored raw (before the pin applied here) reads pinned.
-        registry
-            .state
-            .set_app_identity(ServerRegion::Cn, &info("6.4.1"))
-            .await
-            .unwrap();
-        assert_eq!(
-            registry
-                .app_identity(ServerRegion::Cn)
-                .await
-                .unwrap()
-                .app_version,
-            "6.4.0"
-        );
-        // JP keeps its patch.
-        let (effective, _) = registry
-            .set_app_identity(ServerRegion::Jp, &info("6.0.2"))
-            .await
-            .unwrap();
-        assert_eq!(effective.app_version, "6.0.2");
-
-        // Turned off for CN: patch releases are kept.
-        let mut config = base_config(&root, "secret");
-        let mut cn: ServerConfig =
-            serde_yaml::from_str("pin_app_version_patch_to_zero: false").unwrap();
-        cn.version_path = root.join("cn-version.json").to_string_lossy().into_owned();
-        config.servers.insert(ServerRegion::Cn, cn);
-        let registry = Registry::new(Arc::new(config), HashMap::new());
+        assert_eq!(effective.app_version, "6.4.1");
         assert_eq!(
             registry
                 .app_identity(ServerRegion::Cn)
@@ -2238,10 +2202,32 @@ mod tests {
             "6.4.1"
         );
         let (effective, _) = registry
+            .set_app_identity(ServerRegion::Jp, &info("6.0.2"))
+            .await
+            .unwrap();
+        assert_eq!(effective.app_version, "6.0.2");
+
+        // Opted in for CN: a stored raw override reads pinned, and new
+        // overrides are stored pinned.
+        let mut config = base_config(&root, "secret");
+        let mut cn: ServerConfig =
+            serde_yaml::from_str("pin_app_version_patch_to_zero: true").unwrap();
+        cn.version_path = root.join("cn-version.json").to_string_lossy().into_owned();
+        config.servers.insert(ServerRegion::Cn, cn);
+        let registry = Registry::new(Arc::new(config), HashMap::new());
+        assert_eq!(
+            registry
+                .app_identity(ServerRegion::Cn)
+                .await
+                .unwrap()
+                .app_version,
+            "6.4.0"
+        );
+        let (effective, _) = registry
             .set_app_identity(ServerRegion::Cn, &info("6.4.2"))
             .await
             .unwrap();
-        assert_eq!(effective.app_version, "6.4.2");
+        assert_eq!(effective.app_version, "6.4.0");
         std::fs::remove_dir_all(root).unwrap();
 
         // Without an override the version file is read through the pin too.
@@ -2251,7 +2237,7 @@ mod tests {
             .servers
             .get_mut(&ServerRegion::Jp)
             .unwrap()
-            .pin_app_version_patch_to_zero = Some(true);
+            .pin_app_version_patch_to_zero = true;
         std::fs::write(
             root.join("version.json"),
             r#"{"appVersion":"6.0.2","appHash":"owner-hash","dataVersion":"1","assetVersion":"1"}"#,

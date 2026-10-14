@@ -253,7 +253,7 @@ pub async fn post_app_identity(
     let changed = {
         let _guard = lock.lock().await;
         match crate::updater::master::persist_app_identity(
-            config.pins_app_version_patch_to_zero(region),
+            config.pin_app_version_patch_to_zero,
             &config.version_path,
             &app,
         )

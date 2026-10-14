@@ -172,7 +172,7 @@ impl SekaiClient {
 
     fn normalize_app_version(&self, version: &mut VersionInfo) {
         let effective = effective_app_version(
-            self.config.pins_app_version_patch_to_zero(self.region),
+            self.config.pin_app_version_patch_to_zero,
             &version.app_version,
         );
         if effective != version.app_version {
@@ -1565,21 +1565,23 @@ mod tests {
         assert_eq!(client.region, ServerRegion::Cn);
         assert_eq!(client.headers.lock().get("X-Test").unwrap(), "yes");
         client.init().await.unwrap();
-        assert_eq!(client.version_helper.get().app_version, "6.0.0");
-        assert_eq!(client.headers.lock().get("X-App-Version").unwrap(), "6.0.0");
+        assert_eq!(client.version_helper.get().app_version, "6.0.2");
+        assert_eq!(client.headers.lock().get("X-App-Version").unwrap(), "6.0.2");
 
         std::fs::write(
             &client.config.version_path,
             r#"{"appVersion":"6.1.9","appHash":"h2","dataVersion":"d2","assetVersion":"a2"}"#,
         )
         .unwrap();
-        client.refresh_version().await.unwrap();
-        assert_eq!(client.headers.lock().get("X-App-Version").unwrap(), "6.1.0");
-        // With the pin off the version file's patch release is sent as is.
-        client.config.pin_app_version_patch_to_zero = Some(false);
+        // By default the version file's patch release is sent as is.
         client.refresh_version().await.unwrap();
         assert_eq!(client.headers.lock().get("X-App-Version").unwrap(), "6.1.9");
         assert_eq!(client.version_helper.get().app_version, "6.1.9");
+        // The opt-in pin cuts it to major.minor.0.
+        client.config.pin_app_version_patch_to_zero = true;
+        client.refresh_version().await.unwrap();
+        assert_eq!(client.headers.lock().get("X-App-Version").unwrap(), "6.1.0");
+        assert_eq!(client.version_helper.get().app_version, "6.1.0");
         client.refresh_cookies().await.unwrap();
         Arc::new(client).start_file_watcher().unwrap();
         std::fs::remove_dir_all(root).unwrap();

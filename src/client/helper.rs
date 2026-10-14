@@ -179,22 +179,27 @@ mod tests {
     }
 
     #[test]
-    fn pin_defaults_to_nuverse_regions_only() {
-        use crate::config::{default_pin_app_version_patch_to_zero, ServerConfig};
-        for region in [ServerRegion::Tw, ServerRegion::Kr, ServerRegion::Cn] {
-            assert!(default_pin_app_version_patch_to_zero(region));
-        }
-        for region in [ServerRegion::Jp, ServerRegion::En] {
-            assert!(!default_pin_app_version_patch_to_zero(region));
-        }
+    fn pin_is_off_by_default_for_every_region() {
+        use crate::config::{pins_app_version_patch_to_zero, ServerConfig};
         let unset: ServerConfig = serde_yaml::from_str("{}").unwrap();
-        assert!(unset.pins_app_version_patch_to_zero(ServerRegion::Cn));
-        assert!(!unset.pins_app_version_patch_to_zero(ServerRegion::Jp));
-        let off: ServerConfig =
-            serde_yaml::from_str("pin_app_version_patch_to_zero: false").unwrap();
-        assert!(!off.pins_app_version_patch_to_zero(ServerRegion::Cn));
+        assert!(!unset.pin_app_version_patch_to_zero);
         let on: ServerConfig = serde_yaml::from_str("pin_app_version_patch_to_zero: true").unwrap();
-        assert!(on.pins_app_version_patch_to_zero(ServerRegion::Jp));
+        assert!(on.pin_app_version_patch_to_zero);
+        let mut servers = std::collections::HashMap::new();
+        for region in [
+            ServerRegion::Jp,
+            ServerRegion::En,
+            ServerRegion::Tw,
+            ServerRegion::Kr,
+            ServerRegion::Cn,
+        ] {
+            // No section, or a section without the option: off.
+            assert!(!pins_app_version_patch_to_zero(&servers, region));
+            servers.insert(region, unset.clone());
+            assert!(!pins_app_version_patch_to_zero(&servers, region));
+        }
+        servers.insert(ServerRegion::Cn, on);
+        assert!(pins_app_version_patch_to_zero(&servers, ServerRegion::Cn));
     }
 
     #[tokio::test]
@@ -284,11 +289,9 @@ mod tests {
 }
 
 /// The appVersion a region stores and sends. With `pin_patch_to_zero` (a
-/// region's `pin_app_version_patch_to_zero`, on by default for TW/KR/CN) a
-/// three-part numeric version becomes `major.minor.0`: the Nuverse package's
-/// internal Unity version can be ahead of the version its login endpoint
-/// accepts. Without it, and for anything that is not `x.y.z`, the version is
-/// kept as given.
+/// region's opt-in `pin_app_version_patch_to_zero`, off by default) a
+/// three-part numeric version becomes `major.minor.0`. Without it, and for
+/// anything that is not `x.y.z`, the version is kept as given.
 pub fn effective_app_version(pin_patch_to_zero: bool, app_version: &str) -> String {
     if !pin_patch_to_zero {
         return app_version.to_string();
