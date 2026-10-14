@@ -8,7 +8,10 @@
 //! The [`MetasRecord`] pointer lives in the registry state (file backend:
 //! `<state_dir>/metas/<region>/current.json`; database backend: a
 //! `registry_state` row). The `<sha256>.json` blobs (current plus the previous
-//! one, older blobs are pruned) always live under `<state_dir>/metas/<region>/`.
+//! one, older blobs are pruned) always live under `<state_dir>/metas/<region>/`,
+//! each next to precompressed copies (`.json.gz`, `.json.zst`) that are
+//! written once per blob and served as they are to clients accepting the
+//! coding, so a 2 MB feed costs no compression CPU per request.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -17,6 +20,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value as JsonValue};
 use tracing::{info, warn};
 
+use super::encoding::Coding;
 use super::state::{is_hex_digest, RegistryState};
 use crate::client::helper::write_file_atomic;
 use crate::config::{Config, ServerRegion};
@@ -52,6 +56,12 @@ pub const DEFAULT_SOURCES: [(ServerRegion, &str); 5] = [
 const MAX_RESPONSE_BYTES: usize = 64 << 20;
 /// Blobs kept per region besides the current one.
 const PREVIOUS_BLOBS_KEPT: usize = 1;
+/// Precompressed copies are made once per blob, so they use the best ratio:
+/// on a real 2.2 MB feed gzip 9 gives 550 KB in 0.1 s and zstd 19 456 KB in
+/// 0.4 s. The zstd frame records the content size, so its window stays
+/// within the input (far below the 8 MB a decoder must support, RFC 9659).
+const PRECOMPRESS_GZIP_LEVEL: u32 = 9;
+const PRECOMPRESS_ZSTD_LEVEL: i32 = 19;
 
 /// The mutable pointer for one region's music_metas.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -181,6 +191,73 @@ impl MusicMetasManager {
         is_hex_digest(sha256).then(|| self.region_dir(region).join(format!("{sha256}.json")))
     }
 
+    /// Path of a blob's copy in `coding` (identity: the blob itself).
+    pub fn encoded_path(
+        &self,
+        region: ServerRegion,
+        sha256: &str,
+        coding: Coding,
+    ) -> Option<PathBuf> {
+        let extension = match coding {
+            Coding::Identity => "json",
+            Coding::Gzip => "json.gz",
+            Coding::Zstd => "json.zst",
+        };
+        is_hex_digest(sha256).then(|| {
+            self.region_dir(region)
+                .join(format!("{sha256}.{extension}"))
+        })
+    }
+
+    /// Write the precompressed copies of a stored blob that are missing.
+    /// A blob that is not on disk is left alone (nothing to serve).
+    pub async fn ensure_encoded(&self, region: ServerRegion, sha256: &str) -> Result<(), AppError> {
+        let Some(blob) = self.blob_path(region, sha256) else {
+            return Ok(());
+        };
+        let mut missing = Vec::new();
+        for coding in Coding::COMPRESSED {
+            if let Some(path) = self.encoded_path(region, sha256, coding) {
+                if !tokio::fs::try_exists(&path).await.unwrap_or(false) {
+                    missing.push((coding, path));
+                }
+            }
+        }
+        if missing.is_empty() {
+            return Ok(());
+        }
+        let data = match tokio::fs::read(&blob).await {
+            Ok(data) => data,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(e.into()),
+        };
+        let codings: Vec<Coding> = missing.iter().map(|(coding, _)| *coding).collect();
+        let encoded = tokio::task::spawn_blocking(move || {
+            codings
+                .into_iter()
+                .map(|coding| precompress(&data, coding))
+                .collect::<std::io::Result<Vec<_>>>()
+        })
+        .await
+        .map_err(|e| AppError::Internal(format!("metas compression task: {e}")))??;
+        for ((_, path), bytes) in missing.iter().zip(encoded) {
+            write_file_atomic(path, &bytes).await?;
+        }
+        Ok(())
+    }
+
+    /// `ensure_encoded` for the current blob, logging a failure (the plain
+    /// blob is still served, compressed per request).
+    async fn ensure_encoded_logged(&self, region: ServerRegion, sha256: &str) {
+        if let Err(e) = self.ensure_encoded(region, sha256).await {
+            warn!(
+                "{} music_metas precompression failed: {}",
+                region.as_str().to_uppercase(),
+                e
+            );
+        }
+    }
+
     pub async fn current(&self, region: ServerRegion) -> Result<Option<MetasRecord>, AppError> {
         self.state.metas_record(region).await
     }
@@ -236,6 +313,8 @@ impl MusicMetasManager {
             };
             record.fetched_at = now;
             self.write_record(region, &record).await?;
+            // Blobs stored before precompression existed get their copies here.
+            self.ensure_encoded_logged(region, &record.sha256).await;
             return Ok(MetasRefresh {
                 record,
                 changed: false,
@@ -297,6 +376,9 @@ impl MusicMetasManager {
         if !tokio::fs::try_exists(&blob).await.unwrap_or(false) {
             write_file_atomic(&blob, &processed).await?;
         }
+        // Before the pointer moves, so the new blob is served precompressed
+        // from its first request.
+        self.ensure_encoded_logged(region, &sha256).await;
         self.write_record(region, &record).await?;
         if changed {
             info!(
@@ -328,11 +410,18 @@ impl MusicMetasManager {
                 Ok(_) => {
                     tracing::debug!("{} music_metas unchanged", region.as_str().to_uppercase())
                 }
-                Err(e) => warn!(
-                    "{} music_metas refresh failed: {}",
-                    region.as_str().to_uppercase(),
-                    e
-                ),
+                Err(e) => {
+                    warn!(
+                        "{} music_metas refresh failed: {}",
+                        region.as_str().to_uppercase(),
+                        e
+                    );
+                    // The upstream being down must not keep a stored blob
+                    // from its precompressed copies.
+                    if let Ok(Some(record)) = self.current(region).await {
+                        self.ensure_encoded_logged(region, &record.sha256).await;
+                    }
+                }
             }
         }
     }
@@ -345,7 +434,8 @@ impl MusicMetasManager {
         self.state.set_metas_record(region, record).await
     }
 
-    /// Keep the current blob and the previous one; remove older blobs.
+    /// Keep the current blob and the previous one (with their precompressed
+    /// copies); remove older blobs.
     async fn prune_blobs(&self, region: ServerRegion, current: &str, previous: Option<&str>) {
         let keep: Vec<&str> = std::iter::once(current)
             .chain(previous.into_iter().take(PREVIOUS_BLOBS_KEPT))
@@ -355,7 +445,10 @@ impl MusicMetasManager {
         };
         while let Ok(Some(entry)) = rd.next_entry().await {
             let name = entry.file_name().to_string_lossy().into_owned();
-            let Some(stem) = name.strip_suffix(".json") else {
+            let Some(stem) = [".json", ".json.gz", ".json.zst"]
+                .iter()
+                .find_map(|suffix| name.strip_suffix(suffix))
+            else {
                 continue;
             };
             if is_hex_digest(stem) && !keep.contains(&stem) {
@@ -403,6 +496,23 @@ fn header_string(resp: &reqwest::Response, name: &str) -> Option<String> {
 
 fn now_rfc3339() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+}
+
+/// `data` in `coding`, at the precompression levels.
+pub fn precompress(data: &[u8], coding: Coding) -> std::io::Result<Vec<u8>> {
+    use std::io::Write as _;
+    match coding {
+        Coding::Identity => Ok(data.to_vec()),
+        Coding::Gzip => {
+            let mut encoder = flate2::write::GzEncoder::new(
+                Vec::with_capacity(data.len() / 3),
+                flate2::Compression::new(PRECOMPRESS_GZIP_LEVEL),
+            );
+            encoder.write_all(data)?;
+            encoder.finish()
+        }
+        Coding::Zstd => zstd::bulk::compress(data, PRECOMPRESS_ZSTD_LEVEL),
+    }
 }
 
 pub fn sha256_hex(data: &[u8]) -> String {
@@ -687,10 +797,29 @@ mod tests {
             .unwrap();
         assert!(blob1.exists());
         assert_eq!(std::fs::metadata(&blob1).unwrap().len(), first.record.size);
+        let copies1: Vec<_> = Coding::COMPRESSED
+            .iter()
+            .map(|coding| {
+                manager
+                    .encoded_path(ServerRegion::Jp, &first.record.sha256, *coding)
+                    .unwrap()
+            })
+            .collect();
+        let processed = std::fs::read(&blob1).unwrap();
+        for (coding, copy) in Coding::COMPRESSED.iter().zip(&copies1) {
+            let encoded = std::fs::read(copy).unwrap();
+            assert_eq!(encoded, precompress(&processed, *coding).unwrap());
+        }
+        // A blob stored without copies (older registry) gets them on the
+        // next refresh, even an unchanged one.
+        for copy in &copies1 {
+            std::fs::remove_file(copy).unwrap();
+        }
 
         // Unchanged upstream: conditional request, 304, pointer refreshed.
         let second = manager.refresh(ServerRegion::Jp).await.unwrap();
         assert!(!second.changed && second.not_modified);
+        assert!(copies1.iter().all(|copy| copy.exists()));
         assert_eq!(second.record.sha256, first.record.sha256);
         assert_eq!(up.hits.lock().last().unwrap().as_deref(), Some("\"v1\""));
 
@@ -708,6 +837,7 @@ mod tests {
         let fourth = manager.refresh(ServerRegion::Jp).await.unwrap();
         assert!(fourth.changed);
         assert!(!blob1.exists());
+        assert!(copies1.iter().all(|copy| !copy.exists()));
         assert!(manager
             .blob_path(ServerRegion::Jp, &third.record.sha256)
             .unwrap()
