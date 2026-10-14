@@ -55,6 +55,9 @@ pub struct MasterSyncer {
     source_token: String,
     /// Let the owner compress the bundle (see `MasterSyncConfig`).
     compress_bundle: bool,
+    /// The region's `pin_app_version_patch_to_zero`, applied to the owner's
+    /// app identity when it is adopted.
+    pin_app_version_patch_to_zero: bool,
     http: reqwest::Client,
     master_db: Option<sea_orm::DatabaseConnection>,
     /// Files ingested at once when `master_db` is set.
@@ -193,7 +196,12 @@ impl MasterSyncer {
                 && tokio::fs::try_exists(&self.version_path)
                     .await
                     .unwrap_or(false)
-                && persist_app_identity(self.region, &self.version_path, &owner_app).await?
+                && persist_app_identity(
+                    self.pin_app_version_patch_to_zero,
+                    &self.version_path,
+                    &owner_app,
+                )
+                .await?
             {
                 info!(
                     "{} Adopting owner app identity: appVersion={} appHash={}",
@@ -202,7 +210,13 @@ impl MasterSyncer {
                     owner_app.app_hash.chars().take(16).collect::<String>()
                 );
             }
-            persist_version_file(self.region, &self.version_path, &version).await?
+            persist_version_file(
+                self.region,
+                self.pin_app_version_patch_to_zero,
+                &self.version_path,
+                &version,
+            )
+            .await?
         };
         if let Some(ref helper) = self.version_helper {
             helper.update(merged.clone());
@@ -585,6 +599,7 @@ pub fn build_syncers(
                 source_url: sync.source_url.clone(),
                 source_token: sync.source_token.clone(),
                 compress_bundle: sync.compress_bundle,
+                pin_app_version_patch_to_zero: server_config.pin_app_version_patch_to_zero,
                 http: http.clone(),
                 master_db: master_db.clone(),
                 ingest_concurrency: config.master_database.ingest_concurrency,
@@ -933,8 +948,8 @@ mod tests {
         let local = syncer.load_local_version().await;
         assert_eq!(local.data_version, "2.0.0.1");
         assert_eq!(local.cdn_version, 2);
-        // Nuverse app versions are normalized to a zero patch level.
-        assert_eq!(local.app_version, "6.0.0");
+        // The owner's app version is kept as is (the patch pin is opt-in).
+        assert_eq!(local.app_version, "6.0.1");
         assert_eq!(local.app_hash, "hash");
         assert!(!syncer.sync_once().await.unwrap());
 
@@ -1118,6 +1133,7 @@ mod tests {
             source_url: "http://127.0.0.1:1".to_string(),
             source_token: String::new(),
             compress_bundle: true,
+            pin_app_version_patch_to_zero: false,
             http: reqwest::Client::new(),
             master_db: None,
             ingest_concurrency: crate::ingest_engine::DEFAULT_INGEST_CONCURRENCY,

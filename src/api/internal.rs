@@ -252,7 +252,12 @@ pub async fn post_app_identity(
         .unwrap_or_else(|| Arc::new(tokio::sync::Mutex::new(())));
     let changed = {
         let _guard = lock.lock().await;
-        match crate::updater::master::persist_app_identity(region, &config.version_path, &app).await
+        match crate::updater::master::persist_app_identity(
+            config.pin_app_version_patch_to_zero,
+            &config.version_path,
+            &app,
+        )
+        .await
         {
             Ok(changed) => changed,
             Err(e) => return envelope_response(&error_envelope(&e)),

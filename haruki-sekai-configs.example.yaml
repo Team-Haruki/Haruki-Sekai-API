@@ -119,6 +119,15 @@ ingest: # registry-driven ingest (`master_ingest` binary); absent = role off. Ig
 # with `POST /internal/app-identity` (bearer backend.internal_token, body
 # {"server":"jp","appVersion":"...","appHash":"..."}) — the registry's
 # `PUT /v1/app/{region}` does that for every `registry.account_nodes` entry.
+#
+# appVersion is stored and sent exactly as pushed: the package manifest's
+# versionName, which is the version the server accepts, patch releases (e.g.
+# 5.2.1) included. servers.<region>.pin_app_version_patch_to_zero (default false
+# for every region) is an opt-in escape hatch that stores and sends it as
+# major.minor.0 instead (version file, login headers, adopted/synced identities,
+# and the registry's GET/PUT /v1/app/{region}). Leave it unset unless a region's
+# pushed appVersion is ahead of what its login endpoint accepts; if you set it,
+# set it the same way on every node and on the registry.
 
 # Haruki Sekai Asset Updater server instances, called on every asset version change.
 # `regions` (lowercase jp/en/tw/kr/cn) limits which regions' updates go to a server;
