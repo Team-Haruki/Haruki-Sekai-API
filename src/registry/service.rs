@@ -82,6 +82,9 @@ pub struct Registry {
     /// Serializes app-identity writes and their delivery per region so two
     /// concurrent PUTs cannot persist one identity and deliver the other.
     app_locks: HashMap<ServerRegion, tokio::sync::Mutex<()>>,
+    /// The synced appVersion an older override was last reported against,
+    /// so the warning is logged once per owner version, not on every poll.
+    stale_override_warned: parking_lot::Mutex<HashMap<ServerRegion, String>>,
 }
 
 impl Registry {
@@ -136,6 +139,7 @@ impl Registry {
             .into_iter()
             .map(|region| (region, tokio::sync::Mutex::new(())))
             .collect(),
+            stale_override_warned: parking_lot::Mutex::new(HashMap::new()),
         }
     }
 
@@ -200,8 +204,95 @@ impl Registry {
             effective.app_version,
             effective.app_hash.chars().take(16).collect::<String>()
         );
+        // The override is authoritative here too: the registry's own version
+        // file (and with it the git mirror) takes it as is, a downgrade
+        // included, which the forward-only owner adoption would not.
+        if let Some(syncer) = self.syncers.get(&region) {
+            let app = crate::updater::master::AppIdentity {
+                app_version: effective.app_version.clone(),
+                app_hash: effective.app_hash.clone(),
+            };
+            if let Err(e) = syncer.store_app_identity(&app).await {
+                warn!(
+                    "{} App identity override not written to the version file: {}",
+                    region.as_str().to_uppercase(),
+                    e
+                );
+            }
+        }
         let pushed = self.push_app_identity(region, &effective).await;
+        self.republish_app_identity_logged(region).await;
         Ok((effective, pushed))
+    }
+
+    /// Remove the region's app-identity override; `current` and `GET /v1/app`
+    /// fall back to the synced version file. Returns whether one was stored.
+    pub async fn clear_app_identity(&self, region: ServerRegion) -> Result<bool, AppError> {
+        let removed = {
+            let _guard = match self.app_locks.get(&region) {
+                Some(lock) => lock.lock().await,
+                None => return Err(AppError::InvalidServerRegion(region.as_str().to_string())),
+            };
+            self.state.clear_app_identity(region).await?
+        };
+        if removed {
+            self.republish_app_identity_logged(region).await;
+        }
+        Ok(removed)
+    }
+
+    /// Re-record `current` with the region's effective app identity when it
+    /// changed (an override set or cleared, the synced version file following
+    /// an app-identity push on the owner), without waiting for master data to
+    /// change: consumers poll `current` for the appVersion. The file set,
+    /// versions and `gitCommit` stay as published. Returns whether `current`
+    /// changed; subscribers are notified as for any publish.
+    pub async fn republish_app_identity(&self, region: ServerRegion) -> Result<bool, AppError> {
+        let (manifest, previous) = {
+            let _guard = match self.publish_locks.get(&region) {
+                Some(lock) => lock.lock().await,
+                None => return Err(AppError::InvalidServerRegion(region.as_str().to_string())),
+            };
+            let Some(previous) = self.state.current(region).await? else {
+                return Ok(false);
+            };
+            let synced = self.synced_app_identity(region).await.ok();
+            let Some(app) = self.effective_identity(region, synced).await? else {
+                return Ok(false);
+            };
+            if previous.app_version == app.app_version && previous.app_hash == app.app_hash {
+                return Ok(false);
+            }
+            let mut manifest = previous.clone();
+            manifest.app_version = app.app_version;
+            manifest.app_hash = app.app_hash;
+            manifest.generated_at =
+                chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+            if !self.state.publish(region, &manifest).await? {
+                return Ok(false);
+            }
+            (manifest, previous)
+        };
+        info!(
+            "{} Published app identity: appVersion {} -> {} (dataVersion {})",
+            region.as_str().to_uppercase(),
+            previous.app_version,
+            manifest.app_version,
+            manifest.data_version
+        );
+        self.notify_subscribers(region, &publish_notice(&manifest, Some(&previous)))
+            .await;
+        Ok(true)
+    }
+
+    async fn republish_app_identity_logged(&self, region: ServerRegion) {
+        if let Err(e) = self.republish_app_identity(region).await {
+            warn!(
+                "{} Republishing current with the app identity failed (next poll retries): {}",
+                region.as_str().to_uppercase(),
+                e
+            );
+        }
     }
 
     /// `app_version` through the region's `pin_app_version_patch_to_zero`.
@@ -247,10 +338,35 @@ impl Registry {
         // Both sources go through the region's pin: an override stored
         // before it applied here, or a version file written with another
         // setting, may carry the raw version; report what the nodes store.
+        let synced = self.synced_app_identity(region).await;
+        match self
+            .effective_identity(region, synced.as_ref().ok().cloned())
+            .await?
+        {
+            Some(info) => Ok(info),
+            None => synced,
+        }
+    }
+
+    /// The override when one is stored, else `synced` (the version file's
+    /// identity, `None` when there is none).
+    async fn effective_identity(
+        &self,
+        region: ServerRegion,
+        synced: Option<AppInfo>,
+    ) -> Result<Option<AppInfo>, AppError> {
         if let Some(mut info) = self.state.app_identity(region).await? {
             info.app_version = self.effective_app_version(region, &info.app_version);
-            return Ok(info);
+            if let Some(synced) = &synced {
+                self.warn_if_override_is_older(region, &info, synced);
+            }
+            return Ok(Some(info));
         }
+        Ok(synced)
+    }
+
+    /// The app identity in the region's version file (synced from the owner).
+    async fn synced_app_identity(&self, region: ServerRegion) -> Result<AppInfo, AppError> {
         let (_, version_path) = self.region_paths(region)?;
         if version_path.is_empty() {
             return Err(AppError::NotFound(format!(
@@ -267,6 +383,31 @@ impl Registry {
         })
     }
 
+    /// An override keeps winning after the owner has moved past it (a later
+    /// app-identity push): say so, once per synced version, so it is cleared.
+    fn warn_if_override_is_older(&self, region: ServerRegion, stored: &AppInfo, synced: &AppInfo) {
+        let older = crate::client::helper::cmp_version(&stored.app_version, &synced.app_version)
+            .map(|o| o == std::cmp::Ordering::Less)
+            .unwrap_or(false);
+        let mut warned = self.stale_override_warned.lock();
+        if !older {
+            warned.remove(&region);
+            return;
+        }
+        if warned.get(&region) == Some(&synced.app_version) {
+            return;
+        }
+        warned.insert(region, synced.app_version.clone());
+        warn!(
+            "{} App identity override {} is older than the owner's {}; it still wins \
+(DELETE /v1/app/{} to follow the owner)",
+            region.as_str().to_uppercase(),
+            stored.app_version,
+            synced.app_version,
+            region.as_str()
+        );
+    }
+
     /// Build the region's manifest from disk, record it, and notify
     /// subscribers when it changed. Returns the manifest and whether it was
     /// a new publish.
@@ -281,11 +422,20 @@ impl Registry {
             };
             let (master_dir, version_path) = self.region_paths(region)?;
             let dir = master_dir.clone();
-            let manifest = tokio::task::spawn_blocking(move || {
+            let mut manifest = tokio::task::spawn_blocking(move || {
                 build_master_manifest(region, &dir, &version_path)
             })
             .await
             .map_err(|e| AppError::Internal(format!("manifest task: {e}")))??;
+            // `current` carries the effective identity, as `GET /v1/app`.
+            let synced = AppInfo {
+                app_version: self.effective_app_version(region, &manifest.app_version),
+                app_hash: std::mem::take(&mut manifest.app_hash),
+            };
+            if let Some(app) = self.effective_identity(region, Some(synced)).await? {
+                manifest.app_version = app.app_version;
+                manifest.app_hash = app.app_hash;
+            }
             // Content first: the manifest is committed only once every file
             // it lists can be served from the blob store.
             let stats = self
@@ -408,7 +558,7 @@ impl Registry {
     }
 
     /// Pull the region from its owner if newer, then publish. Returns whether
-    /// new master data was applied.
+    /// `current` changed (new master data, or only the app identity).
     pub async fn refresh(&self, region: ServerRegion) -> Result<bool, AppError> {
         let Some(syncer) = self.syncers.get(&region) else {
             return Err(AppError::NotFound(format!(
@@ -416,11 +566,13 @@ impl Registry {
                 region.as_str()
             )));
         };
-        let applied = syncer.sync_once().await?;
-        if applied {
+        if syncer.sync_once().await? {
             self.publish(region).await?;
+            return Ok(true);
         }
-        Ok(applied)
+        // No new master data, but the app identity may have moved (the
+        // syncer followed the owner's, or an override changed).
+        self.republish_app_identity(region).await
     }
 
     /// Startup pass: publish every managed region whose directory already

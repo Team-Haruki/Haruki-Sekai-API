@@ -119,6 +119,10 @@ ingest: # registry-driven ingest (`master_ingest` binary); absent = role off. Ig
 # with `POST /internal/app-identity` (bearer backend.internal_token, body
 # {"server":"jp","appVersion":"...","appHash":"..."}) — the registry's
 # `PUT /v1/app/{region}` does that for every `registry.account_nodes` entry.
+# A push writes unconditionally and, on a change, notifies the region's
+# master_sync.notify peers. Peers (syncers, the registry, a remote-account
+# producer) adopt another node's identity only when its appVersion is newer
+# (or the same with another appHash), so push to every node that logs in.
 #
 # appVersion is stored and sent exactly as pushed: the package manifest's
 # versionName, which is the version the server accepts, patch releases (e.g.

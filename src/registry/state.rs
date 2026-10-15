@@ -361,7 +361,8 @@ impl RegistryState {
     }
 
     /// Record `manifest` as the region's current state. Returns `true` when
-    /// it differs from the previous publish (version or file set), in which
+    /// it differs from the previous publish (versions, app identity or file
+    /// set), in which
     /// case a history line is appended; an unchanged republish only refreshes
     /// `current`.
     pub async fn publish(
@@ -727,6 +728,8 @@ fn is_changed(
         Some(prev) => {
             prev.data_version != manifest.data_version
                 || prev.cdn_version != manifest.cdn_version
+                || prev.app_version != manifest.app_version
+                || prev.app_hash != manifest.app_hash
                 || content_hash(prev) != record.content_hash
         }
         None => true,
