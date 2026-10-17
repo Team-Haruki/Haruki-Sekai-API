@@ -42,7 +42,17 @@ pub(super) fn ensure_exports(
             Err(e) => return Err(e.into()),
         };
         if !fresh {
-            write_export(&source_path, &target_path, field)?;
+            if let Err(error) = write_export(&source_path, &target_path, field) {
+                tracing::warn!("JP Compact export {target_name} failed; dropping it: {error}");
+                // These downloads are optional. Continue publishing the
+                // original, but never advertise an export of an older source.
+                match std::fs::remove_file(&target_path) {
+                    Ok(()) => changed = true,
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) => return Err(e.into()),
+                }
+                continue;
+            }
             changed = true;
         }
         produced.insert(target_name);
@@ -220,6 +230,16 @@ mod tests {
         assert!(write_export(&source, &target, "cardParameters").is_err());
         assert_eq!(std::fs::read(&target).unwrap(), bytes);
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 2);
+        // Force a stale export regardless of the filesystem clock granularity.
+        let file = std::fs::File::open(&target).unwrap();
+        file.set_modified(std::time::SystemTime::UNIX_EPOCH)
+            .unwrap();
+        let (changed, produced) = ensure_exports(&dir, None).unwrap();
+        assert!(changed);
+        assert!(produced.is_empty());
+        assert!(!target.exists());
+        // A failed first export is also optional, and retries on later polls.
+        assert_eq!(ensure_exports(&dir, None).unwrap(), (false, HashSet::new()));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

@@ -34,8 +34,10 @@ Exports are generated before pruning and git publication on a JP bundle sync.
 An unchanged-version poll also backfills missing exports, so deployment does not
 require a new game version. Source mtimes are preserved for byte-identical bundle
 members; an export at least as new as its source is reused. Generation streams
-one catalog record at a time and atomically renames a temporary file, retaining
-the previous export on failure.
+one catalog record at a time and atomically renames a temporary file. A failed
+rebuild removes the stale target so it cannot be advertised alongside newer
+source data; synchronization continues with the original file and later polls
+retry the optional export. Failure to remove a stale target still aborts the sync.
 
 For an offline round-trip check against local JP source files (also writes the
 two exports into that fixture directory):
