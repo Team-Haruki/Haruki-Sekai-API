@@ -2166,7 +2166,10 @@ mod tests {
             body["contentHash"],
             super::super::state::content_hash(&manifest)
         );
-        assert_eq!(body["changedFiles"], serde_json::json!(["cards.json"]));
+        assert_eq!(
+            body["changedFiles"],
+            serde_json::json!(["cards.json", "compactCards.json"])
+        );
         assert_eq!(body["removedFiles"], serde_json::json!([]));
         // Old receivers read only `server`/`dataVersion` and still parse it.
         let old: MasterUpdatedNotice = serde_json::from_value(body).unwrap();
