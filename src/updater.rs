@@ -1,3 +1,4 @@
+mod compact;
 pub mod git;
 pub mod master;
 pub mod master_stream;

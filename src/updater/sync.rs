@@ -149,7 +149,11 @@ impl MasterSyncer {
         let retry_push = !need && self.git_push_failed();
         if !need && !retry_ingest && !retry_push {
             self.follow_owner_app_identity(&remote).await?;
-            return Ok(false);
+            let (changed, _) = self.ensure_compact_exports(None).await?;
+            if changed {
+                self.git_push(&local.data_version).await;
+            }
+            return Ok(changed);
         }
         if retry_push && !retry_ingest {
             warn!(
@@ -181,8 +185,10 @@ impl MasterSyncer {
         // The bundle embeds the owner's version file as snapshotted at tar
         // time; prefer it over the separately fetched version so the recorded
         // version always matches the files actually written.
-        let (bundle_version, produced) = self.pull_and_unpack().await?;
+        let (bundle_version, mut produced) = self.pull_and_unpack().await?;
         let version = bundle_version.unwrap_or(remote);
+        let (_, exports) = self.ensure_compact_exports(Some(produced.clone())).await?;
+        produced.extend(exports);
         self.prune_stale_files(produced).await?;
 
         self.ingest().await;
@@ -216,6 +222,21 @@ impl MasterSyncer {
             merged.data_version
         );
         Ok(true)
+    }
+
+    async fn ensure_compact_exports(
+        &self,
+        sources: Option<HashSet<String>>,
+    ) -> Result<(bool, HashSet<String>), AppError> {
+        if self.region != ServerRegion::Jp {
+            return Ok((false, HashSet::new()));
+        }
+        let master_dir = PathBuf::from(&self.master_dir);
+        tokio::task::spawn_blocking(move || {
+            super::compact::ensure_exports(&master_dir, sources.as_ref())
+        })
+        .await
+        .map_err(|e| AppError::Internal(format!("compact master export task: {e}")))?
     }
 
     /// Adopt the owner's app identity from `owner` (its version file or the
@@ -1028,6 +1049,44 @@ mod tests {
         );
         syncer.record_git_state(true, None);
         assert!(!syncer.git_push_failed());
+        server.abort();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn jp_exports_survive_sync_and_backfill_without_a_version_change() {
+        let root =
+            std::env::temp_dir().join(format!("haruki_compact_sync_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let remote = version("2.0.0.1", 0);
+        let (url, server) = spawn_sync_source(SyncReply {
+            version: sonic_rs::to_vec(&remote).unwrap(),
+            bundle: bundle_bytes(&root, &remote),
+        })
+        .await;
+        let mut config: Config = serde_yaml::from_str("backend: {}").unwrap();
+        let mut settings: crate::config::ServerConfig = serde_yaml::from_str("{}").unwrap();
+        settings.master_dir = root.join("master").to_string_lossy().into_owned();
+        settings.version_path = root.join("version.json").to_string_lossy().into_owned();
+        settings.master_sync.source_url = url;
+        config.servers.insert(ServerRegion::Jp, settings);
+        let syncers = build_syncers(&config, &HashMap::new(), None, &HashMap::new());
+        let syncer = &syncers[&ServerRegion::Jp];
+        assert!(syncer.sync_once().await.unwrap());
+        let compact = root.join("master/compactCards.json");
+        assert!(compact.exists());
+        assert!(!syncer.sync_once().await.unwrap());
+        std::fs::remove_file(&compact).unwrap();
+        assert!(
+            syncer.sync_once().await.unwrap(),
+            "backfill triggers publication"
+        );
+        assert!(compact.exists());
+        assert!(!syncer.sync_once().await.unwrap());
+        // Re-pull the same source files: pruning must retain derived exports.
+        std::fs::remove_file(root.join("version.json")).unwrap();
+        assert!(syncer.sync_once().await.unwrap());
+        assert!(compact.exists());
         server.abort();
         std::fs::remove_dir_all(root).unwrap();
     }
