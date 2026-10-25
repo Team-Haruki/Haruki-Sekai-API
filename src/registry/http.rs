@@ -125,14 +125,16 @@ fn json<T: serde::Serialize>(value: &T) -> Response {
 
 /// Health, shaped for an external monitor: `status` is `degraded` (never a
 /// non-200, so a monitor can still read the body) when a region's mirror push
-/// failed. A failed push is otherwise silent — publishing continues and the
-/// mirror simply stops moving.
+/// failed or has not been checked since startup. Publishing continues while
+/// the mirror is pending, so HTTP availability alone cannot verify it.
 async fn health(State(registry): State<Shared>) -> Response {
     let mut regions = serde_json::Map::new();
     let mut problems: Vec<String> = Vec::new();
     for region in registry.regions() {
         let current = registry.state.current(region).await.ok().flatten();
-        let git = registry.syncers.get(&region).and_then(|s| s.git_state());
+        let syncer = registry.syncers.get(&region);
+        let git = syncer.and_then(|s| s.git_state());
+        let pending = syncer.is_some_and(|s| s.git_push_pending());
         if let Some(state) = git.as_ref() {
             if !state.ok {
                 problems.push(format!(
@@ -142,6 +144,11 @@ async fn health(State(registry): State<Shared>) -> Response {
                     state.reason.map(|r| r.as_str()).unwrap_or("unknown")
                 ));
             }
+        } else if pending {
+            problems.push(format!(
+                "{} git mirror has not been checked since startup",
+                region.as_str()
+            ));
         }
         regions.insert(
             region.as_str().to_string(),
@@ -150,6 +157,7 @@ async fn health(State(registry): State<Shared>) -> Response {
                 "publishedAt": current.as_ref().map(|m| m.generated_at.clone()),
                 "synced": registry.syncers.contains_key(&region),
                 "gitPush": git,
+                "gitPending": pending,
             }),
         );
     }
@@ -1154,6 +1162,37 @@ mod tests {
             status,
             serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null),
         )
+    }
+
+    #[tokio::test]
+    async fn health_marks_enabled_mirrors_pending_until_the_first_check() {
+        let root = temp_dir();
+        let mut config = base_config(&root, "secret");
+        config
+            .servers
+            .get_mut(&ServerRegion::Jp)
+            .unwrap()
+            .master_sync
+            .source_url = "http://127.0.0.1:1".into();
+        for enabled in [false, true] {
+            config.git.enabled = enabled;
+            let syncers = build_syncers(&config, &HashMap::new(), None, &HashMap::new());
+            let registry = Arc::new(Registry::new(Arc::new(config.clone()), syncers));
+            let response = health(State(registry)).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(body["status"], if enabled { "degraded" } else { "ok" });
+            assert_eq!(body["regions"]["jp"]["gitPending"], enabled);
+            assert!(body["regions"]["jp"]["gitPush"].is_null());
+            assert_eq!(
+                body["problems"].as_array().unwrap().len(),
+                usize::from(enabled)
+            );
+        }
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]

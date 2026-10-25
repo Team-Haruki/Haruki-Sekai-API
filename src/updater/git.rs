@@ -205,14 +205,17 @@ impl GitHelper {
         // the push was rejected, the error was logged, and the caller carried on
         // publishing as if the mirror had moved.
         let branch = self.current_branch(repo_path)?;
-        self.check_remote_not_ahead(repo_path, &branch)?;
+        let remote_tip = self.check_remote_not_ahead(repo_path, &branch)?;
 
         if !self.has_changes(repo_path)? {
-            if !self.has_unpushed_commits(repo_path)? {
+            // Only a freshly fetched tip proves there is nothing to push.
+            // Tracking refs may be stale or absent; a failed fetch must still
+            // attempt a push so an offline mirror cannot be marked healthy.
+            if remote_tip.is_some() && remote_tip == self.rev_parse(repo_path, "HEAD") {
                 info!("No changes to commit or push");
                 return Ok(false);
             }
-            info!("Found unpushed commits");
+            info!("Reconciling local commits with the remote");
         } else {
             self.stage_all(repo_path)?;
             let commit_msg = format!("Sekai master data version {}", data_version);
@@ -253,7 +256,11 @@ impl GitHelper {
     ///
     /// A fetch failure (offline, dead proxy) is NOT treated as divergence — the
     /// push is attempted and will surface its own error.
-    fn check_remote_not_ahead(&self, repo_path: &str, branch: &str) -> Result<(), AppError> {
+    fn check_remote_not_ahead(
+        &self,
+        repo_path: &str,
+        branch: &str,
+    ) -> Result<Option<String>, AppError> {
         let mut cmd = self.git(repo_path);
         self.with_http_options(&mut cmd);
         cmd.args(["fetch", "--quiet", "origin", branch])
@@ -262,7 +269,7 @@ impl GitHelper {
             Ok(output) => output,
             Err(e) => {
                 warn!("{e}; pushing anyway");
-                return Ok(());
+                return Ok(None);
             }
         };
         if !fetched.status.success() {
@@ -270,7 +277,7 @@ impl GitHelper {
                 "git fetch failed before push ({}); pushing anyway",
                 self.redact(String::from_utf8_lossy(&fetched.stderr).trim())
             );
-            return Ok(());
+            return Ok(None);
         }
 
         // FETCH_HEAD is the remote tip we just read; an ancestor of HEAD means we
@@ -281,7 +288,7 @@ impl GitHelper {
             .output()
             .map_err(|e| AppError::NetworkError(format!("Failed to run git merge-base: {}", e)))?;
         if ancestor.status.success() {
-            return Ok(());
+            return Ok(self.rev_parse(repo_path, "FETCH_HEAD"));
         }
         let remote = self.rev_parse(repo_path, "FETCH_HEAD").unwrap_or_default();
         let local = self.rev_parse(repo_path, "HEAD").unwrap_or_default();
@@ -395,23 +402,6 @@ reconcile the mirror by hand — no commit was made and nothing was pushed",
         Ok(!output.stdout.is_empty())
     }
 
-    fn has_unpushed_commits(&self, repo_path: &str) -> Result<bool, AppError> {
-        // Errors when there's no upstream or HEAD is unborn — both mean "nothing to push".
-        let output = self
-            .git(repo_path)
-            .args(["rev-list", "--count", "@{u}..HEAD"])
-            .output()
-            .map_err(|e| AppError::NetworkError(format!("Failed to run git rev-list: {}", e)))?;
-        if !output.status.success() {
-            return Ok(false);
-        }
-        let count: u32 = String::from_utf8_lossy(&output.stdout)
-            .trim()
-            .parse()
-            .unwrap_or(0);
-        Ok(count > 0)
-    }
-
     fn stage_all(&self, repo_path: &str) -> Result<(), AppError> {
         let mut cmd = self.git(repo_path);
         cmd.args(["add", "-A"]);
@@ -485,14 +475,12 @@ reconcile the mirror by hand — no commit was made and nothing was pushed",
 
         self.run_networked(cmd, "push")?;
 
-        // Pushing to a credential-injected URL never advances the tracking ref,
-        // so `@{u}..HEAD` would keep reporting the commit we just delivered as
-        // unpushed and every later tick would push again. Advance it ourselves.
+        // Pushing to a credential-injected URL never advances the tracking ref.
+        // Keep it current for operators and other git commands too.
         //
         // A failure here is deliberately NOT fatal: the commit is already on the
         // remote, so failing the call would report a delivered push as failed and
-        // trip the health alert. The cost of a stale tracking ref is one
-        // redundant (and now fetch-checked) push on the next tick.
+        // trip the health alert. Reconciliation uses a fresh fetch either way.
         if let Some(head) = self.rev_parse(repo_path, "HEAD") {
             let updated = self
                 .git(repo_path)
@@ -888,6 +876,13 @@ mod tests {
             String::from_utf8_lossy(&tracked.stdout).trim(),
             run_git_out(&["-C", work.to_str().unwrap(), "rev-parse", "HEAD"]).trim()
         );
+
+        // A clean worktree and an up-to-date tracking ref do not prove that an
+        // unreachable remote is still current. Verification must fail closed.
+        let offline = root.join("offline.git");
+        std::fs::rename(&remote, &offline).unwrap();
+        assert!(git.push_changes(work.to_str().unwrap(), "1.0.1").is_err());
+        std::fs::rename(&offline, &remote).unwrap();
 
         // A commit made directly on the mirror must stop the next push instead of
         // stacking an unpushable commit — and must leave the change uncommitted.

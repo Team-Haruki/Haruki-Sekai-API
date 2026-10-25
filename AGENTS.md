@@ -56,8 +56,8 @@ src/
                              app-hash polling settings are ignored
     master.rs              – MasterUpdater: version check, download, git push, DB ingest
     sync.rs                – MasterSyncer: pull master bundles from an owner node
-                             (webhook-triggered, cron fallback); records the last git
-                             push outcome
+                             (webhook-triggered, cron fallback); reconciles git once
+                             after startup and retries failed pushes at the same version
     git.rs                 – GitHelper: stage, commit, push by running the `git` CLI
                              (wall-clock timeout, kills the process group on expiry);
                              fetches before every push and refuses to commit when the
@@ -237,7 +237,10 @@ haruki-sekai-configs.example.yaml – Configuration template
   PUT/DELETE at once, the owner's identity on the next refresh (its webhook, else the poll).
   Read the appVersion from `current` or `app`: a `manifests/{hash}` snapshot identifies a
   file set, and a CDN keeps the copy it first cached
-- `/health` reports `status: degraded` when the last git push failed
+- `/health` reports `status: degraded` when an enabled mirror has not been checked
+  since startup or its last git push failed (`gitPending: true`). The first sync
+  reconciles its existing git worktree even when the owner's version is unchanged;
+  only a fresh remote check or successful push clears pending state
 - CDN contract: pointers (`current`, `files/{name}`, `music_metas.json`, `app`) are
   `no-cache` + ETag; digest-addressed `blob/{sha256}` and `manifests/{hash}` are
   immutable — never serve changing bytes under a digest URL; their 404s/503s are `no-store`
