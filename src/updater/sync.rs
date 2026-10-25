@@ -142,27 +142,23 @@ impl MasterSyncer {
         let local = self.load_local_version().await;
         let need = need_sync(&remote, &local);
         let retry_ingest = !need && self.ingest_failed.load(Ordering::Relaxed);
-        // A failed push must be retried at the CURRENT version: the version file
-        // is persisted before the push, so without this the mirror would stay
-        // behind until some later upstream release happened to come along —
-        // exactly the freeze this change set exists to end.
-        let retry_push = !need && self.git_push_failed();
-        if !need && !retry_ingest && !retry_push {
+        if !need && !retry_ingest {
             self.follow_owner_app_identity(&remote).await?;
             let (changed, _) = self.ensure_compact_exports(None).await?;
-            if changed {
+            // The version is saved before pushing. After a crash the commit may
+            // still be local, even though the in-memory failure state was lost.
+            // Reconcile once after every start, then retry failures on each tick.
+            let pending = self.git_push_pending();
+            if pending {
+                info!(
+                    "{} Reconciling git mirror at the current version...",
+                    self.region.as_str().to_uppercase()
+                );
+            }
+            if changed || pending {
                 self.git_push(&local.data_version).await;
             }
             return Ok(changed);
-        }
-        if retry_push && !retry_ingest {
-            warn!(
-                "{} Previous git push failed; retrying at the current version...",
-                self.region.as_str().to_uppercase()
-            );
-            self.follow_owner_app_identity(&remote).await?;
-            self.git_push(&local.data_version).await;
-            return Ok(false);
         }
         if retry_ingest {
             warn!(
@@ -469,11 +465,10 @@ trigger): {e:#}",
         self.git_state.lock().clone()
     }
 
-    fn git_push_failed(&self) -> bool {
-        self.git_state
-            .lock()
-            .as_ref()
-            .is_some_and(|state| !state.ok)
+    /// An enabled mirror needs reconciliation until its first successful check
+    /// in this process, including when a previous process died during a push.
+    pub fn git_push_pending(&self) -> bool {
+        self.git_helper.is_some() && self.git_state.lock().as_ref().is_none_or(|state| !state.ok)
     }
 
     fn record_git_state(&self, ok: bool, reason: Option<GitPushFailure>) {
@@ -1034,22 +1029,137 @@ mod tests {
         drop(guard);
         syncer.ingest().await;
         assert!(syncer.git_state().is_none(), "no push attempted yet");
-        assert!(!syncer.git_push_failed());
+        assert!(!syncer.git_push_pending());
         syncer.git_push("2.0.0.1").await;
         // Without a git helper the push is a no-op and records nothing.
         assert!(syncer.git_state().is_none());
-
-        // A recorded failure makes the next trigger retry the push even though
-        // the version has not moved, and clears once the push lands.
-        syncer.record_git_state(false, Some(GitPushFailure::RemoteDiverged));
-        assert!(syncer.git_push_failed());
-        assert!(
-            !syncer.sync_once().await.unwrap(),
-            "retry pushes, applies nothing"
-        );
-        syncer.record_git_state(true, None);
-        assert!(!syncer.git_push_failed());
         server.abort();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn restarted_syncer_recovers_committed_and_dirty_mirrors_at_current_version() {
+        fn git(repo: &Path, args: &[&str]) -> String {
+            let output = std::process::Command::new("git")
+                .arg("-C")
+                .arg(repo)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8(output.stdout).unwrap()
+        }
+
+        fn syncer(config: &Config) -> Arc<MasterSyncer> {
+            build_syncers(config, &HashMap::new(), None, &HashMap::new())
+                .remove(&ServerRegion::Cn)
+                .unwrap()
+        }
+
+        let root = std::env::temp_dir().join(format!("haruki_sync_git_{}", uuid::Uuid::new_v4()));
+        let work = root.join("work");
+        let remote = root.join("remote.git");
+        let offline = root.join("offline.git");
+        std::fs::create_dir_all(work.join("master")).unwrap();
+        git(&root, &["init", "--bare", "-b", "main", "remote.git"]);
+        git(&work, &["init", "-b", "main"]);
+        git(
+            &work,
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+        );
+        std::fs::write(work.join("master/cards.json"), "[]").unwrap();
+        std::fs::write(
+            work.join("version.json"),
+            sonic_rs::to_vec(&version("1", 0)).unwrap(),
+        )
+        .unwrap();
+
+        let mut config: Config = serde_yaml::from_str("backend: {}").unwrap();
+        config.git.enabled = true;
+        config.git.username = "test".into();
+        config.git.email = "test@example.test".into();
+        let helper = GitHelper::new(&config.git, None);
+        helper.push_changes(work.to_str().unwrap(), "1").unwrap();
+        let old_head = git(&remote, &["rev-parse", "main"]);
+        let current = version("2", 0);
+        let (url, source) = spawn_sync_source(SyncReply {
+            version: sonic_rs::to_vec(&current).unwrap(),
+            bundle: bundle_bytes(&root, &current),
+        })
+        .await;
+        let mut settings: crate::config::ServerConfig = serde_yaml::from_str("{}").unwrap();
+        settings.master_dir = work.join("master").to_string_lossy().into_owned();
+        settings.version_path = work.join("version.json").to_string_lossy().into_owned();
+        settings.master_sync.source_url = url;
+        config.servers.insert(ServerRegion::Cn, settings);
+
+        // The bundle and version are saved, and a commit is created, but its
+        // push fails. The next process has only the repository to recover from.
+        std::fs::rename(&remote, &offline).unwrap();
+        let first = syncer(&config);
+        assert!(first.sync_once().await.unwrap());
+        assert!(first.git_push_pending());
+        assert!(!first.git_state().unwrap().ok);
+        assert_eq!(first.load_local_version().await.data_version, "2");
+        let pending_head = git(&work, &["rev-parse", "HEAD"]);
+        assert_ne!(pending_head, old_head);
+        assert!(git(&work, &["status", "--porcelain"]).is_empty());
+        drop(first);
+        source.abort();
+
+        // A same-version retry must not request a bundle: this source would
+        // return an invalid archive if the restart tried to download it again.
+        let (url, source) = spawn_sync_source(SyncReply {
+            version: sonic_rs::to_vec(&current).unwrap(),
+            bundle: Vec::new(),
+        })
+        .await;
+        config
+            .servers
+            .get_mut(&ServerRegion::Cn)
+            .unwrap()
+            .master_sync
+            .source_url = url;
+        let restarted = syncer(&config);
+        assert!(restarted.git_state().is_none());
+        assert!(restarted.git_push_pending());
+        assert!(!restarted.sync_once().await.unwrap());
+        assert!(!restarted.git_state().unwrap().ok, "offline is not healthy");
+        std::fs::rename(&offline, &remote).unwrap();
+        assert!(!restarted.sync_once().await.unwrap());
+        assert!(restarted.git_state().unwrap().ok);
+        assert!(!restarted.git_push_pending());
+        assert_eq!(git(&remote, &["rev-parse", "main"]), pending_head);
+        assert_eq!(git(&work, &["rev-parse", "HEAD"]), pending_head);
+
+        // Already delivered mirrors are checked once after restart without
+        // creating another commit or doing network git on every later tick.
+        let clean = syncer(&config);
+        assert!(!clean.sync_once().await.unwrap());
+        assert!(!clean.git_push_pending());
+        assert_eq!(git(&work, &["rev-parse", "HEAD"]), pending_head);
+        std::fs::rename(&remote, &offline).unwrap();
+        assert!(!clean.sync_once().await.unwrap());
+        assert!(clean.git_state().unwrap().ok);
+        std::fs::rename(&offline, &remote).unwrap();
+
+        // A crash before the commit is recoverable too: the version may already
+        // be current while the updated master files are still uncommitted.
+        std::fs::write(work.join("master/cards.json"), "[{\"id\":2}]").unwrap();
+        let dirty = syncer(&config);
+        assert!(!dirty.sync_once().await.unwrap());
+        assert!(!dirty.git_push_pending());
+        assert_ne!(git(&work, &["rev-parse", "HEAD"]), pending_head);
+        assert_eq!(
+            git(&remote, &["show", "main:master/cards.json"]),
+            "[{\"id\":2}]"
+        );
+        assert!(git(&work, &["status", "--porcelain"]).is_empty());
+        source.abort();
         std::fs::remove_dir_all(root).unwrap();
     }
 
