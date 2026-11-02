@@ -1501,6 +1501,7 @@ dependencies = [
  "cbc 0.2.1",
  "chrono",
  "cipher 0.5.2",
+ "croner",
  "figment",
  "flate2",
  "futures",

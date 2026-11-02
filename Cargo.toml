@@ -63,6 +63,8 @@ tower = { version = "0.5", features = ["util"] }
 bytes = "1"
 
 [dev-dependencies]
+# Parses the scheduler's cron expressions the way tokio-cron-scheduler does.
+croner = "3"
 # Keepalive getters for the `server` unit test (not available on Windows).
 socket2 = { version = "0.6", features = ["all"] }
 
