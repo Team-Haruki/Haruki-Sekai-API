@@ -123,8 +123,10 @@ async fn closes_connections_that_stay_idle() -> anyhow::Result<()> {
     let server = start().await?;
 
     // Never sends a request.
-    let mut silent = TcpStream::connect(server.addr).await?;
+    // Taken before connecting: the server may start its timer before this
+    // task resumes from `connect`.
     let started = Instant::now();
+    let mut silent = TcpStream::connect(server.addr).await?;
     let mut buf = [0u8; 256];
     let n = tokio::time::timeout(Duration::from_secs(5), silent.read(&mut buf)).await??;
     let response = String::from_utf8_lossy(&buf[..n]);
