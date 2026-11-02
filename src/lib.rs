@@ -8,6 +8,7 @@ pub mod ingest;
 pub mod ingest_engine;
 pub mod models;
 pub mod registry;
+pub mod server;
 pub mod updater;
 pub mod upstream;
 pub mod utils;

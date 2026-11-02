@@ -14,6 +14,7 @@ use haruki_sekai_api::db;
 use haruki_sekai_api::registry::blobs::open_blob_store;
 use haruki_sekai_api::registry::state::RegistryState;
 use haruki_sekai_api::registry::{http, Registry};
+use haruki_sekai_api::server;
 use haruki_sekai_api::updater::sync::build_syncers;
 
 #[path = "../logging.rs"]
@@ -86,13 +87,12 @@ async fn main() -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
     info!("Registry listening on {}", addr);
     let app = http::router(registry);
-    axum::serve(listener, app)
-        .with_graceful_shutdown(async {
-            if let Err(e) = tokio::signal::ctrl_c().await {
-                error!("Failed to listen for shutdown signal: {}", e);
-            }
-            info!("Shutdown signal received");
-        })
-        .await?;
+    server::serve(listener, app, async {
+        if let Err(e) = tokio::signal::ctrl_c().await {
+            error!("Failed to listen for shutdown signal: {}", e);
+        }
+        info!("Shutdown signal received");
+    })
+    .await;
     Ok(())
 }

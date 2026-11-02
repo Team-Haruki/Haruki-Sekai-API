@@ -13,6 +13,11 @@ futures = "0.3"
 tar = "0.4"
 zstd = "0.14"
 axum = { version = "0.8", features = ["macros"] }
+# Own HTTP/1 accept loop (`server.rs`): axum::serve exposes neither TCP
+# keepalive on accepted sockets nor hyper's header-read timeout.
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio", "server", "server-graceful", "service", "http1"] }
+socket2 = "0.6"
 tower-http = { version = "0.7", features = ["cors", "trace", "compression-gzip", "compression-zstd"] }
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "gzip", "brotli", "zstd", "query", "http2"] }
 sonic-rs = "0.5"
@@ -56,6 +61,10 @@ flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
 # bench_stages drives the router in-process.
 tower = { version = "0.5", features = ["util"] }
 bytes = "1"
+
+[dev-dependencies]
+# Keepalive getters for the `server` unit test (not available on Windows).
+socket2 = { version = "0.6", features = ["all"] }
 
 [profile.release]
 lto = "thin"
