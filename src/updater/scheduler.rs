@@ -10,7 +10,10 @@ use super::sync::MasterSyncer;
 use crate::client::SekaiClient;
 use crate::config::{Config, ServerRegion};
 
-const DEFAULT_COOKIE_REFRESH_CRON: &str = "0 0 */20 * * *";
+/// UTC, every 8 h at half past (01:30, 09:30, 17:30). The previous `0 0 */20 * * *`
+/// fired at 00:00 and 20:00 (a 20 h then 4 h gap), on the full hour when upstream
+/// connections are busiest.
+const DEFAULT_COOKIE_REFRESH_CRON: &str = "0 30 1,9,17 * * *";
 
 type ClientMap = HashMap<ServerRegion, Arc<SekaiClient>>;
 type VersionLocks = HashMap<ServerRegion, Arc<tokio::sync::Mutex<()>>>;
@@ -446,6 +449,30 @@ mod tests {
         .await;
         drop(scheduler);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cookie_refresh_runs_every_eight_hours_off_the_hour() {
+        use chrono::{Duration, TimeZone, Timelike, Utc};
+        let cron = croner::parser::CronParser::builder()
+            .seconds(croner::parser::Seconds::Required)
+            .build()
+            .parse(DEFAULT_COOKIE_REFRESH_CRON)
+            .unwrap();
+        let mut tick = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        let mut ticks = Vec::new();
+        for _ in 0..6 {
+            tick = cron.find_next_occurrence(&tick, false).unwrap();
+            ticks.push(tick);
+        }
+        assert_eq!(
+            ticks
+                .iter()
+                .map(|t| (t.hour(), t.minute()))
+                .collect::<Vec<_>>(),
+            vec![(1, 30), (9, 30), (17, 30), (1, 30), (9, 30), (17, 30)]
+        );
+        assert!(ticks.windows(2).all(|w| w[1] - w[0] == Duration::hours(8)));
     }
 
     #[tokio::test]
