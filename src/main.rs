@@ -11,6 +11,7 @@ use haruki_sekai_api::client::SekaiClient;
 use haruki_sekai_api::config::{Config, ServerRegion};
 use haruki_sekai_api::db;
 use haruki_sekai_api::error::AppError;
+use haruki_sekai_api::server;
 use haruki_sekai_api::updater;
 use haruki_sekai_api::upstream::RegionRouter;
 
@@ -72,9 +73,7 @@ async fn main() -> anyhow::Result<()> {
     .expect("Invalid address");
     info!("Starting HTTP server at {}", addr);
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    server::serve(listener, app, shutdown_signal()).await;
     info!("Server shutdown complete");
     Ok(())
 }

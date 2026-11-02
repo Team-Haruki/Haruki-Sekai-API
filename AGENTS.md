@@ -24,6 +24,8 @@ src/
                              mapping hash, staged upsert/delete of a file, raw rows
     registry_client.rs     – current / blob fetch with retries and streamed SHA-256 check
     http.rs                – /health, publish webhook, allow-shrink
+  server.rs                – Shared HTTP/1 accept loop of every listening binary: TCP
+                             keepalive, header-read (idle) timeout, graceful shutdown
   upstream.rs              – RegionRouter: multi-upstream routing with priority-ordered
                              targets (local client + remote Haruki nodes), circuit breakers
   api/
@@ -109,6 +111,8 @@ Data/registry/             – Default `registry.state_dir` (runtime, git-ignore
 Data/structures/           – Committed Nuverse schema assets (nuverse_schema_bundle.json,
                              *.avsc; versioned copies under 6.0.0/ and 6.4.0/)
 tests/ingest_memory.rs     – Peak-heap integration test of a registry ingest (PostgreSQL-gated)
+tests/http_server.rs       – Integration test of the shared server loop (idle close,
+                             long streamed responses, graceful shutdown)
 tools/generate_mysekai_followups.py – Generates MySekai follow-up models from an il2cpp
                              dump (see docs/mysekai-followups.md); tested by CI (Python tools)
 schema_info.json           – Authoritative DB schema used by ingest engine
@@ -294,6 +298,10 @@ haruki-sekai-configs.example.yaml – Configuration template
   cost of the allocation-heavy msgpack -> JSON decode); keep it when adding a `bin`.
   The image sets `MIMALLOC_ARENA_EAGER_COMMIT=0` (idle RSS +2 MB instead of +12 MB)
 - Axum for HTTP, SeaORM for database, tracing for logging
+- Serve through `server::serve`, never `axum::serve`: it enables TCP keepalive on accepted
+  sockets and an HTTP/1 header-read timeout (also the idle timeout between requests), so
+  half-open connections cannot pile up until the process runs out of file descriptors.
+  Never add a total-request timeout: the registry and the API stream long responses
 - sonic-rs for fast JSON, serde_json when key order matters
 
 ### Error Handling

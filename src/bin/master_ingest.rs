@@ -10,6 +10,7 @@ use tracing::{error, info, warn};
 
 use haruki_sekai_api::config::Config;
 use haruki_sekai_api::ingest::{self, Ingester};
+use haruki_sekai_api::server;
 
 #[path = "../logging.rs"]
 mod logging;
@@ -66,13 +67,12 @@ async fn main() -> anyhow::Result<()> {
     let addr: SocketAddr = ingester.config.listen.parse()?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
     info!("Ingest listening on {}", addr);
-    axum::serve(listener, ingest::http::router(ingester))
-        .with_graceful_shutdown(async {
-            if let Err(e) = tokio::signal::ctrl_c().await {
-                error!("Failed to listen for shutdown signal: {}", e);
-            }
-            info!("Shutdown signal received");
-        })
-        .await?;
+    server::serve(listener, ingest::http::router(ingester), async {
+        if let Err(e) = tokio::signal::ctrl_c().await {
+            error!("Failed to listen for shutdown signal: {}", e);
+        }
+        info!("Shutdown signal received");
+    })
+    .await;
     Ok(())
 }
