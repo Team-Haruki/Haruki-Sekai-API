@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use parking_lot::Mutex;
@@ -10,6 +11,9 @@ pub struct AccountSession {
     pub session_token: Arc<Mutex<Option<String>>>,
     api_lock: Arc<tokio::sync::Mutex<()>>,
     login_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Set when the session must log in before its next call: it never logged
+    /// in, or its token was minted on an egress route the region has left.
+    needs_login: Arc<AtomicBool>,
 }
 
 impl AccountSession {
@@ -19,7 +23,27 @@ impl AccountSession {
             session_token: Arc::new(Mutex::new(None)),
             api_lock: Arc::new(tokio::sync::Mutex::new(())),
             login_lock: Arc::new(tokio::sync::Mutex::new(())),
+            needs_login: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Stable identity of this account for the lifetime of the session set.
+    pub fn key(&self) -> usize {
+        Arc::as_ptr(&self.account) as *const () as usize
+    }
+
+    /// Drop the token and require a login before the next call.
+    pub fn invalidate(&self) {
+        self.set_session_token(None);
+        self.needs_login.store(true, Ordering::Release);
+    }
+
+    pub fn needs_login(&self) -> bool {
+        self.needs_login.load(Ordering::Acquire)
+    }
+
+    pub fn mark_logged_in(&self) {
+        self.needs_login.store(false, Ordering::Release);
     }
 
     pub fn user_id(&self) -> String {
@@ -107,6 +131,16 @@ mod tests {
         assert!(!session.try_reserve());
         drop(login_guard);
         drop(api_guard);
+
+        assert_eq!(session.key(), session.clone().key());
+        assert_ne!(session.key(), dummy_session().key());
+        session.set_session_token(Some("token".to_string()));
+        assert!(!session.needs_login());
+        session.invalidate();
+        assert!(session.needs_login());
+        assert_eq!(session.get_session_token(), None);
+        session.mark_logged_in();
+        assert!(!session.needs_login());
 
         let dumped = session.dump_account().unwrap();
         let restored: serde_json::Value = rmp_serde::from_slice(&dumped).unwrap();

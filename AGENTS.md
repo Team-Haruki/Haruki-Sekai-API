@@ -26,6 +26,8 @@ src/
     http.rs                – /health, publish webhook, allow-shrink
   server.rs                – Shared HTTP/1 accept loop of every listening binary: TCP
                              keepalive, header-read (idle) timeout, graceful shutdown
+  relay.rs                 – Egress relay (`egress_relay` binary): token-gated CONNECT
+                             tunnel to allowlisted game hosts, nothing else
   upstream.rs              – RegionRouter: multi-upstream routing with priority-ordered
                              targets (local client + remote Haruki nodes), circuit breakers
   api/
@@ -36,9 +38,12 @@ src/
                              thumbnails, custom music score) via RegionRouter
     internal.rs            – Node-to-node /internal/* API (sekai-api relay, login probe,
                              game byte stream, master version/bundle, update webhook,
-                             app-identity push); gated by backend.internal_token
+                             app-identity push, egress status/switch, account
+                             push); gated by backend.internal_token
   client/
     sekai_client.rs        – Core game client (login, encrypted API calls, retry)
+    egress.rs              – EgressPool: per-region egress routes, differential
+                             standby probe, login gate, failback
     account.rs             – CP and Nuverse account types, SekaiAccount trait
     session.rs             – AccountSession with per-account API locking
     helper.rs              – CookieHelper, VersionHelper, version comparison
@@ -57,6 +62,8 @@ src/
                              remote-account), master sync poll; warns that the old
                              app-hash polling settings are ignored
     master.rs              – MasterUpdater: version check, download, git push, DB ingest
+    account_sync.rs        – Master-side account push to standby nodes
+                             (`account_sync.peers`): startup, account reload, 10 min
     sync.rs                – MasterSyncer: pull master bundles from an owner node
                              (webhook-triggered, cron fallback); reconciles git once
                              after startup and retries failed pushes at the same version
@@ -90,6 +97,7 @@ src/
     run_ingest.rs          – Standalone CLI for master data ingestion
     master_registry.rs     – Master data manager (registry), runs on the same config file
     master_ingest.rs       – Registry-driven ingest role (`ingest` config section)
+    egress_relay.rs        – Egress relay role (`egress_relay` config section)
     bench_profile.rs       – Per-stage latency benchmark for the profile proxy path
     bench_stages.rs        – Offline per-stage CPU / allocation profile of the proxy
                              path on a captured response body (no accounts needed)
@@ -132,10 +140,76 @@ haruki-sekai-configs.example.yaml – Configuration template
    an open circuit breaker
 2. Local target: select account session (round-robin), serialize request body →
    MessagePack → AES-128-CBC encrypt, send HTTP with session token + headers
+   through the region's active egress route (see "Egress Failover")
 3. Remote target: forward via the peer's `POST /internal/sekai-api` (the peer
    executes on its local client only, so forwarding cannot loop)
 4. Receive encrypted response → AES decrypt → MessagePack → JSON
 5. Return ordered JSON to API caller
+
+### Egress Failover (`client/egress.rs`)
+Accounts, sessions and keys live on one node; `servers.<region>.egress` lists the ways
+out to the game server (direct, or an HTTP CONNECT proxy on another node), first =
+primary. Only game API host traffic follows the active route; CDN downloads and public
+thumbnails keep the node's default client. Rules to keep when touching this code:
+
+- The verdict is a differential probe, never a status-code table (a blocked IP and a
+  stale app identity both surface as 403/426/5xx). After consecutive route-level
+  failures (failed logins, or game calls with no HTTP response) across accounts, the
+  same account logs in through up to two standbys: success there switches the region;
+  failure everywhere closes the **login gate** (logins fail fast, one probe per
+  backoff, 30 s doubling to 5 min) and rests the standbys for 30 min
+- A relogin that succeeds but is followed by the same rejection is futile: a request
+  relogins at most once per error kind, and repeated futility closes the gate until a
+  game call works. `apply_version` with a new app identity and `reload_accounts` reset
+  the gate, so a pushed app identity recovers at once
+- After a 426 relogin, `adopt_login_versions` reads the new data/asset versions (Nuverse
+  6.4+ logins carry none, so from the login metadata endpoint). Without it a data update
+  loops: 426, relogin, 426. That loop (about five logins a second) is what got an egress
+  IP refused on 2026-11-12
+- Recoveries re-read the version file on every 426, and the file lags a data update by
+  minutes. `apply_version` therefore moves the data/asset headers only when the file's
+  values changed since they were last applied (`applied_version`; `VersionHelper::load`
+  already stores what it reads, so it cannot be the "before" side). Never let a file
+  re-read take back versions a login supplied
+- A recovery gets the `Sent` snapshot of the failed call (token and data version, read
+  under the api lock in `send_api`). If either has changed since, another request did the
+  work and the call just retries. Only a relogin the request itself performed can count
+  as futile
+- Call failures (no HTTP response) and login failures are separate streaks. Any HTTP
+  answer clears the call streak; a login that never reached the game (`NetworkError`)
+  never closes the gate; on a single-route region call failures are not counted at all
+- Lock order is `login_lock` then `api_lock` wherever both are held (`egress_tick`, the
+  metadata fetch inside a recovery). No parking_lot guard is held across an `.await`
+- A switch invalidates every other session (`needs_login`); they log in through the
+  new route before their next call. Tokens are never reused across routes
+- `reload_accounts` drops an account only when another account logged in and its own
+  error is not transient. When every login fails the accounts are kept: the cause is
+  the route or the identity, and an empty pool would need a restart
+- Failback (`egress_failback: auto`) probes the primary with one login every 30 min,
+  doubling to 6 h; `PUT /internal/egress {server, egress?, hold?}` switches or holds a
+  route without a restart, `GET /internal/egress` reports every region
+- `/health` lists local regions (`sessions`, `egress`, `primary`, `gated`,
+  `lastSuccessAt`) and reports `status: degraded` when one has no sessions or is gated
+
+### Egress Relay and Standby Nodes
+See `docs/failover.md` for the three roles and their config. Rules:
+
+- The relay (`src/relay.rs`) is deliberately not a general proxy: CONNECT only, exact
+  `host:port` allowlist (port 443 unless an entry names one), token as the Basic
+  password, nothing logged about tunnel contents. TLS is end to end, so a relay holds
+  no accounts, keys or tokens. Keep it that way: no plain-HTTP forwarding, no wildcards
+- A route URL can carry the relay token (`http://relay:<token>@host:9996`); never log a
+  route URL, only its `name`
+- Accounts move in one direction only: the master pushes its whole set to
+  `account_sync.peers` (`POST /internal/accounts`). There is no endpoint that returns
+  credentials, so a leaked internal token cannot be used to read accounts. Never log
+  account JSON
+- A standby (`account_sync.receive`) loads only `<account_dir>/synced-accounts.json`
+  (owner-only, written atomically), ignores other account files, and does not log in at
+  load: the same account logged in on two nodes displaces the other's session. Its
+  sessions log in on first use, which happens only when its router cannot hand the call
+  to the master (`upstreams` entry with a priority below `local_priority`)
+- An empty pushed set and a set with an invalid account are refused whole
 
 ### Multi-Node Topology
 - `backend.internal_token` gates all `/internal/*` node-to-node endpoints
@@ -364,6 +438,12 @@ cargo run --bin master_registry
 # Run the registry-driven ingest role (needs an `ingest` section)
 cargo run --bin master_ingest
 
+# Run the egress relay role (needs an `egress_relay` section)
+cargo run --bin egress_relay
+
+# Real HTTPS through a local relay with the egress client (needs outbound network)
+cargo test --lib relay -- --ignored
+
 # Tests, a single test, and the PostgreSQL-gated ones as CI runs them
 cargo test
 cargo test <test_name>
@@ -390,7 +470,7 @@ docker build --build-arg VERSION=v1.0.0 -t haruki-sekai-api .
 
 The Dockerfile is a cargo-chef multi-stage build (`rust:1.99-alpine` → `alpine:3.24`). The
 image contains `haruki-sekai-api` (the default command), `master_registry`, `master_ingest`,
-`run_ingest`, `schema_info.json` and `Data/structures`, and exposes 9999 (API,
+`egress_relay`, `run_ingest`, `schema_info.json` and `Data/structures`, and exposes 9999 (API,
 `backend.port`), 9998 (`registry.port`) and 9997 (`ingest.listen`, which defaults to
 `127.0.0.1:9997`). `git` is installed because `GitHelper` shells out to it.
 

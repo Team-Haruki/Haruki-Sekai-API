@@ -18,6 +18,7 @@ use crate::crypto::SekaiCryptor;
 use crate::error::{AppError, SekaiHttpStatus};
 
 use super::account::{AccountType, SekaiAccount, SekaiAccountCP, SekaiAccountNuverse};
+use super::egress::{EgressPool, EgressRoute, Evaluation, FailureKind};
 use super::helper::{effective_app_version, CookieHelper, VersionHelper, VersionInfo};
 use super::nuverse_schema::NuverseSchemaStore;
 use super::session::AccountSession;
@@ -32,10 +33,21 @@ pub struct SekaiClient {
     pub proxy: Option<String>,
     pub cryptor: SekaiCryptor,
     pub headers: Arc<Mutex<HashMap<String, String>>>,
+    /// The node's default HTTP client (top-level `proxy`), used for traffic
+    /// that is not the game API: CDN master downloads, public thumbnails.
     pub http_client: Client,
+    /// Routes to the game API host; requests go out through the active one.
+    pub egress: EgressPool,
 
     sessions: Arc<RwLock<Vec<Arc<AccountSession>>>>,
     session_index: AtomicUsize,
+    /// The version-file state last put into the headers. `VersionHelper`
+    /// cannot serve as the "before" side of a comparison: `load()` already
+    /// stores what it read.
+    applied_version: Mutex<VersionInfo>,
+    /// Signalled after every account reload; the account pusher
+    /// (`updater::account_sync`) waits on it.
+    accounts_changed: tokio::sync::Notify,
     /// Serializes cookie refresh (client-wide state) so concurrent requests that
     /// all observe expired cookies do not each hit the cookie service.
     cookie_lock: tokio::sync::Mutex<()>,
@@ -47,11 +59,7 @@ impl SekaiClient {
     /// cloned into each SekaiClient (reqwest::Client is Arc-internal; clones share
     /// the connection pool / TLS config).
     pub fn build_http_client(proxy: Option<&str>) -> Result<Client, AppError> {
-        let mut builder = Client::builder()
-            .timeout(Duration::from_secs(45))
-            .pool_max_idle_per_host(20)
-            .pool_idle_timeout(Duration::from_secs(90))
-            .tcp_keepalive(Duration::from_secs(60));
+        let mut builder = Self::http_client_builder();
         if let Some(proxy_url) = proxy {
             if !proxy_url.is_empty() {
                 builder =
@@ -64,6 +72,68 @@ impl SekaiClient {
         builder
             .build()
             .map_err(|e| AppError::NetworkError(e.to_string()))
+    }
+
+    fn http_client_builder() -> reqwest::ClientBuilder {
+        Client::builder()
+            .timeout(Duration::from_secs(45))
+            .pool_max_idle_per_host(20)
+            .pool_idle_timeout(Duration::from_secs(90))
+            .tcp_keepalive(Duration::from_secs(60))
+    }
+
+    /// HTTP client for one configured egress route: `""` leaves directly from
+    /// this node (proxy environment variables ignored), anything else is the
+    /// route's proxy URL. Unlike the default client it bounds the connect
+    /// phase, so a dead relay node is noticed in seconds, not after the full
+    /// request timeout.
+    pub fn build_egress_http_client(url: &str) -> Result<Client, AppError> {
+        let builder = Self::http_client_builder().connect_timeout(EGRESS_CONNECT_TIMEOUT);
+        let builder = if url.is_empty() {
+            builder.no_proxy()
+        } else {
+            // The URL may carry the relay token, so the error names no part of it.
+            builder.proxy(
+                reqwest::Proxy::all(url)
+                    .map_err(|_| AppError::NetworkError("Invalid egress proxy URL".to_string()))?,
+            )
+        };
+        builder
+            .build()
+            .map_err(|e| AppError::NetworkError(e.to_string()))
+    }
+
+    /// Build the region's egress pool. Without `egress` entries the region
+    /// keeps the single default route, which is the pre-failover behaviour.
+    fn build_egress_pool(
+        region: ServerRegion,
+        config: &ServerConfig,
+        default_client: &Client,
+    ) -> Result<EgressPool, AppError> {
+        if config.egress.is_empty() {
+            return Ok(EgressPool::single(region, default_client.clone()));
+        }
+        let mut routes: Vec<EgressRoute> = Vec::with_capacity(config.egress.len());
+        for (index, egress) in config.egress.iter().enumerate() {
+            let name = if egress.name.is_empty() {
+                format!("egress{index}")
+            } else {
+                egress.name.clone()
+            };
+            if routes.iter().any(|route| route.name == name) {
+                return Err(AppError::ParseError(format!(
+                    "{} egress name '{}' is used twice",
+                    region.as_str(),
+                    name
+                )));
+            }
+            let client = match egress.url.as_deref() {
+                None => default_client.clone(),
+                Some(url) => Self::build_egress_http_client(url)?,
+            };
+            routes.push(EgressRoute { name, client });
+        }
+        Ok(EgressPool::new(region, routes, config.egress_failback))
     }
 
     /// Load a Nuverse schema bundle from disk. Call once per distinct bundle path
@@ -99,6 +169,7 @@ impl SekaiClient {
         } else {
             None
         };
+        let egress = Self::build_egress_pool(region, &config, &http_client)?;
         let client = Self {
             region,
             config,
@@ -109,8 +180,11 @@ impl SekaiClient {
             cryptor,
             headers: Arc::new(Mutex::new(headers)),
             http_client,
+            egress,
             sessions: Arc::new(RwLock::new(Vec::new())),
             session_index: AtomicUsize::new(0),
+            applied_version: Mutex::new(VersionInfo::default()),
+            accounts_changed: tokio::sync::Notify::new(),
             cookie_lock: tokio::sync::Mutex::new(()),
         };
         Ok(client)
@@ -166,7 +240,13 @@ impl SekaiClient {
         let mut version = self.version_helper.load().await?;
         self.normalize_app_version(&mut version);
         self.version_helper.update(version.clone());
-        self.update_version_headers(&version);
+        self.update_version_headers(&version, true);
+        *self.applied_version.lock() = version;
+        if self.config.account_sync.receive && !self.config.account_dir.is_empty() {
+            // The directory may not exist before the first push, and the
+            // account watcher only starts on an existing directory.
+            fs::create_dir_all(&self.config.account_dir)?;
+        }
         self.reload_accounts().await
     }
 
@@ -186,12 +266,35 @@ impl SekaiClient {
         }
     }
 
-    fn update_version_headers(&self, version: &VersionInfo) {
+    /// Put a version-file state into the request headers. The app identity
+    /// always follows the file. The data/asset versions follow it only when
+    /// `data_too` is set (the file's values are new) or the header is missing:
+    /// a login may have supplied newer ones than a file the master pipeline
+    /// has not caught up on yet, and those must not be taken back.
+    fn update_version_headers(&self, version: &VersionInfo, data_too: bool) {
         let mut headers = self.headers.lock();
         headers.insert("X-App-Version".to_string(), version.app_version.clone());
-        headers.insert("X-Data-Version".to_string(), version.data_version.clone());
-        headers.insert("X-Asset-Version".to_string(), version.asset_version.clone());
         headers.insert("X-App-Hash".to_string(), version.app_hash.clone());
+        for (name, value) in [
+            ("X-Data-Version", &version.data_version),
+            ("X-Asset-Version", &version.asset_version),
+        ] {
+            if data_too || !headers.contains_key(name) {
+                headers.insert(name.to_string(), value.clone());
+            }
+        }
+    }
+
+    fn data_version_header(&self) -> Option<String> {
+        self.headers.lock().get("X-Data-Version").cloned()
+    }
+
+    /// Snapshot what the next call on `session` will be sent with.
+    fn sent(&self, session: &AccountSession) -> Sent {
+        Sent {
+            token: session.get_session_token(),
+            data_version: self.data_version_header(),
+        }
     }
 
     /// Login metadata only ever moves the data/asset version headers. The app
@@ -224,8 +327,21 @@ impl SekaiClient {
     /// state and the login headers, so the next request uses it.
     pub fn apply_version(&self, mut version: VersionInfo) {
         self.normalize_app_version(&mut version);
+        let previous = std::mem::replace(&mut *self.applied_version.lock(), version.clone());
+        if previous.app_version != version.app_version || previous.app_hash != version.app_hash {
+            // A new app identity invalidates whatever the login gate concluded
+            // about the old one.
+            self.egress.reset_gate();
+        }
+        // Recoveries re-read the file on every 426. While the file still says
+        // what it said last time, its data/asset versions are not news, and
+        // re-applying them would undo the versions another request's relogin
+        // just put in the headers (which restarts the 426/relogin cycle for
+        // every call in flight).
+        let data_changed = previous.data_version != version.data_version
+            || previous.asset_version != version.asset_version;
         self.version_helper.update(version.clone());
-        self.update_version_headers(&version);
+        self.update_version_headers(&version, data_changed);
     }
 
     pub async fn refresh_cookies(&self) -> Result<(), AppError> {
@@ -258,47 +374,36 @@ impl SekaiClient {
             );
         }
 
+        // The account set changed (or the node just started): give logins a
+        // fresh attempt regardless of what the gate concluded before.
+        self.egress.reset_gate();
+        let epoch_before = self.egress.epoch();
+
         // Log every account in concurrently, building the new session set off to
         // the side. The existing sessions keep serving traffic the whole time, so
         // there is no empty-pool window and no need to park inbound requests.
-        let login_futs = accounts.into_iter().filter_map(|account| {
-            if self.region.is_cp_server() && account.user_id().is_empty() {
-                warn!("{} Skipping account with empty user_id", region);
-                return None;
-            }
-            let region = region.clone();
-            Some(async move {
-                let session = Arc::new(AccountSession::new(account));
-                match self.login(&session).await {
-                    Ok(_) => Some(session),
-                    Err(e) if login_failure_is_transient(&e) => {
-                        // The failure indicts the route to the game server
-                        // (line down, maintenance, stale version/cookies), not
-                        // the account. Keep the session without a token: its
-                        // first request relogins through the SessionError
-                        // recovery path, so the pool heals itself when the
-                        // upstream comes back instead of staying empty until
-                        // the next account-file change or a restart.
-                        warn!(
-                            "{} Account #{} login failed transiently ({}), keeping for lazy relogin",
-                            region,
-                            session.user_id(),
-                            e
-                        );
-                        Some(session)
-                    }
-                    Err(e) => {
-                        error!("{} Failed to login account: {}", region, e);
-                        None
-                    }
-                }
-            })
-        });
-        let new_sessions: Vec<Arc<AccountSession>> = futures::future::join_all(login_futs)
-            .await
+        let candidates: Vec<Arc<AccountSession>> = accounts
             .into_iter()
-            .flatten()
+            .filter_map(|account| {
+                if self.region.is_cp_server() && account.user_id().is_empty() {
+                    warn!("{} Skipping account with empty user_id", region);
+                    return None;
+                }
+                Some(Arc::new(AccountSession::new(account)))
+            })
             .collect();
+        let new_sessions = if self.config.account_sync.receive {
+            // Standby: the master is logged in with these accounts, and a
+            // second login would displace its sessions. Stay logged out until
+            // a request actually needs an account.
+            for session in &candidates {
+                session.invalidate();
+            }
+            candidates
+        } else {
+            self.login_candidates(candidates, epoch_before, &region)
+                .await
+        };
 
         let count = new_sessions.len();
         {
@@ -307,7 +412,185 @@ impl SekaiClient {
             self.session_index.store(0, Ordering::SeqCst);
         }
         info!("{} Accounts reloaded, {} sessions active", region, count);
+        self.accounts_changed.notify_one();
         Ok(())
+    }
+
+    /// Log freshly loaded accounts in and decide which ones enter the pool.
+    async fn login_candidates(
+        &self,
+        candidates: Vec<Arc<AccountSession>>,
+        epoch_before: u64,
+        region: &str,
+    ) -> Vec<Arc<AccountSession>> {
+        let mut outcomes: Vec<Option<AppError>> = futures::future::join_all(
+            candidates
+                .iter()
+                .map(|session| async move { self.login(session).await.err() }),
+        )
+        .await;
+        if self.egress.epoch() != epoch_before {
+            // The egress moved while the reload was in flight: the failures
+            // were observed on the route just left, so retry them on the new
+            // one before judging the accounts.
+            outcomes = futures::future::join_all(candidates.iter().zip(outcomes).map(
+                |(session, outcome)| async move {
+                    match outcome {
+                        Some(_) => self.login(session).await.err(),
+                        None => None,
+                    }
+                },
+            ))
+            .await;
+        }
+
+        // An account is dropped only when its failure is its own: some other
+        // account logged in, and the error is not a transient one. When every
+        // login fails, the cause is the route or our app identity (a blocked
+        // egress IP answers 403 for all of them), so the accounts are kept
+        // without a token and log in on first use. Dropping them would leave
+        // the pool empty until the next account-file change or a restart.
+        let any_logged_in = outcomes.iter().any(Option::is_none);
+        let mut new_sessions: Vec<Arc<AccountSession>> = Vec::with_capacity(candidates.len());
+        for (session, outcome) in candidates.into_iter().zip(outcomes) {
+            match outcome {
+                None => new_sessions.push(session),
+                Some(e) if login_failure_is_transient(&e) || !any_logged_in => {
+                    warn!(
+                        "{} Account #{} login failed ({}), keeping for lazy relogin",
+                        region,
+                        session.user_id(),
+                        e
+                    );
+                    session.invalidate();
+                    new_sessions.push(session);
+                }
+                Some(e) => error!(
+                    "{} Failed to login account #{}: {}",
+                    region,
+                    session.user_id(),
+                    e
+                ),
+            }
+        }
+        new_sessions
+    }
+
+    /// Resolves after the next account reload.
+    pub async fn accounts_changed(&self) {
+        self.accounts_changed.notified().await;
+    }
+
+    /// The raw JSON objects of this node's account files, for pushing to
+    /// standby nodes. Holds credentials: never log the result.
+    pub fn export_accounts(&self) -> Result<Vec<JsonValue>, AppError> {
+        let account_dir = Path::new(&self.config.account_dir);
+        let mut accounts = Vec::new();
+        if !account_dir.exists() {
+            return Ok(accounts);
+        }
+        let mut paths: Vec<_> = fs::read_dir(account_dir)?
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().and_then(|e| e.to_str()) == Some("json"))
+            .collect();
+        // A stable order keeps the pushed bytes identical between runs, which
+        // is what lets the standby skip an unchanged set.
+        paths.sort();
+        for path in paths {
+            let value: JsonValue = match sonic_rs::from_slice(&fs::read(&path)?) {
+                Ok(value) => value,
+                Err(e) => {
+                    warn!("Skipping unparsable account file {}: {}", path.display(), e);
+                    continue;
+                }
+            };
+            let items = match value {
+                JsonValue::Array(items) => items,
+                JsonValue::Object(_) => vec![value],
+                _ => continue,
+            };
+            // Push exactly what this node would load itself. The standby
+            // refuses a set with one bad entry, so a stray object here must
+            // not freeze every standby's copy.
+            accounts.extend(items.into_iter().enumerate().filter_map(|(index, item)| {
+                let usable = item.is_object()
+                    && self
+                        .parse_account_value(item.clone(), &path, Some(index))
+                        .is_some_and(|parsed| !parsed.token().is_empty());
+                usable.then_some(item)
+            }));
+        }
+        Ok(accounts)
+    }
+
+    /// Store an account set pushed by the master (`POST /internal/accounts`)
+    /// as this region's only account file. Returns whether it differed from
+    /// what was stored; the account watcher picks the change up.
+    pub async fn import_accounts(&self, accounts: &[JsonValue]) -> Result<bool, AppError> {
+        if !self.config.account_sync.receive {
+            return Err(AppError::Forbidden(format!(
+                "{} does not accept pushed accounts on this node",
+                self.region.as_str()
+            )));
+        }
+        if accounts.is_empty() {
+            return Err(AppError::ParseError(
+                "refusing an empty account set".to_string(),
+            ));
+        }
+        for (index, account) in accounts.iter().enumerate() {
+            // An object with no credential deserializes too (every field has
+            // a default), so require the token the login is built from.
+            let valid = account.is_object()
+                && self
+                    .parse_account_value(account.clone(), Path::new("pushed"), Some(index))
+                    .is_some_and(|parsed| !parsed.token().is_empty());
+            if !valid {
+                return Err(AppError::ParseError(format!(
+                    "pushed account #{index} is not a {} account",
+                    self.region.as_str()
+                )));
+            }
+        }
+        let bytes = serde_json::to_vec(accounts)
+            .map_err(|e| AppError::ParseError(format!("account serialization: {}", e)))?;
+        let dir = Path::new(&self.config.account_dir);
+        let target = dir.join(SYNCED_ACCOUNTS_FILE);
+        if tokio::fs::read(&target)
+            .await
+            .is_ok_and(|current| current == bytes)
+        {
+            return Ok(false);
+        }
+        tokio::fs::create_dir_all(dir).await?;
+        // Credentials: the file is created owner-only before any byte is
+        // written, then renamed into place so a reload never sees half of it.
+        let tmp = dir.join(format!(".{}.tmp", Uuid::new_v4()));
+        let mut options = tokio::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        options.mode(0o600);
+        let mut file = options.open(&tmp).await?;
+        let written = async {
+            use tokio::io::AsyncWriteExt;
+            file.write_all(&bytes).await?;
+            file.flush().await?;
+            drop(file);
+            tokio::fs::rename(&tmp, &target).await
+        }
+        .await;
+        if let Err(e) = written {
+            let _ = tokio::fs::remove_file(&tmp).await;
+            return Err(e.into());
+        }
+        info!(
+            "{} Stored {} account(s) pushed by the master",
+            self.region.as_str().to_uppercase(),
+            accounts.len()
+        );
+        Ok(true)
     }
 
     pub fn start_file_watcher(self: Arc<Self>) -> Result<(), AppError> {
@@ -363,6 +646,18 @@ impl SekaiClient {
             })?;
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                continue;
+            }
+            if self.config.account_sync.receive
+                && path.file_name().and_then(|name| name.to_str()) != Some(SYNCED_ACCOUNTS_FILE)
+            {
+                // A standby serves the master's set only; a hand-copied file
+                // next to it would put the same account in the pool twice.
+                warn!(
+                    "{} Ignoring {}: this region only loads the pushed account set",
+                    self.region.as_str().to_uppercase(),
+                    path.display()
+                );
                 continue;
             }
             json_file_count += 1;
@@ -449,13 +744,49 @@ impl SekaiClient {
         Some(sessions[start].clone())
     }
 
+    pub fn session_count(&self) -> usize {
+        self.sessions.read().len()
+    }
+
+    /// Require every session except `keep` to log in again before its next
+    /// call. Used after an egress switch: a token minted on the old route is
+    /// not reused from the new IP.
+    fn invalidate_sessions_except(&self, keep: Option<&AccountSession>) {
+        for session in self.sessions.read().iter() {
+            if keep.is_none_or(|kept| kept.key() != session.key()) {
+                session.invalidate();
+            }
+        }
+    }
+
+    /// Log a session in before use when it has no usable token (kept through
+    /// a failed reload, or invalidated by an egress switch).
+    async fn ensure_logged_in(&self, session: &AccountSession) -> Result<(), AppError> {
+        if !session.needs_login() {
+            return Ok(());
+        }
+        let _guard = session.lock_login().await;
+        if !session.needs_login() {
+            return Ok(());
+        }
+        self.login(session).await.map(|_| ()).map_err(|e| {
+            error!(
+                "{} Login before first use failed: {}",
+                self.region.as_str().to_uppercase(),
+                e
+            );
+            AppError::SessionError
+        })
+    }
+
     fn prepare_request(
         &self,
+        http: &Client,
         session: &AccountSession,
         method: reqwest::Method,
         url: &str,
     ) -> reqwest::RequestBuilder {
-        let mut req = self.http_client.request(method, url);
+        let mut req = http.request(method, url);
         let headers = self.headers.lock();
         for (k, v) in headers.iter() {
             if k.to_lowercase() != "x-request-id" {
@@ -506,7 +837,27 @@ impl SekaiClient {
         params: Option<&HashMap<String, String>>,
         request_timeout: Option<Duration>,
     ) -> Result<Response, AppError> {
-        let _lock = session.lock_api().await;
+        self.send_api(session, method, path, data, params, request_timeout)
+            .await
+            .map(|(response, _sent)| response)
+    }
+
+    /// Send one game API call and report what it was sent with (token and
+    /// data version, read under the account's api lock, so they are exactly
+    /// what went out even when the call queued behind others).
+    async fn send_api<T: serde::Serialize>(
+        &self,
+        session: &AccountSession,
+        method: reqwest::Method,
+        path: &str,
+        data: Option<&T>,
+        params: Option<&HashMap<String, String>>,
+        request_timeout: Option<Duration>,
+    ) -> Result<(Response, Sent), AppError> {
+        self.ensure_logged_in(session).await?;
+        let api_guard = session.lock_api().await;
+        let sent = self.sent(session);
+        let (epoch, http) = self.egress.active();
         let user_id = session.user_id();
         let url = format!("{}/api{}", self.config.api_url, path).replace("{userId}", &user_id);
         info!("Account #{} {} {}", user_id, method, path);
@@ -520,18 +871,17 @@ impl SekaiClient {
         };
         let mut last_error = None;
         for attempt in 1..=max_attempts {
-            let request = self.build_api_request(
-                session,
-                method.clone(),
-                &url,
+            let request = Self::build_api_request(
+                self.prepare_request(&http, session, method.clone(), &url),
                 params,
                 packed.as_ref(),
                 request_timeout,
             );
             match request.send().await {
                 Ok(resp) => {
+                    self.egress.note_route_alive(epoch);
                     self.update_session_token(session, &resp);
-                    return Ok(resp);
+                    return Ok((resp, sent));
                 }
                 Err(e) => {
                     self.log_request_error(&e, &user_id, attempt, max_attempts);
@@ -542,21 +892,20 @@ impl SekaiClient {
                 tokio::time::sleep(Duration::from_secs(1)).await;
             }
         }
-        Err(last_error.unwrap_or(AppError::NetworkError(
+        let error = last_error.unwrap_or(AppError::NetworkError(
             "Request failed after retries".to_string(),
-        )))
+        ));
+        drop(api_guard);
+        self.handle_route_failure(session, epoch, &error).await;
+        Err(error)
     }
 
     fn build_api_request(
-        &self,
-        session: &AccountSession,
-        method: reqwest::Method,
-        url: &str,
+        mut request: reqwest::RequestBuilder,
         params: Option<&HashMap<String, String>>,
         body: Option<&Vec<u8>>,
         timeout: Option<Duration>,
     ) -> reqwest::RequestBuilder {
-        let mut request = self.prepare_request(session, method, url);
         if let Some(timeout) = timeout {
             request = request.timeout(timeout);
         }
@@ -723,7 +1072,179 @@ impl SekaiClient {
             .await
     }
 
+    /// Log `session` in through the active egress route.
+    ///
+    /// Fails fast while the login gate is closed. A failure that indicts the
+    /// route (see `client::egress`) is settled here: the same account logs in
+    /// through standby routes, and the region moves to the first one that
+    /// accepts it; if none does, the gate closes.
     pub async fn login(&self, session: &AccountSession) -> Result<LoginResponse, AppError> {
+        self.egress.check_gate()?;
+        let (epoch, http) = self.egress.active();
+        let mut result = self.login_via(session, &http, None).await;
+        if matches!(result, Err(AppError::CookieExpired)) && self.recover_cookies().await.is_ok() {
+            result = self.login_via(session, &http, None).await;
+        }
+        let error = match result {
+            Ok(login) => {
+                self.egress.note_login_success(epoch);
+                return Ok(login);
+            }
+            // Maintenance and cookie expiry are not the route's doing.
+            Err(e @ (AppError::UnderMaintenance | AppError::CookieExpired)) => return Err(e),
+            Err(e) => e,
+        };
+        let Some(evaluation) = self.egress.note_failure(
+            epoch,
+            FailureKind::Login,
+            session.key(),
+            &error,
+            self.session_count(),
+        ) else {
+            return Err(error);
+        };
+        match self.probe_standbys(session, evaluation, &error).await {
+            Ok(login) => Ok(login),
+            Err(evaluation) => {
+                if matches!(error, AppError::NetworkError(_)) {
+                    // The login never reached the game, so there is no
+                    // verdict to act on and no login load to shed. Closing
+                    // the gate would only keep the region down after the
+                    // network is back.
+                    evaluation.rest();
+                } else {
+                    evaluation.reject(&error);
+                }
+                Err(error)
+            }
+        }
+    }
+
+    /// Log `session` in through each standby route of `evaluation`. The first
+    /// one that accepts the login becomes the active route; otherwise the
+    /// evaluation is handed back for the caller's verdict.
+    async fn probe_standbys<'a>(
+        &self,
+        session: &AccountSession,
+        evaluation: Evaluation<'a>,
+        cause: &AppError,
+    ) -> Result<LoginResponse, Evaluation<'a>> {
+        let region = self.region.as_str().to_uppercase();
+        let from = self.egress.active_name().to_string();
+        let mut found = None;
+        for (index, route) in evaluation.standbys() {
+            match self
+                .login_via(session, &route.client, Some(EGRESS_PROBE_TIMEOUT))
+                .await
+            {
+                Ok(login) => {
+                    found = Some((*index, route.name.clone(), login));
+                    break;
+                }
+                Err(e) => warn!(
+                    "{} Egress probe through '{}' failed as well: {}",
+                    region, route.name, e
+                ),
+            }
+        }
+        match found {
+            Some((index, name, login)) => {
+                evaluation.switch(
+                    index,
+                    format!("'{from}' failed ({cause}) while '{name}' logged in"),
+                );
+                self.invalidate_sessions_except(Some(session));
+                Ok(login)
+            }
+            None => Err(evaluation),
+        }
+    }
+
+    /// A game call got no HTTP response on `epoch`'s route. When that keeps
+    /// happening, see whether a standby route reaches the game.
+    async fn handle_route_failure(&self, session: &AccountSession, epoch: u64, error: &AppError) {
+        if self.egress.len() < 2 {
+            // Nowhere else to go: nothing to count, nothing to decide.
+            return;
+        }
+        let Some(evaluation) = self.egress.note_failure(
+            epoch,
+            FailureKind::Call,
+            session.key(),
+            error,
+            self.session_count(),
+        ) else {
+            return;
+        };
+        if evaluation.standbys().is_empty() {
+            return;
+        }
+        let _guard = session.lock_login().await;
+        if let Err(evaluation) = self.probe_standbys(session, evaluation, error).await {
+            evaluation.rest();
+        }
+    }
+
+    /// Operator switch to the named egress route (`PUT /internal/egress`).
+    pub fn switch_egress(&self, name: &str, hold: Option<bool>) -> Result<(), AppError> {
+        if self.egress.switch_to(name, hold)? {
+            self.invalidate_sessions_except(None);
+        }
+        Ok(())
+    }
+
+    /// Periodic failback: when the region runs on a standby and the primary
+    /// is due for a check, log one account in through the primary and return
+    /// to it on success.
+    pub async fn egress_tick(&self) {
+        let Some((primary, evaluation)) = self.egress.failback_due() else {
+            return;
+        };
+        let Some(session) = self.get_session() else {
+            return;
+        };
+        // The probe rotates the session token, so keep serving calls off this
+        // account until it is done. Lock order is login, then api, everywhere
+        // both are held.
+        let _login_guard = session.lock_login().await;
+        let _api_guard = session.lock_api().await;
+        match self
+            .login_via(&session, &primary.client, Some(EGRESS_PROBE_TIMEOUT))
+            .await
+        {
+            Ok(_) => {
+                evaluation.switch(
+                    0,
+                    format!("primary '{}' accepts logins again", primary.name),
+                );
+                self.invalidate_sessions_except(Some(&session));
+            }
+            Err(e) => evaluation.failback_failed(&e),
+        }
+    }
+
+    /// Run `egress_tick` in the background. A no-op for a single-route region.
+    pub fn start_egress_monitor(self: Arc<Self>) {
+        if self.egress.len() < 2 {
+            return;
+        }
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(EGRESS_TICK_INTERVAL);
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                ticker.tick().await;
+                self.egress_tick().await;
+            }
+        });
+    }
+
+    /// One login attempt through `http`, with no gate and no failover.
+    async fn login_via(
+        &self,
+        session: &AccountSession,
+        http: &Client,
+        timeout: Option<Duration>,
+    ) -> Result<LoginResponse, AppError> {
         let payload = session.dump_account()?;
         let encrypted = self.cryptor.pack_bytes(&payload)?;
         let (url, method) = if self.region.is_cp_server() {
@@ -737,7 +1258,10 @@ impl SekaiClient {
             let url = format!("{}/api/user/auth", self.config.api_url);
             (url, reqwest::Method::POST)
         };
-        let mut req = self.prepare_request(session, method, &url);
+        let mut req = self.prepare_request(http, session, method, &url);
+        if let Some(timeout) = timeout {
+            req = req.timeout(timeout);
+        }
         req = req.body(encrypted);
         info!("Account #{} logging in...", session.user_id());
         let resp = req
@@ -761,6 +1285,7 @@ impl SekaiClient {
                 }
             }
         }
+        session.mark_logged_in();
         info!("Account #{} logged in successfully", session.user_id());
         Ok(login_resp)
     }
@@ -799,7 +1324,8 @@ impl SekaiClient {
             self.config.api_url,
             session.user_id()
         );
-        let mut req = self.http_client.post(&url);
+        let (_, http) = self.egress.active();
+        let mut req = http.post(&url);
         let metadata_headers: Vec<(String, String)> = {
             let headers = self.headers.lock();
             headers
@@ -859,23 +1385,40 @@ impl SekaiClient {
     ) -> Result<(JsonValue, u16), AppError> {
         let max_retries = 4;
         let mut retry_count = 0;
+        // Kind of the error the previous attempt recovered from. Meeting it
+        // again right after a successful relogin means relogin does not help,
+        // and repeating it would only add logins.
+        let mut recovered: Option<&'static str> = None;
         while retry_count < max_retries {
-            let resp = self
-                .call_api(session, method.clone(), path, body, params)
+            let epoch = self.egress.epoch();
+            let (resp, sent) = self
+                .send_api(session, method.clone(), path, body, params, None)
                 .await?;
             match self.handle_response_value(resp).await {
                 Ok((mut json_value, upstream_status)) => {
+                    self.egress.note_api_success(epoch);
                     if restore && !self.region.is_cp_server() {
                         json_value = self.restore_nuverse_api_response(path, json_value)?;
                     }
                     return Ok((json_value, upstream_status));
                 }
-                Err(AppError::SessionError) => self.recover_session(session).await?,
-                Err(AppError::CookieExpired) => self.recover_cookies().await?,
-                Err(AppError::UpgradeRequired) => self.recover_upgrade(session).await?,
-                Err(AppError::UnderMaintenance) => {
-                    return Err(AppError::UnderMaintenance);
+                Err(e @ (AppError::SessionError | AppError::UpgradeRequired)) => {
+                    let kind = e.kind();
+                    if recovered == Some(kind) {
+                        return Err(self.futile_recovery(session, e));
+                    }
+                    let logged_in = if matches!(e, AppError::SessionError) {
+                        self.recover_session(session, &sent).await?
+                    } else {
+                        self.recover_upgrade(session, &sent).await?
+                    };
+                    // Only a relogin this request performed can be futile; a
+                    // retry riding on another request's recovery is not.
+                    if logged_in {
+                        recovered = Some(kind);
+                    }
                 }
+                Err(AppError::CookieExpired) => self.recover_cookies().await?,
                 Err(e) => {
                     return Err(e);
                 }
@@ -889,17 +1432,42 @@ impl SekaiClient {
         )))
     }
 
-    async fn recover_session(&self, session: &AccountSession) -> Result<(), AppError> {
+    /// The game rejected a call with `error` again right after the session
+    /// recovered from it. Count it toward the login gate and give up on this
+    /// request.
+    fn futile_recovery(&self, session: &AccountSession, error: AppError) -> AppError {
+        warn!(
+            "{} Account #{} still rejected ({}) right after recovering",
+            self.region.as_str().to_uppercase(),
+            session.user_id(),
+            error
+        );
+        self.egress.note_futile(
+            self.egress.epoch(),
+            session.key(),
+            &error,
+            self.session_count(),
+        );
+        error
+    }
+
+    /// Recover from a 403 on a call sent with `sent`. Returns whether this
+    /// call logged in; `false` means another request already replaced the
+    /// token the failed call used, so a plain retry is enough.
+    async fn recover_session(
+        &self,
+        session: &AccountSession,
+        sent: &Sent,
+    ) -> Result<bool, AppError> {
+        let _guard = session.lock_login().await;
+        if session.get_session_token() != sent.token {
+            return Ok(false);
+        }
         warn!(
             "{} Session expired, re-logging in...",
             self.region.as_str().to_uppercase()
         );
-        let token_before = session.get_session_token();
-        let _guard = session.lock_login().await;
-        if session.get_session_token() != token_before {
-            return Ok(());
-        }
-        self.login(session).await.map(|_| ()).map_err(|e| {
+        self.login(session).await.map(|_| true).map_err(|e| {
             error!(
                 "{} Re-login failed: {}",
                 self.region.as_str().to_uppercase(),
@@ -925,19 +1493,34 @@ impl SekaiClient {
         Ok(())
     }
 
-    async fn recover_upgrade(&self, session: &AccountSession) -> Result<(), AppError> {
+    /// Recover from a 426 on a call sent with `sent`. Returns whether this
+    /// call logged in; `false` means the failed call went out with versions
+    /// or a token that another request has replaced since, so a plain retry
+    /// is enough. That keeps a data update to about one relogin per account
+    /// in flight instead of one per request.
+    async fn recover_upgrade(
+        &self,
+        session: &AccountSession,
+        sent: &Sent,
+    ) -> Result<bool, AppError> {
+        let _guard = session.lock_login().await;
+        if self.data_version_header() != sent.data_version
+            || session.get_session_token() != sent.token
+        {
+            return Ok(false);
+        }
         warn!(
             "{} Server upgrade required, refreshing version and re-logging in...",
             self.region.as_str().to_uppercase()
         );
-        let token_before = session.get_session_token();
-        let _guard = session.lock_login().await;
-        if session.get_session_token() != token_before {
-            return Ok(());
-        }
         self.refresh_version().await?;
         match self.login(session).await {
-            Ok(login) => self.update_version_headers_from_login(&login),
+            Ok(login) => self.adopt_login_versions(session, login).await,
+            // With the gate closed the login was not attempted, so waiting
+            // for an app version update here would only stall the request.
+            Err(AppError::UpgradeRequired) if self.egress.is_gated() => {
+                return Err(AppError::UpgradeRequired);
+            }
             Err(AppError::UpgradeRequired) => self.retry_upgrade_login(session).await?,
             Err(e) => {
                 error!(
@@ -948,7 +1531,31 @@ impl SekaiClient {
                 return Err(AppError::UpgradeRequired);
             }
         }
-        Ok(())
+        Ok(true)
+    }
+
+    /// Put the data/asset versions of a fresh login into the request headers.
+    /// Nuverse logins since 6.4 no longer carry them, so they are read from
+    /// the login metadata endpoint instead. Without this a data update leaves
+    /// the headers stale: the game answers 426, the relogin succeeds, the
+    /// retry is 426 again, and every request repeats that.
+    async fn adopt_login_versions(&self, session: &AccountSession, login: LoginResponse) {
+        let complete = !login.data_version.is_empty() && !login.asset_version.is_empty();
+        if self.region.is_cp_server() || complete {
+            self.update_version_headers_from_login(&login);
+            return;
+        }
+        // The fetch spends the session's one-time token like any call, so it
+        // takes the account's api lock (callers hold only the login lock).
+        // It updates the headers itself.
+        let _api_guard = session.lock_api().await;
+        if let Err(e) = self.fetch_nuverse_version_metadata(session).await {
+            warn!(
+                "{} Could not read versions after re-login: {}",
+                self.region.as_str().to_uppercase(),
+                e
+            );
+        }
     }
 
     async fn retry_upgrade_login(&self, session: &AccountSession) -> Result<(), AppError> {
@@ -958,17 +1565,20 @@ impl SekaiClient {
         );
         tokio::time::sleep(Duration::from_secs(10)).await;
         self.refresh_version().await?;
-        self.login(session)
-            .await
-            .map(|login| self.update_version_headers_from_login(&login))
-            .map_err(|e| {
+        match self.login(session).await {
+            Ok(login) => {
+                self.adopt_login_versions(session, login).await;
+                Ok(())
+            }
+            Err(e) => {
                 error!(
                     "{} Re-login after waiting for app update failed: {}",
                     self.region.as_str().to_uppercase(),
                     e
                 );
-                AppError::UpgradeRequired
-            })
+                Err(AppError::UpgradeRequired)
+            }
+        }
     }
 
     #[tracing::instrument(skip(self, body, params), fields(region = ?self.region))]
@@ -1017,9 +1627,11 @@ impl SekaiClient {
     ) -> Result<Response, AppError> {
         let max_retries = 4;
         let mut retry_count = 0;
+        let mut recovered: Option<&'static str> = None;
         while retry_count < max_retries {
-            let resp = self
-                .call_api_with_timeout::<()>(
+            let epoch = self.egress.epoch();
+            let (resp, sent) = self
+                .send_api::<()>(
                     session,
                     reqwest::Method::GET,
                     path,
@@ -1029,9 +1641,22 @@ impl SekaiClient {
                 )
                 .await?;
             match self.classify_raw_response(resp).await? {
-                RawResponse::Success(resp) => return Ok(resp),
+                RawResponse::Success(resp) => {
+                    self.egress.note_api_success(epoch);
+                    return Ok(resp);
+                }
                 RawResponse::Recover { error, status } => {
-                    self.recover_raw_response(session, error, status).await?;
+                    let kind = matches!(error, AppError::SessionError | AppError::UpgradeRequired)
+                        .then(|| error.kind());
+                    if kind.is_some() && recovered == kind {
+                        return Err(self.futile_recovery(session, error));
+                    }
+                    if self
+                        .recover_raw_response(session, error, status, &sent)
+                        .await?
+                    {
+                        recovered = kind;
+                    }
                 }
             }
             retry_count += 1;
@@ -1083,16 +1708,20 @@ impl SekaiClient {
         })
     }
 
+    /// Returns whether the recovery logged this session in.
     async fn recover_raw_response(
         &self,
         session: &AccountSession,
         error_value: AppError,
         status: u16,
-    ) -> Result<(), AppError> {
+        sent: &Sent,
+    ) -> Result<bool, AppError> {
         match error_value {
-            AppError::SessionError => self.recover_raw_session(session, false, status).await,
-            AppError::UpgradeRequired => self.recover_raw_session(session, true, status).await,
-            AppError::CookieExpired => self.recover_cookies().await,
+            AppError::SessionError => self.recover_raw_session(session, false, status, sent).await,
+            AppError::UpgradeRequired => {
+                self.recover_raw_session(session, true, status, sent).await
+            }
+            AppError::CookieExpired => self.recover_cookies().await.map(|_| false),
             other => Err(other),
         }
     }
@@ -1102,39 +1731,51 @@ impl SekaiClient {
         session: &AccountSession,
         refresh_version: bool,
         status: u16,
-    ) -> Result<(), AppError> {
+        sent: &Sent,
+    ) -> Result<bool, AppError> {
+        let _guard = session.lock_login().await;
+        if session.get_session_token() != sent.token
+            || (refresh_version && self.data_version_header() != sent.data_version)
+        {
+            return Ok(false);
+        }
         warn!(
             "{} Raw game GET hit {} — recovering session...",
             self.region.as_str().to_uppercase(),
             status
         );
-        let token_before = session.get_session_token();
-        let _guard = session.lock_login().await;
-        if session.get_session_token() != token_before {
-            return Ok(());
-        }
         if refresh_version {
             self.refresh_version().await?;
         }
-        self.login(session).await.map(|_| ()).map_err(|e| {
-            error!(
-                "{} Re-login during raw GET failed: {}",
-                self.region.as_str().to_uppercase(),
-                e
-            );
-            if refresh_version {
-                AppError::UpgradeRequired
-            } else {
-                AppError::SessionError
+        match self.login(session).await {
+            Ok(login) => {
+                if refresh_version {
+                    self.adopt_login_versions(session, login).await;
+                }
+                Ok(true)
             }
-        })
+            Err(e) => {
+                error!(
+                    "{} Re-login during raw GET failed: {}",
+                    self.region.as_str().to_uppercase(),
+                    e
+                );
+                Err(if refresh_version {
+                    AppError::UpgradeRequired
+                } else {
+                    AppError::SessionError
+                })
+            }
+        }
     }
 
     async fn get_cp_image(&self, relative_path: &str) -> Result<Vec<u8>, AppError> {
         let session = self.get_session().ok_or(AppError::NoClientAvailable)?;
+        self.ensure_logged_in(&session).await?;
         let path_clean = relative_path.trim_start_matches('/');
         let image_url = format!("{}/{}", self.config.api_url, path_clean);
-        let req = self.prepare_request(&session, reqwest::Method::GET, &image_url);
+        let (_, http) = self.egress.active();
+        let req = self.prepare_request(&http, &session, reqwest::Method::GET, &image_url);
         let resp = req
             .send()
             .await
@@ -1247,6 +1888,23 @@ impl SekaiClient {
     }
 }
 
+/// What a call was about to be sent with. A recovery compares it with the
+/// current state to tell whether another request already did the work.
+struct Sent {
+    token: Option<String>,
+    data_version: Option<String>,
+}
+
+/// The one account file a standby region loads: the set pushed by the master.
+pub const SYNCED_ACCOUNTS_FILE: &str = "synced-accounts.json";
+
+/// Per-route timeout of an egress probe login: a dead standby must not hold
+/// the failing request for the full request timeout.
+const EGRESS_PROBE_TIMEOUT: Duration = Duration::from_secs(15);
+const EGRESS_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// How often a region on a standby route checks whether failback is due.
+const EGRESS_TICK_INTERVAL: Duration = Duration::from_secs(30);
+
 enum RawResponse {
     Success(Response),
     Recover { error: AppError, status: u16 },
@@ -1261,9 +1919,9 @@ impl RawResponse {
 /// Whether a login failure during an account reload indicts the path to the
 /// game server rather than the account itself. Transient failures keep the
 /// account in the session pool for lazy relogin on first use; anything else
-/// (403s, malformed responses) is treated as bad account data and dropped,
-/// since a dead account kept in rotation would fail requests that healthy
-/// accounts could serve.
+/// (403s, malformed responses) is treated as bad account data and dropped
+/// when another account did log in, since a dead account kept in rotation
+/// would fail requests that healthy accounts could serve.
 fn login_failure_is_transient(e: &AppError) -> bool {
     matches!(
         e,
@@ -1424,6 +2082,7 @@ pub struct UserRegistration {
 mod tests {
     use std::collections::HashMap;
     use std::path::Path;
+    use std::sync::atomic::AtomicU16;
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -1678,26 +2337,643 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
-    // An account the game itself rejects (403 -> SessionError) is still dropped:
-    // keeping it in rotation would fail requests healthy accounts could serve.
+    /// A scripted game endpoint. Used directly as `api_url`, or as an egress
+    /// route: reqwest sends plain-HTTP requests for a proxied URL to the proxy
+    /// in absolute form, so the same handler stands in for "the game as seen
+    /// through this route".
+    struct Route {
+        url: String,
+        login_status: Arc<AtomicU16>,
+        api_status: Arc<AtomicU16>,
+        logins: Arc<AtomicUsize>,
+        /// CP user ids whose login is rejected with 403 whatever `login_status` says.
+        rejected_users: Arc<Mutex<Vec<String>>>,
+        task: tokio::task::JoinHandle<()>,
+    }
+
+    impl Route {
+        fn logins(&self) -> usize {
+            self.logins.load(Ordering::SeqCst)
+        }
+
+        fn set_login_status(&self, status: u16) {
+            self.login_status.store(status, Ordering::SeqCst);
+        }
+
+        fn set_api_status(&self, status: u16) {
+            self.api_status.store(status, Ordering::SeqCst);
+        }
+    }
+
+    fn scripted(status: u16, ok_body: serde_json::Value) -> AxumResponse<Body> {
+        let body = if status == 200 {
+            encrypted(ok_body)
+        } else {
+            vec![0]
+        };
+        AxumResponse::builder()
+            .status(status)
+            .header("content-type", "application/octet-stream")
+            .body(Body::from(body))
+            .unwrap()
+    }
+
+    async fn spawn_route(login_status: u16, api_status: u16) -> Route {
+        let login_status = Arc::new(AtomicU16::new(login_status));
+        let api_status = Arc::new(AtomicU16::new(api_status));
+        let logins = Arc::new(AtomicUsize::new(0));
+        let rejected_users = Arc::new(Mutex::new(Vec::<String>::new()));
+        let app = {
+            let (login_status, api_status, logins, rejected_users) = (
+                login_status.clone(),
+                api_status.clone(),
+                logins.clone(),
+                rejected_users.clone(),
+            );
+            Router::new().fallback(move |uri: axum::http::Uri| {
+                let path = uri.path().to_string();
+                let response = if path.ends_with("/auth") {
+                    logins.fetch_add(1, Ordering::SeqCst);
+                    let rejected = rejected_users
+                        .lock()
+                        .iter()
+                        .any(|user| path.contains(&format!("/user/{user}/")));
+                    let status = if rejected {
+                        403
+                    } else {
+                        login_status.load(Ordering::SeqCst)
+                    };
+                    scripted(status, json!({"sessionToken": "token"}))
+                } else {
+                    scripted(api_status.load(Ordering::SeqCst), json!({"result": "ok"}))
+                };
+                async move { response }
+            })
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        Route {
+            url: format!("http://{address}"),
+            login_status,
+            api_status,
+            logins,
+            rejected_users,
+            task,
+        }
+    }
+
+    /// An EN client whose game host is only reachable through the given
+    /// egress routes (name, proxy URL), in preference order.
+    async fn make_egress_client(routes: &[(&str, &str)]) -> (SekaiClient, std::path::PathBuf) {
+        let root = temp_dir("egress");
+        let mut config = config("http://game.test", &root);
+        config.egress = routes
+            .iter()
+            .map(|(name, url)| crate::config::EgressConfig {
+                name: name.to_string(),
+                url: Some(url.to_string()),
+            })
+            .collect();
+        let client = SekaiClient::new(
+            ServerRegion::En,
+            config,
+            None,
+            None,
+            SekaiClient::build_http_client(None).unwrap(),
+            None,
+        )
+        .await
+        .unwrap();
+        (client, root)
+    }
+
+    fn write_accounts(root: &Path, user_ids: &[&str]) {
+        for user_id in user_ids {
+            std::fs::write(
+                root.join(format!("accounts/{user_id}.json")),
+                format!(r#"{{"userId":"{user_id}","deviceId":"d","credential":"c"}}"#),
+            )
+            .unwrap();
+        }
+    }
+
+    const PROFILE: &str = "/user/{userId}/profile";
+
+    // An account the game rejects (403 -> SessionError) while another one logs
+    // in is dropped: keeping it in rotation would fail requests the healthy
+    // account could serve.
     #[tokio::test]
-    async fn reload_drops_accounts_rejected_by_the_game() {
-        let (url, server) = spawn_server(StaticResponse {
-            status: 403,
-            content_type: "application/octet-stream",
-            body: vec![0],
-            session_token: None,
-        })
-        .await;
-        let (client, root) = make_client(ServerRegion::En, &url).await;
+    async fn reload_drops_only_accounts_that_fail_on_their_own() {
+        let game = spawn_route(200, 200).await;
+        game.rejected_users.lock().push("11".to_string());
+        let (client, root) = make_client(ServerRegion::En, &game.url).await;
+        write_accounts(&root, &["10", "11"]);
+        client.reload_accounts().await.unwrap();
+        assert_eq!(client.session_count(), 1);
+        assert_eq!(client.get_session().unwrap().user_id(), "10");
+        assert!(!client.egress.is_gated());
+        game.task.abort();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    // When every login is rejected the cause is the route or the app identity
+    // (a blocked egress IP answers 403 for all accounts), not the accounts:
+    // the pool must survive and heal on its own once logins work again.
+    #[tokio::test]
+    async fn reload_keeps_every_account_when_all_logins_are_rejected() {
+        let game = spawn_route(403, 200).await;
+        let (client, root) = make_client(ServerRegion::En, &game.url).await;
+        write_accounts(&root, &["10", "11"]);
+        client.reload_accounts().await.unwrap();
+        assert_eq!(client.session_count(), 2);
+        assert!(client.get_session().unwrap().needs_login());
+        assert!(
+            client.egress.is_gated(),
+            "uniform rejection closes the gate"
+        );
+        let logins_while_blocked = game.logins();
+        assert_eq!(logins_while_blocked, 2);
+
+        // Requests fail fast behind the gate instead of logging in again.
+        assert!(matches!(
+            client.get_game_api(PROFILE, None).await,
+            Err(AppError::SessionError)
+        ));
+        assert_eq!(game.logins(), logins_while_blocked);
+
+        game.set_login_status(200);
+        client.egress.expire_timers_for_test();
+        let (value, status) = client.get_game_api(PROFILE, None).await.unwrap();
+        assert_eq!((status, &value["result"]), (200, &json!("ok")));
+        assert!(!client.egress.is_gated());
+        assert_eq!(game.logins(), logins_while_blocked + 1);
+        game.task.abort();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    // The incident this exists for: the primary egress IP is rejected at login
+    // while the same accounts log in fine through another node. The region
+    // must move to the standby by itself, keep its accounts, and return to the
+    // primary once it accepts logins again.
+    #[tokio::test]
+    async fn blocked_egress_fails_over_to_a_standby_and_back() {
+        let primary = spawn_route(403, 200).await;
+        let standby = spawn_route(200, 200).await;
+        let (client, root) =
+            make_egress_client(&[("primary", &primary.url), ("standby", &standby.url)]).await;
+        write_accounts(&root, &["10", "11"]);
+        client.reload_accounts().await.unwrap();
+
+        let status = client.egress.status();
+        assert_eq!(status.active, "standby");
+        assert!(!status.primary && !status.gated);
+        assert_eq!(status.switches, 1);
+        assert_eq!(client.session_count(), 2, "no account is lost");
+        assert_eq!((primary.logins(), standby.logins()), (2, 2));
+        for _ in 0..2 {
+            client.get_game_api(PROFILE, None).await.unwrap();
+        }
+        assert_eq!(standby.logins(), 2, "sessions are already logged in");
+
+        // Not due yet: the tick leaves the primary alone.
+        client.egress_tick().await;
+        assert_eq!(primary.logins(), 2);
+
+        // Still blocked when due: stay on the standby.
+        client.egress.expire_timers_for_test();
+        client.egress_tick().await;
+        assert_eq!(primary.logins(), 3);
+        assert_eq!(client.egress.active_name(), "standby");
+
+        primary.set_login_status(200);
+        client.egress.expire_timers_for_test();
+        client.egress_tick().await;
+        assert_eq!(client.egress.active_name(), "primary");
+        assert_eq!(primary.logins(), 4);
+        // The other session logs in again through the primary before its
+        // next call; the probe session is already there.
+        for _ in 0..2 {
+            client.get_game_api(PROFILE, None).await.unwrap();
+        }
+        assert_eq!((primary.logins(), standby.logins()), (5, 2));
+        primary.task.abort();
+        standby.task.abort();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    // A stale app identity is rejected on every route. The region must stay
+    // put, stop logging in, and recover as soon as a new identity is applied.
+    #[tokio::test]
+    async fn identity_fault_closes_the_gate_instead_of_switching() {
+        let primary = spawn_route(426, 200).await;
+        let standby = spawn_route(426, 200).await;
+        let (client, root) =
+            make_egress_client(&[("primary", &primary.url), ("standby", &standby.url)]).await;
+        write_accounts(&root, &["10", "11"]);
+        // `init` as at startup: it records the version file as applied.
+        client.init().await.unwrap();
+
+        let status = client.egress.status();
+        assert_eq!(status.active, "primary");
+        assert!(status.gated);
+        assert_eq!(status.switches, 0);
+        assert_eq!(client.session_count(), 2);
+        assert_eq!((primary.logins(), standby.logins()), (2, 1));
+
+        let session = client.get_session().unwrap();
+        assert!(matches!(
+            client.login(&session).await,
+            Err(AppError::UpgradeRequired)
+        ));
+        assert!(client.get_game_api(PROFILE, None).await.is_err());
+        assert_eq!(
+            (primary.logins(), standby.logins()),
+            (2, 1),
+            "no login leaves the node while the gate is closed"
+        );
+
+        // Re-reading an unchanged version file changes nothing.
+        client.refresh_version().await.unwrap();
+        assert!(client.egress.is_gated());
+
+        // A new identity resets the gate, whether it is applied directly
+        // (the app-identity push) or found in the file by a recovery.
+        primary.set_login_status(200);
         std::fs::write(
-            root.join("accounts/account.json"),
-            r#"{"userId":"10","deviceId":"d","credential":"bad"}"#,
+            root.join("version.json"),
+            r#"{"appVersion":"6.1.0","appHash":"hash","dataVersion":"data","assetVersion":"asset"}"#,
         )
         .unwrap();
-        client.reload_accounts().await.unwrap();
-        assert!(client.get_session().is_none());
+        client.refresh_version().await.unwrap();
+        assert!(!client.egress.is_gated(), "a new identity resets the gate");
+        assert_eq!(client.headers.lock()["X-App-Version"], "6.1.0");
+        client.get_game_api(PROFILE, None).await.unwrap();
+        assert_eq!(client.egress.active_name(), "primary");
+        primary.task.abort();
+        standby.task.abort();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    // The 2026-11-12 CN outage: a data update made the game answer 426, the
+    // relogin succeeded but (Nuverse 6.4) carried no versions, so the headers
+    // stayed stale and every request relogged in, about five logins a second
+    // until the egress IP was refused. One relogin must now pick the new
+    // versions up from the metadata endpoint and the call must go through.
+    #[tokio::test]
+    async fn nuverse_data_update_recovers_with_one_relogin() {
+        let logins = Arc::new(AtomicUsize::new(0));
+        let app = {
+            let logins = logins.clone();
+            Router::new().fallback(
+                move |uri: axum::http::Uri, headers: axum::http::HeaderMap| {
+                    let path = uri.path().to_string();
+                    let response = if path == "/api/user/auth" {
+                        logins.fetch_add(1, Ordering::SeqCst);
+                        scripted(200, json!({"sessionToken": "token"}))
+                    } else if path.ends_with("/login") {
+                        scripted(
+                            200,
+                            json!({"dataVersion": "new", "assetVersion": "new-asset", "cdnVersion": 1}),
+                        )
+                    } else if headers.get("x-data-version").is_some_and(|v| v == "new") {
+                        scripted(200, json!({"result": "ok"}))
+                    } else {
+                        scripted(426, json!({}))
+                    };
+                    async move { response }
+                },
+            )
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let (client, root) = make_client(ServerRegion::Cn, &url).await;
+        std::fs::write(
+            root.join("accounts/account.json"),
+            r#"{"userId":12,"deviceId":"d","accessToken":"a"}"#,
+        )
+        .unwrap();
+        client.init().await.unwrap();
+        assert_eq!(logins.load(Ordering::SeqCst), 1);
+        assert_eq!(client.headers.lock()["X-Data-Version"], "data");
+
+        let (value, status) = client.get_game_api(PROFILE, None).await.unwrap();
+        assert_eq!((status, &value["result"]), (200, &json!("ok")));
+        assert_eq!(logins.load(Ordering::SeqCst), 2, "one relogin, not a loop");
+        assert_eq!(client.headers.lock()["X-Data-Version"], "new");
+        assert!(!client.egress.is_gated());
         server.abort();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    // The same data update with calls in flight on several accounts. One
+    // request's recovery must not undo another's: re-reading the (still
+    // stale) version file used to put the old data version back, so every
+    // call in flight got a 426 and relogged in, at about the request rate.
+    #[tokio::test]
+    async fn concurrent_calls_through_a_data_update_relogin_once_per_account() {
+        let logins = Arc::new(AtomicUsize::new(0));
+        let app = {
+            let logins = logins.clone();
+            Router::new().fallback(
+                move |uri: axum::http::Uri, headers: axum::http::HeaderMap| {
+                    let logins = logins.clone();
+                    async move {
+                        let path = uri.path();
+                        if path == "/api/user/auth" {
+                            logins.fetch_add(1, Ordering::SeqCst);
+                            scripted(200, json!({"sessionToken": "token"}))
+                        } else if path.ends_with("/login") {
+                            scripted(
+                                200,
+                                json!({"dataVersion": "new", "assetVersion": "new-asset", "cdnVersion": 1}),
+                            )
+                        } else {
+                            // Keep calls overlapping.
+                            tokio::time::sleep(Duration::from_millis(30)).await;
+                            if headers.get("x-data-version").is_some_and(|v| v == "new") {
+                                scripted(200, json!({"result": "ok"}))
+                            } else {
+                                scripted(426, json!({}))
+                            }
+                        }
+                    }
+                },
+            )
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let (client, root) = make_client(ServerRegion::Cn, &url).await;
+        for user in [12, 13, 14] {
+            std::fs::write(
+                root.join(format!("accounts/{user}.json")),
+                format!(r#"{{"userId":{user},"deviceId":"d","accessToken":"a"}}"#),
+            )
+            .unwrap();
+        }
+        client.init().await.unwrap();
+        assert_eq!(logins.load(Ordering::SeqCst), 3);
+
+        let results =
+            futures::future::join_all((0..12).map(|_| client.get_game_api(PROFILE, None))).await;
+        for result in results {
+            let (value, status) = result.expect("every call rides out the update");
+            assert_eq!((status, &value["result"]), (200, &json!("ok")));
+        }
+        let relogins = logins.load(Ordering::SeqCst) - 3;
+        assert!(
+            (1..=3).contains(&relogins),
+            "at most one relogin per account, got {relogins}"
+        );
+        assert!(!client.egress.is_gated());
+
+        // The version file still holds the old data version. Re-reading it
+        // (every later 426 recovery does) must not take the headers back.
+        client.refresh_version().await.unwrap();
+        assert_eq!(client.headers.lock()["X-Data-Version"], "new");
+        client.get_game_api(PROFILE, None).await.unwrap();
+        assert_eq!(logins.load(Ordering::SeqCst) - 3, relogins);
+
+        // A version file that does move on is applied.
+        std::fs::write(
+            root.join("version.json"),
+            r#"{"appVersion":"6.0.2","appHash":"hash","dataVersion":"newer","assetVersion":"asset"}"#,
+        )
+        .unwrap();
+        client.refresh_version().await.unwrap();
+        assert_eq!(client.headers.lock()["X-Data-Version"], "newer");
+        server.abort();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    // Logins that succeed while the game keeps answering 426 must not loop:
+    // one relogin per request, then the gate, then no logins at all.
+    #[tokio::test]
+    async fn futile_relogins_are_cut_off() {
+        let game = spawn_route(200, 426).await;
+        let (client, root) = make_client(ServerRegion::En, &game.url).await;
+        write_accounts(&root, &["10", "11"]);
+        client.reload_accounts().await.unwrap();
+        assert_eq!(game.logins(), 2);
+
+        for expected_logins in [3, 4] {
+            assert!(matches!(
+                client.get_game_api(PROFILE, None).await,
+                Err(AppError::UpgradeRequired)
+            ));
+            assert_eq!(game.logins(), expected_logins, "one relogin per request");
+        }
+        assert!(client.egress.is_gated());
+        assert!(matches!(
+            client.get_game_api(PROFILE, None).await,
+            Err(AppError::UpgradeRequired)
+        ));
+        assert_eq!(game.logins(), 4, "gated: no further logins");
+
+        game.set_api_status(200);
+        client.get_game_api(PROFILE, None).await.unwrap();
+        assert!(!client.egress.is_gated(), "a working call reopens the gate");
+        game.task.abort();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    // Calls that never get an HTTP response (the route itself is down) move
+    // the region to a standby that reaches the game.
+    #[tokio::test]
+    async fn unreachable_egress_fails_over_on_game_calls() {
+        let dead_url = {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            format!("http://{}", listener.local_addr().unwrap())
+        };
+        let standby = spawn_route(200, 200).await;
+        let (client, root) =
+            make_egress_client(&[("primary", &dead_url), ("standby", &standby.url)]).await;
+        let sessions = vec![
+            session(ServerRegion::En, "10"),
+            session(ServerRegion::En, "11"),
+        ];
+        for session in &sessions {
+            session.set_session_token(Some("token".to_string()));
+        }
+        *client.sessions.write() = sessions;
+
+        for _ in 0..2 {
+            assert!(matches!(
+                client.get_game_api(PROFILE, None).await,
+                Err(AppError::NetworkError(_))
+            ));
+        }
+        assert_eq!(client.egress.active_name(), "standby");
+        assert!(!client.egress.is_gated());
+        for _ in 0..2 {
+            client.get_game_api(PROFILE, None).await.unwrap();
+        }
+        assert_eq!(
+            standby.logins(),
+            2,
+            "each session logged in on the new route"
+        );
+        standby.task.abort();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    // A standby must hold the master's accounts without using them: a login
+    // there would displace the master's sessions. It loads only the pushed
+    // set, and an account logs in the first time a request needs it.
+    #[tokio::test]
+    async fn standby_stores_pushed_accounts_and_logs_in_only_on_use() {
+        let game = spawn_route(200, 200).await;
+        let root = temp_dir("standby");
+        let mut config = config(&game.url, &root);
+        config.account_sync.receive = true;
+        // A hand-copied file next to the pushed set would double an account.
+        write_accounts(&root, &["99"]);
+        let client = SekaiClient::new(
+            ServerRegion::En,
+            config,
+            None,
+            None,
+            SekaiClient::build_http_client(None).unwrap(),
+            None,
+        )
+        .await
+        .unwrap();
+        client.init().await.unwrap();
+        assert_eq!(client.session_count(), 0, "nothing pushed yet");
+
+        let pushed = vec![
+            json!({"userId": "10", "deviceId": "d", "credential": "c"}),
+            json!({"userId": "11", "deviceId": "d", "credential": "c"}),
+        ];
+        assert!(client.import_accounts(&pushed).await.unwrap());
+        assert!(
+            !client.import_accounts(&pushed).await.unwrap(),
+            "an identical set is not rewritten"
+        );
+        let stored = root.join("accounts").join(SYNCED_ACCOUNTS_FILE);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&stored).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600, "credentials are owner-only");
+        }
+        let leftovers = std::fs::read_dir(root.join("accounts"))
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().ends_with(".tmp"))
+            .count();
+        assert_eq!(leftovers, 0);
+
+        client.reload_accounts().await.unwrap();
+        assert_eq!(client.session_count(), 2);
+        assert_eq!(game.logins(), 0, "loading does not log in");
+        client.get_game_api(PROFILE, None).await.unwrap();
+        assert_eq!(game.logins(), 1, "only the account that served logged in");
+
+        for bad in [
+            vec![],
+            vec![json!("not an object")],
+            vec![json!({"userId": "12", "deviceId": "d"})],
+        ] {
+            assert!(matches!(
+                client.import_accounts(&bad).await,
+                Err(AppError::ParseError(_))
+            ));
+        }
+        assert_eq!(
+            std::fs::read(&stored).unwrap(),
+            serde_json::to_vec(&pushed).unwrap(),
+            "a rejected push leaves the stored set alone"
+        );
+        game.task.abort();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn master_exports_account_files_and_refuses_pushes() {
+        let (client, root) = make_client(ServerRegion::En, "http://127.0.0.1:1").await;
+        assert!(client.export_accounts().unwrap().is_empty());
+        write_accounts(&root, &["10"]);
+        std::fs::write(
+            root.join("accounts/batch.json"),
+            r#"[{"userId":"11","deviceId":"d","credential":"c"},{"userId":"12","deviceId":"d","credential":"c"}, 7, {"userId":"13","deviceId":"d"}]"#,
+        )
+        .unwrap();
+        std::fs::write(root.join("accounts/broken.json"), "{").unwrap();
+        std::fs::write(root.join("accounts/notes.txt"), "ignored").unwrap();
+        let exported = client.export_accounts().unwrap();
+        let ids: Vec<&str> = exported
+            .iter()
+            .map(|account| account["userId"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, ["10", "11", "12"]);
+        assert_eq!(exported, client.export_accounts().unwrap(), "stable order");
+
+        assert!(matches!(
+            client.import_accounts(&exported).await,
+            Err(AppError::Forbidden(_))
+        ));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn operator_switch_holds_route_and_relogs_sessions() {
+        let primary = spawn_route(200, 200).await;
+        let standby = spawn_route(200, 200).await;
+        let (client, root) =
+            make_egress_client(&[("primary", &primary.url), ("standby", &standby.url)]).await;
+        write_accounts(&root, &["10"]);
+        client.reload_accounts().await.unwrap();
+        assert_eq!(client.egress.active_name(), "primary");
+
+        assert!(matches!(
+            client.switch_egress("missing", None),
+            Err(AppError::NotFound(_))
+        ));
+        client.switch_egress("standby", Some(true)).unwrap();
+        assert!(client.get_session().unwrap().needs_login());
+        client.get_game_api(PROFILE, None).await.unwrap();
+        assert_eq!((primary.logins(), standby.logins()), (1, 1));
+
+        client.egress.expire_timers_for_test();
+        client.egress_tick().await;
+        let status = client.egress.status();
+        assert_eq!(status.active, "standby", "held routes do not fail back");
+        assert!(status.hold);
+        primary.task.abort();
+        standby.task.abort();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn egress_config_builds_named_routes_and_rejects_duplicates() {
+        let root = temp_dir("egress_config");
+        let mut config = config("http://game.test", &root);
+        config.egress = serde_yaml::from_str(
+            "[{name: here, url: ''}, {url: 'http://127.0.0.1:9'}, {name: inherited}]",
+        )
+        .unwrap();
+        let http = SekaiClient::build_http_client(None).unwrap();
+        let client = SekaiClient::new(
+            ServerRegion::Cn,
+            config.clone(),
+            None,
+            None,
+            http.clone(),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            client.egress.status().routes,
+            ["here", "egress1", "inherited"]
+        );
+
+        config.egress[2].name = "here".to_string();
+        let duplicate = SekaiClient::new(ServerRegion::Cn, config, None, None, http, None).await;
+        assert!(matches!(duplicate, Err(AppError::ParseError(_))));
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -2151,47 +3427,89 @@ mod tests {
         let (client, root) = make_client(ServerRegion::En, &url).await;
         let account = session(ServerRegion::En, "1");
         account.set_session_token(Some("old".to_string()));
-        client.recover_session(&account).await.unwrap();
+        assert!(client
+            .recover_session(&account, &client.sent(&account))
+            .await
+            .unwrap());
         assert_eq!(account.get_session_token().as_deref(), Some("fresh"));
+        // Another request already replaced the token the failed call used:
+        // no login, just retry.
+        let stale = Sent {
+            token: Some("old".to_string()),
+            data_version: client.data_version_header(),
+        };
+        assert!(!client.recover_session(&account, &stale).await.unwrap());
+        assert!(!client.recover_upgrade(&account, &stale).await.unwrap());
 
         account.set_session_token(Some("old-2".to_string()));
-        client.recover_upgrade(&account).await.unwrap();
+        assert!(client
+            .recover_upgrade(&account, &client.sent(&account))
+            .await
+            .unwrap());
         assert_eq!(
             client.headers.lock().get("X-Data-Version").unwrap(),
             "new-data"
         );
+        // The headers moved on since a call was sent: its 426 needs no login.
+        let behind = Sent {
+            token: account.get_session_token(),
+            data_version: Some("older-data".to_string()),
+        };
+        assert!(!client.recover_upgrade(&account, &behind).await.unwrap());
+        assert!(!client
+            .recover_raw_session(&account, true, 426, &behind)
+            .await
+            .unwrap());
+
         account.set_session_token(Some("old-3".to_string()));
-        client
-            .recover_raw_session(&account, false, 403)
-            .await
-            .unwrap();
-        account.set_session_token(Some("old-4".to_string()));
-        client
-            .recover_raw_session(&account, true, 426)
-            .await
-            .unwrap();
         assert!(client
-            .recover_raw_response(&account, AppError::ParseError("bad".to_string()), 400)
+            .recover_raw_session(&account, false, 403, &client.sent(&account))
+            .await
+            .unwrap());
+        account.set_session_token(Some("old-4".to_string()));
+        assert!(client
+            .recover_raw_session(&account, true, 426, &client.sent(&account))
+            .await
+            .unwrap());
+        let sent = client.sent(&account);
+        assert!(client
+            .recover_raw_response(
+                &account,
+                AppError::ParseError("bad".to_string()),
+                400,
+                &sent
+            )
             .await
             .is_err());
         assert!(client
-            .recover_raw_response(&account, AppError::CookieExpired, 403)
+            .recover_raw_response(&account, AppError::CookieExpired, 403, &sent)
             .await
             .is_err());
         server.abort();
 
         let (broken, broken_root) = make_client(ServerRegion::En, "http://127.0.0.1:1").await;
         let broken_session = session(ServerRegion::En, "1");
+        let sent = broken.sent(&broken_session);
         assert!(matches!(
-            broken.recover_session(&broken_session).await,
+            broken.recover_session(&broken_session, &sent).await,
             Err(AppError::SessionError)
         ));
         assert!(matches!(
             broken
-                .recover_raw_session(&broken_session, false, 403)
+                .recover_raw_session(&broken_session, false, 403, &sent)
                 .await,
             Err(AppError::SessionError)
         ));
+        // Logins that never reach the game must not close the gate: on a
+        // single route that would keep the region down after the network
+        // is back.
+        for _ in 0..3 {
+            assert!(matches!(
+                broken.login(&broken_session).await,
+                Err(AppError::NetworkError(_))
+            ));
+        }
+        assert!(!broken.egress.is_gated());
         for path in [root, broken_root] {
             std::fs::remove_dir_all(path).unwrap();
         }

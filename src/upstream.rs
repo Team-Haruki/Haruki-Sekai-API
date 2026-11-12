@@ -114,6 +114,16 @@ pub struct AppIdentityRequest {
     pub app_hash: String,
 }
 
+/// Body of `POST /internal/accounts`: the master's complete account set for
+/// one region, as the raw JSON objects of its account files. Carries
+/// credentials, so it is only ever sent to configured standby peers over the
+/// private network and never logged.
+#[derive(Serialize, Deserialize)]
+pub struct AccountPushRequest {
+    pub server: String,
+    pub accounts: Vec<JsonValue>,
+}
+
 /// Request for a peer node's `POST /internal/game-stream`: execute an
 /// authenticated game GET and relay the response body back untouched (still
 /// encrypted) as an octet stream. The relay node's memory cost is O(chunk);

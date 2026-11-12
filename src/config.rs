@@ -192,6 +192,38 @@ fn default_upstream_priority() -> i32 {
     10
 }
 
+/// One way out to the region's game server. The account node keeps accounts,
+/// sessions and keys; an egress only decides which IP the game sees. Routes
+/// are listed in preference order: the first is the primary, the rest are
+/// standbys the client fails over to when logins fail on the active route but
+/// succeed through another one (see `client::egress`).
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct EgressConfig {
+    /// Display name for logs, `/health` and `/internal/egress`; defaults to
+    /// `egress<index>`. The URL is never used as a name: it can carry the
+    /// relay token.
+    #[serde(default)]
+    pub name: String,
+    /// Proxy URL for this route (an HTTP CONNECT proxy on another node, e.g.
+    /// `http://<node>:<port>`). Absent inherits the top-level `proxy`; an
+    /// empty string forces a direct connection.
+    #[serde(default)]
+    pub url: Option<String>,
+}
+
+/// How a region returns to its primary egress after a failover.
+#[derive(Debug, Clone, Copy, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum EgressFailback {
+    /// Probe the primary with one login on a long, growing interval and
+    /// switch back when it succeeds.
+    #[default]
+    Auto,
+    /// Stay on the standby until an operator switches back through
+    /// `PUT /internal/egress`.
+    Manual,
+}
+
 /// A peer node to notify (webhook) after this node updates a region's master
 /// data locally.
 #[derive(Debug, Clone, Deserialize)]
@@ -201,6 +233,39 @@ pub struct MasterSyncPeer {
     /// Bearer token matching the peer's `backend.internal_token`.
     #[serde(default)]
     pub token: String,
+}
+
+/// A node this region's accounts are pushed to.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AccountSyncPeer {
+    /// Base URL of the standby node, e.g. `http://<standby-node>:9999`.
+    pub url: String,
+    /// Bearer token matching the standby's `backend.internal_token`.
+    #[serde(default)]
+    pub token: String,
+    /// Optional display name for logs; defaults to the URL.
+    #[serde(default)]
+    pub name: String,
+}
+
+/// Central account distribution. One node (the master) owns a region's
+/// account files and pushes them to standby nodes, which keep them on disk
+/// and stay logged out. A standby serves with them only when requests reach
+/// it and it cannot hand them to the master (its `upstreams` entry), i.e.
+/// when the master is down. Accounts are never pulled: a standby cannot ask
+/// for credentials, it can only be given them.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct AccountSyncConfig {
+    /// Master side: standby nodes to push this region's accounts to (at
+    /// startup, when the account directory changes, and every 10 minutes).
+    #[serde(default)]
+    pub peers: Vec<AccountSyncPeer>,
+    /// Standby side: accept accounts pushed to `POST /internal/accounts`.
+    /// The region then loads only the pushed set
+    /// (`<account_dir>/synced-accounts.json`) and logs an account in on its
+    /// first use instead of at load.
+    #[serde(default)]
+    pub receive: bool,
 }
 
 /// Remote account source for master production: this node runs the region's
@@ -364,6 +429,15 @@ pub struct ServerConfig {
     /// first). Only meaningful when `upstreams` is non-empty.
     #[serde(default)]
     pub local_priority: i32,
+    /// Egress routes for this region's game API traffic, in preference order.
+    /// Empty (the default) keeps the single node-wide route (top-level
+    /// `proxy`) and disables egress failover.
+    #[serde(default)]
+    pub egress: Vec<EgressConfig>,
+    #[serde(default)]
+    pub egress_failback: EgressFailback,
+    #[serde(default)]
+    pub account_sync: AccountSyncConfig,
     #[serde(default)]
     pub master_sync: MasterSyncConfig,
     #[serde(default)]
@@ -729,6 +803,21 @@ impl AssetUpdaterInfo {
     }
 }
 
+/// The `egress_relay` role (see `relay`): a CONNECT-only tunnel that lends
+/// this node's IP to an account node's `servers.<region>.egress` route.
+#[derive(Debug, Clone, Deserialize)]
+pub struct EgressRelayConfig {
+    /// Listen address. Bind the node's private (VPN) address, never 0.0.0.0.
+    pub listen: String,
+    /// Shared secret. The account node carries it as the password of the
+    /// route URL: `http://relay:<token>@<listen>`.
+    pub token: String,
+    /// Hosts a tunnel may target, i.e. the regions' game API hosts. An entry
+    /// without a port means port 443.
+    #[serde(default)]
+    pub allow_hosts: Vec<String>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
     #[serde(default)]
@@ -755,6 +844,9 @@ pub struct Config {
     /// The `master_ingest` role; absent unless that binary runs on this file.
     #[serde(default)]
     pub ingest: Option<IngestConfig>,
+    /// The `egress_relay` role; absent unless that binary runs on this file.
+    #[serde(default)]
+    pub egress_relay: Option<EgressRelayConfig>,
 }
 
 impl Default for RedisConfig {
@@ -878,6 +970,34 @@ servers:
             "Data/structures/nuverse_schema_bundle.json"
         );
         assert_eq!(config.servers[&ServerRegion::Cn].local_priority, 0);
+        assert!(jp.egress.is_empty());
+        assert_eq!(jp.egress_failback, EgressFailback::Auto);
+    }
+
+    // `url` follows the proxy-override convention used elsewhere in the
+    // config: absent inherits the node-wide proxy, empty means direct.
+    #[test]
+    fn egress_routes_distinguish_inherited_direct_and_proxied() {
+        let server: ServerConfig = serde_yaml::from_str(
+            r#"
+egress:
+  - name: here
+    url: ""
+  - name: relay
+    url: http://relay.example:7890
+  - name: inherited
+egress_failback: manual
+"#,
+        )
+        .unwrap();
+        assert_eq!(server.egress[0].url.as_deref(), Some(""));
+        assert_eq!(
+            server.egress[1].url.as_deref(),
+            Some("http://relay.example:7890")
+        );
+        assert_eq!(server.egress[2].url, None);
+        assert_eq!(server.egress[2].name, "inherited");
+        assert_eq!(server.egress_failback, EgressFailback::Manual);
     }
 
     #[test]

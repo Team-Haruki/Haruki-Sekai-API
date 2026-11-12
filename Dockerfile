@@ -11,11 +11,13 @@ RUN cargo chef prepare --recipe-path recipe.json
 FROM chef AS builder
 COPY --from=planner /app/recipe.json ./recipe.json
 RUN cargo chef cook --release --locked --recipe-path recipe.json \
-    --bin haruki-sekai-api --bin master_registry --bin master_ingest --bin run_ingest
+    --bin haruki-sekai-api --bin master_registry --bin master_ingest --bin run_ingest \
+    --bin egress_relay
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 RUN cargo build --release --locked \
-    --bin haruki-sekai-api --bin master_registry --bin master_ingest --bin run_ingest
+    --bin haruki-sekai-api --bin master_registry --bin master_ingest --bin run_ingest \
+    --bin egress_relay
 
 FROM alpine:3.24
 RUN apk --no-cache add \
@@ -31,10 +33,11 @@ COPY --chown=haruki:haruki --from=builder /app/target/release/haruki-sekai-api .
 COPY --chown=haruki:haruki --from=builder /app/target/release/run_ingest .
 COPY --chown=haruki:haruki --from=builder /app/target/release/master_registry .
 COPY --chown=haruki:haruki --from=builder /app/target/release/master_ingest .
+COPY --chown=haruki:haruki --from=builder /app/target/release/egress_relay .
 COPY --chown=haruki:haruki schema_info.json ./schema_info.json
 COPY --chown=haruki:haruki Data/structures ./Data/structures
 RUN mkdir -p logs && chown haruki:haruki logs
-EXPOSE 9999 9998 9997
+EXPOSE 9999 9998 9997 9996
 ENV TZ=Asia/Shanghai
 ENV RUST_LOG=info
 # mimalloc (the binaries' global allocator) eagerly commits its first arena,
