@@ -245,7 +245,7 @@ impl SekaiClient {
         if self.config.account_sync.receive && !self.config.account_dir.is_empty() {
             // The directory may not exist before the first push, and the
             // account watcher only starts on an existing directory.
-            fs::create_dir_all(&self.config.account_dir)?;
+            tokio::fs::create_dir_all(&self.config.account_dir).await?;
         }
         self.reload_accounts().await
     }
