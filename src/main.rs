@@ -92,6 +92,7 @@ async fn init_app_state(config: Config) -> anyhow::Result<AppState> {
     )
     .await;
     let routers = build_routers(&config, &clients)?;
+    haruki_sekai_api::updater::account_sync::start(&config, &clients)?;
     let db = if config.database.enabled {
         Some(db::init_db(&config.database).await?)
     } else {
@@ -222,6 +223,7 @@ async fn collect_initialized_clients(
                         e
                     );
                 }
+                client.clone().start_egress_monitor();
                 clients.insert(region, client);
             }
             Ok(Err(e)) => {

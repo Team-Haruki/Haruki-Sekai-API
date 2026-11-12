@@ -1,3 +1,4 @@
+pub mod account_sync;
 mod compact;
 pub mod git;
 pub mod master;

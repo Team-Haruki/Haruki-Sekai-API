@@ -16,13 +16,15 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
+use serde::Deserialize;
 use serde_json::Value as JsonValue;
 
+use crate::client::SekaiClient;
 use crate::config::ServerRegion;
 use crate::error::AppError;
 use crate::upstream::{
-    AppIdentityRequest, GameStreamRequest, InternalApiRequest, InternalApiResponse,
-    InternalImageRequest, LoginProbeRequest, LoginProbeResponse,
+    AccountPushRequest, AppIdentityRequest, GameStreamRequest, InternalApiRequest,
+    InternalApiResponse, InternalImageRequest, LoginProbeRequest, LoginProbeResponse,
 };
 use crate::AppState;
 
@@ -123,6 +125,120 @@ pub async fn post_sekai_api(
             kind: None,
             message: None,
         }),
+        Err(e) => envelope_response(&error_envelope(&e)),
+    }
+}
+
+/// Body of `PUT /internal/egress`. `egress` names the route to make active;
+/// `hold` (optional) turns automatic failback off (`true`) or back on
+/// (`false`). Either may be sent alone.
+#[derive(Debug, Deserialize)]
+pub struct EgressSwitchRequest {
+    pub server: String,
+    #[serde(default)]
+    pub egress: Option<String>,
+    #[serde(default)]
+    pub hold: Option<bool>,
+}
+
+fn egress_report(client: &SekaiClient) -> JsonValue {
+    let mut report = serde_json::to_value(client.egress.status()).unwrap_or(JsonValue::Null);
+    if let Some(object) = report.as_object_mut() {
+        object.insert("sessions".to_string(), client.session_count().into());
+    }
+    report
+}
+
+fn data_envelope(data: JsonValue) -> Response {
+    envelope_response(&InternalApiResponse {
+        ok: true,
+        status: Some(200),
+        data: Some(data),
+        kind: None,
+        message: None,
+    })
+}
+
+/// GET /internal/egress — every local region's egress state: active route,
+/// configured routes, login gate, last error, switch history, session count.
+pub async fn get_egress(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    if let Some(resp) = check_internal_auth(&state, &headers) {
+        return resp;
+    }
+    let regions: serde_json::Map<String, JsonValue> = state
+        .clients
+        .iter()
+        .map(|(region, client)| (region.as_str().to_string(), egress_report(client)))
+        .collect();
+    data_envelope(JsonValue::Object(regions))
+}
+
+/// PUT /internal/egress — operator control of a region's egress without a
+/// restart: switch to a named route and/or hold it. Sessions log in again
+/// through the new route before their next call.
+pub async fn put_egress(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(req): Json<EgressSwitchRequest>,
+) -> Response {
+    if let Some(resp) = check_internal_auth(&state, &headers) {
+        return resp;
+    }
+    let region: ServerRegion = match req.server.parse() {
+        Ok(r) => r,
+        Err(_) => {
+            return envelope_response(&error_envelope(&AppError::InvalidServerRegion(
+                req.server.clone(),
+            )));
+        }
+    };
+    let Some(client) = state.clients.get(&region) else {
+        return envelope_response(&error_envelope(&AppError::NoClientAvailable));
+    };
+    let result = match (req.egress.as_deref(), req.hold) {
+        (Some(name), hold) => client.switch_egress(name, hold),
+        (None, Some(hold)) => {
+            client.egress.set_hold(hold);
+            Ok(())
+        }
+        (None, None) => Err(AppError::ParseError(
+            "expected 'egress' and/or 'hold'".to_string(),
+        )),
+    };
+    match result {
+        Ok(()) => data_envelope(egress_report(client)),
+        Err(e) => envelope_response(&error_envelope(&e)),
+    }
+}
+
+/// POST /internal/accounts — the master pushes a region's account set to this
+/// standby node. Accepted only when the region opted in with
+/// `account_sync.receive`; the set replaces the previous pushed set on disk
+/// and is loaded (logged out) before the push is acknowledged.
+pub async fn post_accounts(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(req): Json<AccountPushRequest>,
+) -> Response {
+    if let Some(resp) = check_internal_auth(&state, &headers) {
+        return resp;
+    }
+    let region: ServerRegion = match req.server.parse() {
+        Ok(r) => r,
+        Err(_) => {
+            return envelope_response(&error_envelope(&AppError::InvalidServerRegion(
+                req.server.clone(),
+            )));
+        }
+    };
+    let Some(client) = state.clients.get(&region) else {
+        return envelope_response(&error_envelope(&AppError::NoClientAvailable));
+    };
+    match client.import_accounts(&req.accounts, req.clear).await {
+        Ok(changed) => data_envelope(serde_json::json!({
+            "changed": changed,
+            "count": req.accounts.len(),
+        })),
         Err(e) => envelope_response(&error_envelope(&e)),
     }
 }
@@ -1219,6 +1335,97 @@ mod tests {
     fn sha256_hex(data: &[u8]) -> String {
         use sha2::Digest as _;
         hex::encode(sha2::Sha256::digest(data))
+    }
+
+    // The egress endpoints are the operator's view and switch: state for every
+    // local region, a named switch that takes effect without a restart, and
+    // the same auth gate as every other internal route.
+    #[tokio::test]
+    async fn egress_endpoints_report_and_switch_routes() {
+        let root = temp_dir();
+        let mut config: Config =
+            serde_yaml::from_str("backend:\n  internal_token: secret").unwrap();
+        let mut server_config: ServerConfig = serde_yaml::from_str(
+            "egress: [{name: direct, url: ''}, {name: relay, url: 'http://127.0.0.1:9'}]",
+        )
+        .unwrap();
+        server_config.aes_key_hex = KEY.to_string();
+        server_config.aes_iv_hex = IV.to_string();
+        server_config.version_path = root.join("version.json").to_string_lossy().into_owned();
+        config
+            .servers
+            .insert(ServerRegion::Cn, server_config.clone());
+        let client = SekaiClient::new(
+            ServerRegion::Cn,
+            server_config,
+            None,
+            None,
+            SekaiClient::build_http_client(None).unwrap(),
+            None,
+        )
+        .await
+        .unwrap();
+        let state = Arc::new(AppState {
+            config,
+            clients: HashMap::from([(ServerRegion::Cn, Arc::new(client))]),
+            routers: HashMap::new(),
+            syncers: HashMap::new(),
+            version_locks: HashMap::new(),
+            db: None,
+            master_db: None,
+            redis: None,
+            jwt_secret: None,
+            coalescer: Arc::new(RequestCoalescer::default()),
+        });
+
+        let unauthorized = get_egress(State(state.clone()), HeaderMap::new()).await;
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+        let body = json_body(get_egress(State(state.clone()), auth_headers()).await).await;
+        let cn = &body["data"]["cn"];
+        assert_eq!(cn["active"], "direct");
+        assert_eq!(cn["primary"], true);
+        assert_eq!(cn["routes"], serde_json::json!(["direct", "relay"]));
+        assert_eq!(cn["sessions"], 0);
+
+        let put = |server: &str, egress: Option<&str>, hold: Option<bool>| {
+            put_egress(
+                State(state.clone()),
+                auth_headers(),
+                Json(EgressSwitchRequest {
+                    server: server.to_string(),
+                    egress: egress.map(str::to_string),
+                    hold,
+                }),
+            )
+        };
+        let body = json_body(put("cn", Some("relay"), Some(true)).await).await;
+        assert_eq!(body["ok"], true);
+        assert_eq!(body["data"]["active"], "relay");
+        assert_eq!(body["data"]["hold"], true);
+        assert_eq!(body["data"]["switches"], 1);
+
+        let body = json_body(put("cn", None, Some(false)).await).await;
+        assert_eq!(body["data"]["active"], "relay");
+        assert_eq!(body["data"]["hold"], false);
+
+        assert_eq!(
+            json_body(put("cn", Some("nope"), None).await).await["kind"],
+            "not_found"
+        );
+        assert_eq!(
+            json_body(put("cn", None, None).await).await["kind"],
+            "parse"
+        );
+        assert_eq!(
+            json_body(put("jp", Some("relay"), None).await).await["kind"],
+            "no_client"
+        );
+        assert_eq!(
+            json_body(put("mars", Some("relay"), None).await).await["kind"],
+            "invalid_server_region"
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]

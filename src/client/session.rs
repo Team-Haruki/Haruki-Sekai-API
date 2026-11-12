@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use parking_lot::Mutex;
@@ -10,6 +11,12 @@ pub struct AccountSession {
     pub session_token: Arc<Mutex<Option<String>>>,
     api_lock: Arc<tokio::sync::Mutex<()>>,
     login_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Set when the session must log in before its next call: it never logged
+    /// in, or its token was minted on an egress route the region has left.
+    needs_login: Arc<AtomicBool>,
+    /// Egress epoch the session last logged in on. A token is only used on
+    /// the route it was minted on.
+    login_epoch: Arc<AtomicU64>,
 }
 
 impl AccountSession {
@@ -19,7 +26,37 @@ impl AccountSession {
             session_token: Arc::new(Mutex::new(None)),
             api_lock: Arc::new(tokio::sync::Mutex::new(())),
             login_lock: Arc::new(tokio::sync::Mutex::new(())),
+            needs_login: Arc::new(AtomicBool::new(false)),
+            login_epoch: Arc::new(AtomicU64::new(0)),
         }
+    }
+
+    /// Stable identity of this account for the lifetime of the session set.
+    pub fn key(&self) -> usize {
+        Arc::as_ptr(&self.account) as *const () as usize
+    }
+
+    /// Drop the token and require a login before the next call.
+    pub fn invalidate(&self) {
+        self.set_session_token(None);
+        self.needs_login.store(true, Ordering::Release);
+    }
+
+    pub fn needs_login(&self) -> bool {
+        self.needs_login.load(Ordering::Acquire)
+    }
+
+    /// Whether the session must log in before a call on `epoch`'s route:
+    /// it was invalidated, or its last login belongs to another route (a
+    /// login that was still in flight when the region switched).
+    pub fn needs_login_on(&self, epoch: u64) -> bool {
+        self.needs_login() || self.login_epoch.load(Ordering::Acquire) != epoch
+    }
+
+    /// Record a successful login made on `epoch`'s route.
+    pub fn mark_logged_in(&self, epoch: u64) {
+        self.login_epoch.store(epoch, Ordering::Release);
+        self.needs_login.store(false, Ordering::Release);
     }
 
     pub fn user_id(&self) -> String {
@@ -107,6 +144,18 @@ mod tests {
         assert!(!session.try_reserve());
         drop(login_guard);
         drop(api_guard);
+
+        assert_eq!(session.key(), session.clone().key());
+        assert_ne!(session.key(), dummy_session().key());
+        session.set_session_token(Some("token".to_string()));
+        assert!(!session.needs_login());
+        session.invalidate();
+        assert!(session.needs_login());
+        assert_eq!(session.get_session_token(), None);
+        session.mark_logged_in(3);
+        assert!(!session.needs_login());
+        assert!(!session.needs_login_on(3));
+        assert!(session.needs_login_on(4), "logged in on another route");
 
         let dumped = session.dump_account().unwrap();
         let restored: serde_json::Value = rmp_serde::from_slice(&dumped).unwrap();

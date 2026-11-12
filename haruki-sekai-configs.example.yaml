@@ -246,6 +246,39 @@ servers:
     #     name: "near-game-server"
     # local_priority: 0
     #
+    # Egress failover. Accounts, sessions and keys stay on this node; each
+    # entry is one way out to the game server, in preference order (first =
+    # primary). `url` is an HTTP CONNECT proxy on another node; omit it to
+    # inherit the top-level `proxy`, set "" for a direct connection. When
+    # logins fail on the active route but the same account logs in through a
+    # standby, the region moves to that standby by itself, and with
+    # egress_failback: auto (default) returns once the primary accepts logins
+    # again (probed every 30 min, backing off to 6 h). `manual` stays put
+    # until PUT /internal/egress. Without this list nothing changes.
+    # egress:
+    #   - name: "local"
+    #     url: ""
+    #   - name: "relay-a"
+    #     # An `egress_relay` on another node; the password is its token.
+    #     url: "http://relay:<relay-token>@<relay-node>:9996"
+    # egress_failback: auto
+    #
+    # Central account distribution (see docs/failover.md). On the master (the
+    # node that owns this region's account files) list the standby nodes; the
+    # whole account set is pushed to them at startup, on every account change
+    # and every 10 minutes. On a standby set receive: true instead: it keeps
+    # the pushed set in <account_dir>/synced-accounts.json, ignores any other
+    # account file, and logs an account in only when a request needs it. Give
+    # the standby an `upstreams` entry for the master with a priority below
+    # local_priority, so it serves from its own copy only when the master
+    # cannot.
+    # account_sync:
+    #   peers:
+    #     - url: "http://<standby-node>:9999"
+    #       token: "" # the standby's backend.internal_token
+    #       name: "standby-a"
+    #   receive: false
+    #
     # Master-data sync between nodes. Each region has one owner node (running
     # the master updater with its own accounts); other nodes pull from it.
     # On a pulling node: set source_url/source_token to the owner, and
@@ -284,3 +317,14 @@ servers:
     nuverse_schema_bundle_path: "Data/structures/6.4.0/nuverse_schema_bundle.json"
     enable_master_updater: true # check for master data updates periodically
     master_updater_cron: "7 * * * * *" # cron expression, this mean "execute it at every minute at second 7"
+
+# The `egress_relay` role (binary `egress_relay`, same image): lends this
+# node's IP to an account node's `servers.<region>.egress` route. CONNECT only,
+# to the listed hosts only, for callers that present the token. Bind the
+# private (VPN) address. A relay node needs nothing else from this file
+# (`backend: {}` is enough).
+# egress_relay:
+#   listen: "<private-ip>:9996"
+#   token: ""
+#   allow_hosts:
+#     - "<region game API host>" # port 443 unless written as host:port

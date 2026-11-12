@@ -1,4 +1,5 @@
 mod account;
+pub mod egress;
 pub mod helper;
 pub(crate) mod housing;
 pub mod nuverse_schema;
