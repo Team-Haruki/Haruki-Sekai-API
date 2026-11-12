@@ -22,10 +22,10 @@ RUN cargo build --release --locked \
 FROM alpine:3.24
 RUN apk --no-cache add \
     ca-certificates=20261020-r0 \
-    tzdata=2026e-r0 \
-    git=2.54.0-r0 \
+    tzdata=2026f-r0 \
+    git=2.54.1-r0 \
     gnupg=2.4.9-r1 \
-    openssh-keygen=10.3_p1-r1 \
+    openssh-keygen=10.3_p1-r2 \
     && addgroup -S haruki \
     && adduser -S -G haruki haruki
 WORKDIR /app
