@@ -258,6 +258,8 @@ pub struct AccountSyncPeer {
 pub struct AccountSyncConfig {
     /// Master side: standby nodes to push this region's accounts to (at
     /// startup, when the account directory changes, and every 10 minutes).
+    /// The request carries the credentials: each URL must be reachable only
+    /// over an encrypted overlay (VPN) or be `https://`.
     #[serde(default)]
     pub peers: Vec<AccountSyncPeer>,
     /// Standby side: accept accounts pushed to `POST /internal/accounts`.

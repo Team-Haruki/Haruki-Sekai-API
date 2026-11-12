@@ -59,7 +59,7 @@ pub fn start(
         };
         let http = match &http {
             Some(http) => http,
-            None => http.insert(crate::upstream::build_internal_http_client()?),
+            None => http.insert(build_push_client()?),
         }
         .clone();
         let (client, peers) = (client.clone(), sync.peers.clone());
@@ -81,6 +81,19 @@ pub fn start(
     Ok(())
 }
 
+/// HTTP client for account pushes. Redirects are refused: a 307/308 would
+/// replay the request body, which is the account set, to wherever the peer
+/// (or something answering in its place) points.
+pub fn build_push_client() -> Result<reqwest::Client, AppError> {
+    reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|e| AppError::NetworkError(e.to_string()))
+}
+
 /// Push the region's current account set to every peer. Returns whether all
 /// of them now hold it.
 pub async fn push_to_peers(
@@ -89,10 +102,15 @@ pub async fn push_to_peers(
     http: &reqwest::Client,
 ) -> bool {
     let tag = client.region.as_str().to_uppercase();
-    let accounts = match client.export_accounts() {
-        Ok(accounts) if !accounts.is_empty() => accounts,
+    let (accounts, clear) = match client.export_accounts() {
+        Ok((accounts, _)) if !accounts.is_empty() => (accounts, false),
+        // The directory is there and holds no account file at all: the
+        // accounts were removed on purpose, and the standbys must follow.
+        Ok((accounts, Some(0))) => (accounts, true),
+        // A missing directory, or files that yield no usable account, look
+        // like a broken mount or a bad edit. Never wipe the standbys on that.
         Ok(_) => {
-            warn!("{} No accounts to push to standby nodes", tag);
+            warn!("{} No usable accounts to push to standby nodes", tag);
             return false;
         }
         Err(e) => {
@@ -103,6 +121,7 @@ pub async fn push_to_peers(
     let request = AccountPushRequest {
         server: client.region.as_str().to_string(),
         accounts,
+        clear,
     };
     let mut delivered = true;
     for peer in peers {
@@ -233,12 +252,16 @@ mod tests {
         let master = client(&root.join("master"), false).await;
         let standby = client(&root.join("standby"), true).await;
         let (url, server) = serve_standby(standby.clone()).await;
-        let http = crate::upstream::build_internal_http_client().unwrap();
+        let http = build_push_client().unwrap();
 
-        assert!(
-            !push_to_peers(&master, &[peer(&url, "secret")], &http).await,
-            "an empty account set is never pushed"
-        );
+        // An empty account directory is a confirmed empty set: pushed as a
+        // clear, which is a no-op on a standby that holds nothing.
+        assert!(push_to_peers(&master, &[peer(&url, "secret")], &http).await);
+        assert_eq!(standby.session_count(), 0);
+        // Files that yield no usable account are not: nothing is pushed.
+        std::fs::write(root.join("master/accounts/broken.json"), "{").unwrap();
+        assert!(!push_to_peers(&master, &[peer(&url, "secret")], &http).await);
+        std::fs::remove_file(root.join("master/accounts/broken.json")).unwrap();
         for user in ["10", "11"] {
             std::fs::write(
                 root.join(format!("master/accounts/{user}.json")),
@@ -251,9 +274,44 @@ mod tests {
             push_to_peers(&master, &[peer(&url, "secret")], &http).await,
             "a repeated push is a no-op that still counts as delivered"
         );
-        standby.reload_accounts().await.unwrap();
+        // Loaded before the push was acknowledged, without a watcher.
         assert_eq!(standby.session_count(), 2);
         assert!(standby.get_session().unwrap().needs_login());
+
+        // A redirecting peer must not get the account set replayed elsewhere.
+        let redirector = axum::Router::new().fallback(|| async {
+            (
+                axum::http::StatusCode::TEMPORARY_REDIRECT,
+                [("location", "http://127.0.0.1:1/internal/accounts")],
+            )
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let redirect_url = format!("http://{}", listener.local_addr().unwrap());
+        let redirect_server =
+            tokio::spawn(async move { axum::serve(listener, redirector).await.unwrap() });
+        assert!(!push_to_peers(&master, &[peer(&redirect_url, "secret")], &http).await);
+        redirect_server.abort();
+
+        // The operator removes every account on the master: the standby's
+        // copy goes too.
+        for user in ["10", "11"] {
+            std::fs::remove_file(root.join(format!("master/accounts/{user}.json"))).unwrap();
+        }
+        assert!(push_to_peers(&master, &[peer(&url, "secret")], &http).await);
+        assert_eq!(standby.session_count(), 0);
+        assert!(!root
+            .join("standby/accounts")
+            .join(crate::client::sekai_client::SYNCED_ACCOUNTS_FILE)
+            .exists());
+        for user in ["10", "11"] {
+            std::fs::write(
+                root.join(format!("master/accounts/{user}.json")),
+                format!(r#"{{"userId":"{user}","deviceId":"d","credential":"c"}}"#),
+            )
+            .unwrap();
+        }
+        assert!(push_to_peers(&master, &[peer(&url, "secret")], &http).await);
+        assert_eq!(standby.session_count(), 2);
 
         // Wrong token, unreachable peer: reported, never fatal.
         assert!(!push_to_peers(&master, &[peer(&url, "wrong")], &http).await);

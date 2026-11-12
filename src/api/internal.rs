@@ -214,7 +214,7 @@ pub async fn put_egress(
 /// POST /internal/accounts — the master pushes a region's account set to this
 /// standby node. Accepted only when the region opted in with
 /// `account_sync.receive`; the set replaces the previous pushed set on disk
-/// and the account watcher reloads it without logging in.
+/// and is loaded (logged out) before the push is acknowledged.
 pub async fn post_accounts(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -234,7 +234,7 @@ pub async fn post_accounts(
     let Some(client) = state.clients.get(&region) else {
         return envelope_response(&error_envelope(&AppError::NoClientAvailable));
     };
-    match client.import_accounts(&req.accounts).await {
+    match client.import_accounts(&req.accounts, req.clear).await {
         Ok(changed) => data_envelope(serde_json::json!({
             "changed": changed,
             "count": req.accounts.len(),

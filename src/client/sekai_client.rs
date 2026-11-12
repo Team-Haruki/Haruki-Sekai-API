@@ -482,12 +482,15 @@ impl SekaiClient {
     }
 
     /// The raw JSON objects of this node's account files, for pushing to
-    /// standby nodes. Holds credentials: never log the result.
-    pub fn export_accounts(&self) -> Result<Vec<JsonValue>, AppError> {
+    /// standby nodes, with the number of `.json` files seen. Zero files in an
+    /// existing directory is a confirmed empty set (the operator removed the
+    /// accounts); files that yield no usable account are not. Holds
+    /// credentials: never log the result.
+    pub fn export_accounts(&self) -> Result<(Vec<JsonValue>, Option<usize>), AppError> {
         let account_dir = Path::new(&self.config.account_dir);
         let mut accounts = Vec::new();
         if !account_dir.exists() {
-            return Ok(accounts);
+            return Ok((accounts, None));
         }
         let mut paths: Vec<_> = fs::read_dir(account_dir)?
             .collect::<Result<Vec<_>, _>>()?
@@ -498,6 +501,7 @@ impl SekaiClient {
         // A stable order keeps the pushed bytes identical between runs, which
         // is what lets the standby skip an unchanged set.
         paths.sort();
+        let file_count = paths.len();
         for path in paths {
             let value: JsonValue = match sonic_rs::from_slice(&fs::read(&path)?) {
                 Ok(value) => value,
@@ -522,23 +526,59 @@ impl SekaiClient {
                 usable.then_some(item)
             }));
         }
-        Ok(accounts)
+        Ok((accounts, Some(file_count)))
     }
 
     /// Store an account set pushed by the master (`POST /internal/accounts`)
-    /// as this region's only account file. Returns whether it differed from
-    /// what was stored; the account watcher picks the change up.
-    pub async fn import_accounts(&self, accounts: &[JsonValue]) -> Result<bool, AppError> {
+    /// as this region's only account file, and load it. Returns whether it
+    /// differed from what was stored. An empty set is refused unless `clear`
+    /// says the master really has no accounts left; then the stored set is
+    /// removed, so a standby cannot keep serving with accounts the operator
+    /// took away.
+    pub async fn import_accounts(
+        &self,
+        accounts: &[JsonValue],
+        clear: bool,
+    ) -> Result<bool, AppError> {
         if !self.config.account_sync.receive {
             return Err(AppError::Forbidden(format!(
                 "{} does not accept pushed accounts on this node",
                 self.region.as_str()
             )));
         }
+        let changed = self.store_pushed_accounts(accounts, clear).await?;
+        // Load here rather than leaving it to the account watcher: the push
+        // is acknowledged to the master, which will not send an identical
+        // set again, so the sessions must exist once this returns.
+        if changed || self.session_count() != accounts.len() {
+            self.reload_accounts().await?;
+        }
+        Ok(changed)
+    }
+
+    async fn store_pushed_accounts(
+        &self,
+        accounts: &[JsonValue],
+        clear: bool,
+    ) -> Result<bool, AppError> {
+        let stored = Path::new(&self.config.account_dir).join(SYNCED_ACCOUNTS_FILE);
         if accounts.is_empty() {
-            return Err(AppError::ParseError(
-                "refusing an empty account set".to_string(),
-            ));
+            if !clear {
+                return Err(AppError::ParseError(
+                    "refusing an empty account set".to_string(),
+                ));
+            }
+            return match tokio::fs::remove_file(&stored).await {
+                Ok(()) => {
+                    warn!(
+                        "{} The master has no accounts left; removed the pushed set",
+                        self.region.as_str().to_uppercase()
+                    );
+                    Ok(true)
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+                Err(e) => Err(e.into()),
+            };
         }
         for (index, account) in accounts.iter().enumerate() {
             // An object with no credential deserializes too (every field has
@@ -762,11 +802,11 @@ impl SekaiClient {
     /// Log a session in before use when it has no usable token (kept through
     /// a failed reload, or invalidated by an egress switch).
     async fn ensure_logged_in(&self, session: &AccountSession) -> Result<(), AppError> {
-        if !session.needs_login() {
+        if !session.needs_login_on(self.egress.epoch()) {
             return Ok(());
         }
         let _guard = session.lock_login().await;
-        if !session.needs_login() {
+        if !session.needs_login_on(self.egress.epoch()) {
             return Ok(());
         }
         self.login(session).await.map(|_| ()).map_err(|e| {
@@ -1087,6 +1127,10 @@ impl SekaiClient {
         }
         let error = match result {
             Ok(login) => {
+                // Stamped with the route the login used. If the region
+                // switched while it was in flight, the stamp is already
+                // stale and the session logs in again before its next call.
+                session.mark_logged_in(epoch);
                 self.egress.note_login_success(epoch);
                 return Ok(login);
             }
@@ -1153,6 +1197,7 @@ impl SekaiClient {
                     index,
                     format!("'{from}' failed ({cause}) while '{name}' logged in"),
                 );
+                session.mark_logged_in(self.egress.epoch());
                 self.invalidate_sessions_except(Some(session));
                 Ok(login)
             }
@@ -1217,6 +1262,7 @@ impl SekaiClient {
                     0,
                     format!("primary '{}' accepts logins again", primary.name),
                 );
+                session.mark_logged_in(self.egress.epoch());
                 self.invalidate_sessions_except(Some(&session));
             }
             Err(e) => evaluation.failback_failed(&e),
@@ -1285,7 +1331,6 @@ impl SekaiClient {
                 }
             }
         }
-        session.mark_logged_in();
         info!("Account #{} logged in successfully", session.user_id());
         Ok(login_resp)
     }
@@ -2847,9 +2892,14 @@ mod tests {
             json!({"userId": "10", "deviceId": "d", "credential": "c"}),
             json!({"userId": "11", "deviceId": "d", "credential": "c"}),
         ];
-        assert!(client.import_accounts(&pushed).await.unwrap());
+        assert!(client.import_accounts(&pushed, false).await.unwrap());
+        assert_eq!(
+            client.session_count(),
+            2,
+            "loaded before the push is acknowledged"
+        );
         assert!(
-            !client.import_accounts(&pushed).await.unwrap(),
+            !client.import_accounts(&pushed, false).await.unwrap(),
             "an identical set is not rewritten"
         );
         let stored = root.join("accounts").join(SYNCED_ACCOUNTS_FILE);
@@ -2878,7 +2928,7 @@ mod tests {
             vec![json!({"userId": "12", "deviceId": "d"})],
         ] {
             assert!(matches!(
-                client.import_accounts(&bad).await,
+                client.import_accounts(&bad, false).await,
                 Err(AppError::ParseError(_))
             ));
         }
@@ -2887,6 +2937,15 @@ mod tests {
             serde_json::to_vec(&pushed).unwrap(),
             "a rejected push leaves the stored set alone"
         );
+
+        // Only an explicit clear removes the set, and the pool with it.
+        assert!(client.import_accounts(&[], true).await.unwrap());
+        assert!(!stored.exists());
+        assert_eq!(client.session_count(), 0);
+        assert!(
+            !client.import_accounts(&[], true).await.unwrap(),
+            "clearing an empty standby is a no-op"
+        );
         game.task.abort();
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -2894,7 +2953,13 @@ mod tests {
     #[tokio::test]
     async fn master_exports_account_files_and_refuses_pushes() {
         let (client, root) = make_client(ServerRegion::En, "http://127.0.0.1:1").await;
-        assert!(client.export_accounts().unwrap().is_empty());
+        let (none, files) = client.export_accounts().unwrap();
+        assert!(none.is_empty());
+        assert_eq!(
+            files,
+            Some(0),
+            "an existing empty directory is a confirmed empty set"
+        );
         write_accounts(&root, &["10"]);
         std::fs::write(
             root.join("accounts/batch.json"),
@@ -2903,18 +2968,56 @@ mod tests {
         .unwrap();
         std::fs::write(root.join("accounts/broken.json"), "{").unwrap();
         std::fs::write(root.join("accounts/notes.txt"), "ignored").unwrap();
-        let exported = client.export_accounts().unwrap();
+        let (exported, files) = client.export_accounts().unwrap();
+        assert_eq!(files, Some(3), "broken.json counts as a file");
         let ids: Vec<&str> = exported
             .iter()
             .map(|account| account["userId"].as_str().unwrap())
             .collect();
         assert_eq!(ids, ["10", "11", "12"]);
-        assert_eq!(exported, client.export_accounts().unwrap(), "stable order");
+        assert_eq!(
+            exported,
+            client.export_accounts().unwrap().0,
+            "stable order"
+        );
 
         assert!(matches!(
-            client.import_accounts(&exported).await,
+            client.import_accounts(&exported, false).await,
             Err(AppError::Forbidden(_))
         ));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    // A login still in flight when the region switches finishes on the route
+    // just left. Its token must not be used from the new IP: the session logs
+    // in again through the new route before its next call.
+    #[tokio::test]
+    async fn a_login_that_outlives_a_route_switch_is_repeated_on_the_new_route() {
+        let primary = spawn_route(200, 200).await;
+        let standby = spawn_route(200, 200).await;
+        let (client, root) =
+            make_egress_client(&[("primary", &primary.url), ("standby", &standby.url)]).await;
+        let account = session(ServerRegion::En, "10");
+        *client.sessions.write() = vec![account.clone()];
+
+        // What `login` does, with the switch landing between the request and
+        // the bookkeeping: the session is stamped with the route it used.
+        let (epoch, http) = client.egress.active();
+        client.login_via(&account, &http, None).await.unwrap();
+        client.switch_egress("standby", None).unwrap();
+        account.set_session_token(Some("minted-on-primary".to_string()));
+        account.mark_logged_in(epoch);
+        assert!(account.needs_login_on(client.egress.epoch()));
+
+        client.get_game_api(PROFILE, None).await.unwrap();
+        assert_eq!(
+            (primary.logins(), standby.logins()),
+            (1, 1),
+            "logged in again through the standby before the call"
+        );
+        assert!(!account.needs_login_on(client.egress.epoch()));
+        primary.task.abort();
+        standby.task.abort();
         std::fs::remove_dir_all(root).unwrap();
     }
 

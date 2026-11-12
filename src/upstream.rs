@@ -122,6 +122,11 @@ pub struct AppIdentityRequest {
 pub struct AccountPushRequest {
     pub server: String,
     pub accounts: Vec<JsonValue>,
+    /// Set with an empty `accounts` when the master's account directory is
+    /// confirmed empty: the standby drops its stored set. An empty set
+    /// without it is refused.
+    #[serde(default)]
+    pub clear: bool,
 }
 
 /// Request for a peer node's `POST /internal/game-stream`: execute an

@@ -51,7 +51,7 @@ pub struct HealthResponse {
 pub async fn health_check(State(state): State<Arc<MainAppState>>) -> Json<HealthResponse> {
     let start = START_TIME.get_or_init(Instant::now);
     let uptime = start.elapsed().as_secs();
-    let regions: BTreeMap<&'static str, RegionHealth> = state
+    let mut regions: BTreeMap<&'static str, RegionHealth> = state
         .clients
         .iter()
         .map(|(region, client)| {
@@ -68,6 +68,22 @@ pub async fn health_check(State(state): State<Arc<MainAppState>>) -> Json<Health
             )
         })
         .collect();
+    // A region that is enabled but whose client failed to initialise is not
+    // in `clients` at all. It cannot serve, so it must not vanish from here.
+    for (region, server) in &state.config.servers {
+        if server.enabled && !state.clients.contains_key(region) {
+            regions.insert(
+                region.as_str(),
+                RegionHealth {
+                    sessions: 0,
+                    egress: String::new(),
+                    primary: false,
+                    gated: false,
+                    last_success_at: None,
+                },
+            );
+        }
+    }
     let serving = regions
         .values()
         .all(|region| region.sessions > 0 && !region.gated);
@@ -266,8 +282,16 @@ mod tests {
         state
             .clients
             .insert(crate::config::ServerRegion::Cn, Arc::new(client));
+        // An enabled region whose client never initialised still shows up.
+        state.config =
+            serde_yaml::from_str("backend: {}\nservers:\n  jp: {enabled: true}\n  kr: {}").unwrap();
         let Json(health) = health_check(State(Arc::new(state))).await;
         assert_eq!(health.status, "degraded");
+        assert_eq!(health.regions["jp"].sessions, 0);
+        assert!(
+            !health.regions.contains_key("kr"),
+            "disabled regions are not local"
+        );
         let cn = &health.regions["cn"];
         assert_eq!((cn.sessions, cn.egress.as_str()), (0, "default"));
         assert!(cn.primary && !cn.gated);

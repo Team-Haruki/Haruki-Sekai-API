@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use parking_lot::Mutex;
@@ -14,6 +14,9 @@ pub struct AccountSession {
     /// Set when the session must log in before its next call: it never logged
     /// in, or its token was minted on an egress route the region has left.
     needs_login: Arc<AtomicBool>,
+    /// Egress epoch the session last logged in on. A token is only used on
+    /// the route it was minted on.
+    login_epoch: Arc<AtomicU64>,
 }
 
 impl AccountSession {
@@ -24,6 +27,7 @@ impl AccountSession {
             api_lock: Arc::new(tokio::sync::Mutex::new(())),
             login_lock: Arc::new(tokio::sync::Mutex::new(())),
             needs_login: Arc::new(AtomicBool::new(false)),
+            login_epoch: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -42,7 +46,16 @@ impl AccountSession {
         self.needs_login.load(Ordering::Acquire)
     }
 
-    pub fn mark_logged_in(&self) {
+    /// Whether the session must log in before a call on `epoch`'s route:
+    /// it was invalidated, or its last login belongs to another route (a
+    /// login that was still in flight when the region switched).
+    pub fn needs_login_on(&self, epoch: u64) -> bool {
+        self.needs_login() || self.login_epoch.load(Ordering::Acquire) != epoch
+    }
+
+    /// Record a successful login made on `epoch`'s route.
+    pub fn mark_logged_in(&self, epoch: u64) {
+        self.login_epoch.store(epoch, Ordering::Release);
         self.needs_login.store(false, Ordering::Release);
     }
 
@@ -139,8 +152,10 @@ mod tests {
         session.invalidate();
         assert!(session.needs_login());
         assert_eq!(session.get_session_token(), None);
-        session.mark_logged_in();
+        session.mark_logged_in(3);
         assert!(!session.needs_login());
+        assert!(!session.needs_login_on(3));
+        assert!(session.needs_login_on(4), "logged in on another route");
 
         let dumped = session.dump_account().unwrap();
         let restored: serde_json::Value = rmp_serde::from_slice(&dumped).unwrap();

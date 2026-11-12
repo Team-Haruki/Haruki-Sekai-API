@@ -134,6 +134,14 @@ servers:
 
 - The master pushes its whole account set at startup, after every account-file change,
   and every 10 minutes. Nothing can pull accounts from the master.
+- **The push carries the account credentials and the standby's token in the request.**
+  Like every node-to-node call in this service it is plain HTTP by default, so the peer
+  URL must be an address on an encrypted overlay (a VPN such as WireGuard), or an
+  `https://` URL. A private IP on an unencrypted network is not enough. Redirects are
+  refused, so a peer cannot bounce the account set elsewhere.
+- Removing every account file on the master clears the standby's copy too. A missing
+  account directory or files with no usable account do not: that looks like a broken
+  mount, and the standby keeps what it has.
 - The standby stores the set in `synced-accounts.json` (owner-only), loads nothing else
   from that directory, and does not log in.
 - A call that reaches the standby goes to the master first. Only when the master cannot

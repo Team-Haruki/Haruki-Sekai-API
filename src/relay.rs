@@ -22,6 +22,13 @@ use crate::config::EgressRelayConfig;
 const MAX_HEAD_BYTES: usize = 8 * 1024;
 const HEAD_TIMEOUT: Duration = Duration::from_secs(10);
 const DIAL_TIMEOUT: Duration = Duration::from_secs(10);
+/// Share of the dial deadline one resolved address may use, so an address
+/// that hangs does not keep a reachable one from being tried.
+const DIAL_PER_ADDRESS: Duration = Duration::from_secs(4);
+/// After one side of a tunnel has closed, how long the other side may keep
+/// sending before the tunnel is torn down. Without a bound, a peer that
+/// stays open but silent holds both sockets and a tunnel slot forever.
+const DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
 /// Tunnels open at once. The account node keeps a few pooled connections per
 /// region, so this is far above real use and only bounds a runaway caller.
 const MAX_TUNNELS: usize = 512;
@@ -205,8 +212,12 @@ async fn handle(mut inbound: TcpStream, relay: &Relay) -> std::io::Result<()> {
         warn!("Relay refused a tunnel to {}", target);
         return reject(&mut inbound, "403 Forbidden", "").await;
     }
-    let mut outbound = match tokio::time::timeout(DIAL_TIMEOUT, TcpStream::connect(target)).await {
+    let mut outbound = match tokio::time::timeout(DIAL_TIMEOUT, dial(target)).await {
         Ok(Ok(stream)) => stream,
+        Ok(Err(e)) if e.kind() == std::io::ErrorKind::TimedOut => {
+            warn!("Relay timed out reaching {}", target);
+            return reject(&mut inbound, "504 Gateway Timeout", "").await;
+        }
         Ok(Err(e)) => {
             warn!("Relay could not reach {}: {}", target, e);
             return reject(&mut inbound, "502 Bad Gateway", "").await;
@@ -225,8 +236,53 @@ async fn handle(mut inbound: TcpStream, relay: &Relay) -> std::io::Result<()> {
     if !early_bytes.is_empty() {
         outbound.write_all(&early_bytes).await?;
     }
-    tokio::io::copy_bidirectional(&mut inbound, &mut outbound).await?;
+    pipe(inbound, outbound, DRAIN_TIMEOUT).await;
     Ok(())
+}
+
+/// Connect to `target`, giving each resolved address a bounded attempt. A
+/// plain `TcpStream::connect` tries addresses one after another with no
+/// per-address limit, so one hanging address would use up the whole deadline.
+async fn dial(target: &str) -> std::io::Result<TcpStream> {
+    let mut last_error = std::io::Error::new(
+        std::io::ErrorKind::NotFound,
+        "the host resolved to no address",
+    );
+    for address in tokio::net::lookup_host(target).await? {
+        match tokio::time::timeout(DIAL_PER_ADDRESS, TcpStream::connect(address)).await {
+            Ok(Ok(stream)) => return Ok(stream),
+            Ok(Err(e)) => last_error = e,
+            Err(_) => {
+                last_error = std::io::Error::new(std::io::ErrorKind::TimedOut, "connect timed out")
+            }
+        }
+    }
+    Err(last_error)
+}
+
+/// Copy both directions until both are done. Once one direction reaches EOF
+/// (or fails) its write side is shut down and the other direction gets
+/// `drain` to finish.
+async fn pipe(mut inbound: TcpStream, mut outbound: TcpStream, drain: Duration) {
+    let (mut inbound_read, mut inbound_write) = inbound.split();
+    let (mut outbound_read, mut outbound_write) = outbound.split();
+    let upstream = async {
+        let _ = tokio::io::copy(&mut inbound_read, &mut outbound_write).await;
+        let _ = outbound_write.shutdown().await;
+    };
+    let downstream = async {
+        let _ = tokio::io::copy(&mut outbound_read, &mut inbound_write).await;
+        let _ = inbound_write.shutdown().await;
+    };
+    tokio::pin!(upstream, downstream);
+    tokio::select! {
+        _ = &mut upstream => {
+            let _ = tokio::time::timeout(drain, &mut downstream).await;
+        }
+        _ = &mut downstream => {
+            let _ = tokio::time::timeout(drain, &mut upstream).await;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -381,6 +437,44 @@ mod tests {
             .starts_with("HTTP/1.1 400 Bad Request"));
         relay_task.abort();
         target_task.abort();
+    }
+
+    // A client that closes its side while the target stays open and silent
+    // must not hold the tunnel forever: the drain is bounded.
+    #[tokio::test]
+    async fn a_half_closed_tunnel_is_released_after_the_drain_timeout() {
+        let silent = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let silent_address = silent.local_addr().unwrap();
+        let client_side = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client_address = client_side.local_addr().unwrap();
+
+        let mut client = TcpStream::connect(client_address).await.unwrap();
+        let (inbound, _) = client_side.accept().await.unwrap();
+        let outbound = TcpStream::connect(silent_address).await.unwrap();
+        // The target accepts and then never reads, writes or closes.
+        let (_held_open, _) = silent.accept().await.unwrap();
+
+        let drain = Duration::from_millis(200);
+        let started = std::time::Instant::now();
+        let tunnel = tokio::spawn(pipe(inbound, outbound, drain));
+        client.shutdown().await.unwrap();
+        tokio::time::timeout(Duration::from_secs(10), tunnel)
+            .await
+            .expect("the tunnel ends once the drain timeout has passed")
+            .unwrap();
+        assert!(started.elapsed() >= drain, "it waited for the drain first");
+    }
+
+    #[tokio::test]
+    async fn dial_reports_a_refused_target_and_reaches_a_live_one() {
+        let dead = {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            listener.local_addr().unwrap().to_string()
+        };
+        assert!(dial(&dead).await.is_err());
+        let (target, task) = spawn_target().await;
+        assert!(dial(&target).await.is_ok());
+        task.abort();
     }
 
     #[tokio::test]

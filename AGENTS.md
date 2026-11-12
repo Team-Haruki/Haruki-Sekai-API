@@ -209,7 +209,16 @@ See `docs/failover.md` for the three roles and their config. Rules:
   load: the same account logged in on two nodes displaces the other's session. Its
   sessions log in on first use, which happens only when its router cannot hand the call
   to the master (`upstreams` entry with a priority below `local_priority`)
-- An empty pushed set and a set with an invalid account are refused whole
+- An empty pushed set and a set with an invalid account are refused whole. The one
+  exception is `clear: true`, which the master sends only when its account directory
+  exists and holds no account file at all; the standby then drops its stored set. A
+  missing directory or unusable files never clear a standby
+- The standby loads a pushed set before acknowledging it (`import_accounts` reloads); do
+  not rely on the account watcher for that. Pushes use a client that refuses redirects
+- A session records the egress epoch of its last login (`mark_logged_in(epoch)`);
+  `needs_login_on` is true when that is not the current epoch, which covers a login that
+  was still in flight when the region switched
+- `/health` also lists an enabled region whose client failed to initialise (0 sessions)
 
 ### Multi-Node Topology
 - `backend.internal_token` gates all `/internal/*` node-to-node endpoints
