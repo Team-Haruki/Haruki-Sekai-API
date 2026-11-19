@@ -672,10 +672,9 @@ impl MasterUpdater {
         remote_app: Option<&AppIdentity>,
         notify_peers: bool,
     ) -> Result<(), AppError> {
-        let adopted = match remote_app.filter(|app| app.is_known()) {
-            Some(app) => self.adopt_app_identity(app).await?,
-            None => false,
-        };
+        if let Some(app) = remote_app.filter(|app| app.is_known()) {
+            self.adopt_app_identity(app).await?;
+        }
         let new_version = VersionInfo {
             app_version: current.app_version,
             app_hash: current.app_hash,
@@ -684,15 +683,10 @@ impl MasterUpdater {
             asset_hash: login.asset_hash.clone(),
             cdn_version: login.cdn_version,
         };
-        let merged = self.save_version(&new_version).await?;
-        let data_version = merged.data_version.clone();
-        if adopted {
-            // A new app identity must reach the login headers, not only the
-            // file (the same reload `/internal/app-identity` does).
-            self.client.apply_version(merged);
-        } else {
-            self.client.version_helper.update(merged);
-        }
+        let data_version = self
+            .save_and_apply_version(&new_version)
+            .await?
+            .data_version;
         self.push_master_changes(&data_version).await;
         if notify_peers {
             self.notify_sync_peers(&data_version).await;
@@ -1241,19 +1235,23 @@ treating difference as an update",
     /// app-identity webhook, and our in-memory copy may be minutes stale (snapshotted
     /// before a long download), so overwriting them here would revert a
     /// concurrent app-hash update. Returns the merged state as written.
-    async fn save_version(
+    async fn save_and_apply_version(
         &self,
         version: &VersionInfo,
     ) -> Result<VersionInfo, crate::error::AppError> {
         // Serialize with the app-identity webhook so neither clobbers the other's fields.
         let _guard = self.version_lock.lock().await;
-        persist_version_file(
+        let merged = persist_version_file(
             self.region,
             self.client.config.pin_app_version_patch_to_zero,
             &self.client.config.version_path,
             version,
         )
-        .await
+        .await?;
+        // Serving requests need the published data and asset headers even when
+        // the app identity is unchanged. Apply while the version lock is held.
+        self.client.apply_version(merged.clone());
+        Ok(merged)
     }
 
     /// Webhook peer nodes that pull this region's master data from us, so they
@@ -1746,7 +1744,10 @@ mod tests {
     async fn persists_versions_and_master_files_atomically() {
         let root = temp_dir();
         let updater = make_updater(ServerRegion::Jp, "http://127.0.0.1:1", &root, Vec::new()).await;
-        let merged = updater.save_version(&version_info()).await.unwrap();
+        let merged = updater
+            .save_and_apply_version(&version_info())
+            .await
+            .unwrap();
         assert_eq!(merged.data_version, "6.0.0.48");
         assert!(root.join("6.0.0.48.json").exists());
 
@@ -1797,6 +1798,7 @@ mod tests {
     async fn computes_required_updates_and_publishes_version() {
         let root = temp_dir();
         let updater = make_updater(ServerRegion::Jp, "http://127.0.0.1:1", &root, Vec::new()).await;
+        updater.client.refresh_version().await.unwrap();
         let mut login = login_response();
         login.data_version = "6.0.0.49".to_string();
         login.asset_version = "broken".to_string();
@@ -1812,6 +1814,11 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(updater.client.version_helper.get().data_version, "6.0.0.49");
+        {
+            let headers = updater.client.headers.lock();
+            assert_eq!(headers["X-Data-Version"], login.data_version);
+            assert_eq!(headers["X-Asset-Version"], login.asset_version);
+        }
         updater.push_master_changes("6.0.0.49").await;
         updater.notify_sync_peers("6.0.0.49").await;
         updater.call_all_asset_updaters("asset", "hash", "").await;
